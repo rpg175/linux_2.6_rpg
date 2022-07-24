@@ -6,12 +6,13 @@
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/init.h>
 
-#include <mach/hardware.h>
+#include <asm/hardware.h>
 #include <asm/mach-types.h>
-#include <mach/shannon.h>
+#include <asm/arch/shannon.h>
 #include <asm/irq.h>
 #include "sa1100_generic.h"
 
@@ -20,7 +21,7 @@ static struct pcmcia_irqs irqs[] = {
 	{ 1, SHANNON_IRQ_GPIO_EJECT_1, "PCMCIA_CD_1" },
 };
 
-static int shannon_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
+static int shannon_pcmcia_hw_init(struct sa1100_pcmcia_socket *skt)
 {
 	/* All those are inputs */
 	GPDR &= ~(SHANNON_GPIO_EJECT_0 | SHANNON_GPIO_EJECT_1 | 
@@ -28,18 +29,18 @@ static int shannon_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 	GAFR &= ~(SHANNON_GPIO_EJECT_0 | SHANNON_GPIO_EJECT_1 | 
 		  SHANNON_GPIO_RDY_0 | SHANNON_GPIO_RDY_1);
 
-	skt->socket.pci_irq = skt->nr ? SHANNON_IRQ_GPIO_RDY_1 : SHANNON_IRQ_GPIO_RDY_0;
+	skt->irq = skt->nr ? SHANNON_IRQ_GPIO_RDY_1 : SHANNON_IRQ_GPIO_RDY_0;
 
-	return soc_pcmcia_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	return sa11xx_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
-static void shannon_pcmcia_hw_shutdown(struct soc_pcmcia_socket *skt)
+static void shannon_pcmcia_hw_shutdown(struct sa1100_pcmcia_socket *skt)
 {
-	soc_pcmcia_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	sa11xx_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
 static void
-shannon_pcmcia_socket_state(struct soc_pcmcia_socket *skt,
+shannon_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt,
 			    struct pcmcia_state *state)
 {
 	unsigned long levels = GPLR;
@@ -68,38 +69,38 @@ shannon_pcmcia_socket_state(struct soc_pcmcia_socket *skt,
 }
 
 static int
-shannon_pcmcia_configure_socket(struct soc_pcmcia_socket *skt,
+shannon_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt,
 				const socket_state_t *state)
 {
 	switch (state->Vcc) {
 	case 0:	/* power off */
-		printk(KERN_WARNING "%s(): CS asked for 0V, still applying 3.3V..\n", __func__);
+		printk(KERN_WARNING __FUNCTION__"(): CS asked for 0V, still applying 3.3V..\n");
 		break;
 	case 50:
-		printk(KERN_WARNING "%s(): CS asked for 5V, applying 3.3V..\n", __func__);
+		printk(KERN_WARNING __FUNCTION__"(): CS asked for 5V, applying 3.3V..\n");
 	case 33:
 		break;
 	default:
-		printk(KERN_ERR "%s(): unrecognized Vcc %u\n",
-		       __func__, state->Vcc);
+		printk(KERN_ERR __FUNCTION__"(): unrecognized Vcc %u\n",
+		       state->Vcc);
 		return -1;
 	}
 
-	printk(KERN_WARNING "%s(): Warning, Can't perform reset\n", __func__);
+	printk(KERN_WARNING __FUNCTION__"(): Warning, Can't perform reset\n");
 	
 	/* Silently ignore Vpp, output enable, speaker enable. */
 
 	return 0;
 }
 
-static void shannon_pcmcia_socket_init(struct soc_pcmcia_socket *skt)
+static void shannon_pcmcia_socket_init(struct sa1100_pcmcia_socket *skt)
 {
-	soc_pcmcia_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	sa11xx_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
-static void shannon_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
+static void shannon_pcmcia_socket_suspend(struct sa1100_pcmcia_socket *skt)
 {
-	soc_pcmcia_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+	sa11xx_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
 static struct pcmcia_low_level shannon_pcmcia_ops = {
@@ -113,7 +114,7 @@ static struct pcmcia_low_level shannon_pcmcia_ops = {
 	.socket_suspend		= shannon_pcmcia_socket_suspend,
 };
 
-int __devinit pcmcia_shannon_init(struct device *dev)
+int __init pcmcia_shannon_init(struct device *dev)
 {
 	int ret = -ENODEV;
 

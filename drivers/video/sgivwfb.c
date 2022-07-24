@@ -9,6 +9,7 @@
  *  more details.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -17,14 +18,11 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/platform_device.h>
-
 #include <asm/io.h>
 #include <asm/mtrr.h>
-#include <asm/visws/sgivw.h>
 
 #define INCLUDE_TIMING_TABLE_DATA
-#define DBE_REG_BASE par->regs
+#define DBE_REG_BASE default_par.regs
 #include <video/sgivw.h>
 
 struct sgivw_par {
@@ -42,12 +40,19 @@ struct sgivw_par {
  *  The default can be overridden if the driver is compiled as a module
  */
 
+/* set by arch/i386/kernel/setup.c */
+extern unsigned long sgivwfb_mem_phys;
+extern unsigned long sgivwfb_mem_size;
+
+static struct sgivw_par default_par;
+static u32 pseudo_palette[17];
+static struct fb_info fb_info;
 static int ypan = 0;
 static int ywrap = 0;
 
 static int flatpanel_id = -1;
 
-static struct fb_fix_screeninfo sgivwfb_fix __devinitdata = {
+static struct fb_fix_screeninfo sgivwfb_fix __initdata = {
 	.id		= "SGI Vis WS FB",
 	.type		= FB_TYPE_PACKED_PIXELS,
         .visual		= FB_VISUAL_PSEUDOCOLOR,
@@ -57,7 +62,7 @@ static struct fb_fix_screeninfo sgivwfb_fix __devinitdata = {
 	.line_length	= 640,
 };
 
-static struct fb_var_screeninfo sgivwfb_var __devinitdata = {
+static struct fb_var_screeninfo sgivwfb_var __initdata = {
 	/* 640x480, 8 bpp */
 	.xres		= 640,
 	.yres		= 480,
@@ -79,7 +84,7 @@ static struct fb_var_screeninfo sgivwfb_var __devinitdata = {
 	.vmode		= FB_VMODE_NONINTERLACED
 };
 
-static struct fb_var_screeninfo sgivwfb_var1600sw __devinitdata = {
+static struct fb_var_screeninfo sgivwfb_var1600sw __initdata = {
 	/* 1600x1024, 8 bpp */
 	.xres		= 1600,
 	.yres		= 1024,
@@ -111,7 +116,7 @@ static int sgivwfb_set_par(struct fb_info *info);
 static int sgivwfb_setcolreg(u_int regno, u_int red, u_int green,
 			     u_int blue, u_int transp,
 			     struct fb_info *info);
-static int sgivwfb_mmap(struct fb_info *info,
+static int sgivwfb_mmap(struct fb_info *info, struct file *file,
 			struct vm_area_struct *vma);
 
 static struct fb_ops sgivwfb_ops = {
@@ -122,6 +127,7 @@ static struct fb_ops sgivwfb_ops = {
 	.fb_fillrect	= cfb_fillrect,
 	.fb_copyarea	= cfb_copyarea,
 	.fb_imageblit	= cfb_imageblit,
+	.fb_cursor	= soft_cursor,
 	.fb_mmap	= sgivwfb_mmap,
 };
 
@@ -156,7 +162,7 @@ static unsigned long get_line_length(int xres_virtual, int bpp)
  *              console.
  */
 
-static void dbe_TurnOffDma(struct sgivw_par *par)
+static void dbe_TurnOffDma(void)
 {
 	unsigned int readVal;
 	int i;
@@ -260,13 +266,13 @@ static int sgivwfb_check_var(struct fb_var_screeninfo *var,
 	var->grayscale = 0;	/* No grayscale for now */
 
 	/* determine valid resolution and timing */
-	for (min_mode = 0; min_mode < ARRAY_SIZE(dbeVTimings); min_mode++) {
+	for (min_mode = 0; min_mode < DBE_VT_SIZE; min_mode++) {
 		if (dbeVTimings[min_mode].width >= var->xres &&
 		    dbeVTimings[min_mode].height >= var->yres)
 			break;
 	}
 
-	if (min_mode == ARRAY_SIZE(dbeVTimings))
+	if (min_mode == DBE_VT_SIZE)
 		return -EINVAL;	/* Resolution to high */
 
 	/* XXX FIXME - should try to pick best refresh rate */
@@ -361,7 +367,7 @@ static int sgivwfb_check_var(struct fb_var_screeninfo *var,
 /*
  *  Setup flatpanel related registers.
  */
-static void sgivwfb_setup_flatpanel(struct sgivw_par *par, struct dbe_timing_info *currentTiming)
+static void sgivwfb_setup_flatpanel(struct dbe_timing_info *currentTiming)
 {
 	int fp_wid, fp_hgt, fp_vbs, fp_vbe;
 	u32 outputVal = 0;
@@ -423,7 +429,7 @@ static int sgivwfb_set_par(struct fb_info *info)
 	/* Turn on dotclock PLL */
 	DBE_SETREG(ctrlstat, 0x20000000);
 
-	dbe_TurnOffDma(par);
+	dbe_TurnOffDma();
 
 	/* dbe_CalculateScreenParams(); */
 	maxPixelsPerTileX = 512 / bytesPerPixel;
@@ -447,7 +453,7 @@ static int sgivwfb_set_par(struct fb_info *info)
 		DBE_SETREG(vt_xy, 0x00000000);
 		udelay(1);
 	} else
-		dbe_TurnOffDma(par);
+		dbe_TurnOffDma();
 
 	/* dbe_Initdbe(); */
 	for (i = 0; i < 256; i++) {
@@ -561,7 +567,7 @@ static int sgivwfb_set_par(struct fb_info *info)
 	DBE_SETREG(vt_hcmap, outputVal);
 
 	if (flatpanel_id != -1)
-		sgivwfb_setup_flatpanel(par, currentTiming);
+		sgivwfb_setup_flatpanel(currentTiming);
 
 	outputVal = 0;
 	temp = currentTiming->vblank_start - currentTiming->vblank_end - 1;
@@ -702,7 +708,7 @@ static int sgivwfb_setcolreg(u_int regno, u_int red, u_int green,
 	return 0;
 }
 
-static int sgivwfb_mmap(struct fb_info *info,
+static int sgivwfb_mmap(struct fb_info *info, struct file *file,
 			struct vm_area_struct *vma)
 {
 	unsigned long size = vma->vm_end - vma->vm_start;
@@ -716,9 +722,10 @@ static int sgivwfb_mmap(struct fb_info *info,
 	pgprot_val(vma->vm_page_prot) =
 	    pgprot_val(vma->vm_page_prot) | _PAGE_PCD;
 	vma->vm_flags |= VM_IO;
-	if (remap_pfn_range(vma, vma->vm_start, offset >> PAGE_SHIFT,
-						size, vma->vm_page_prot))
+	if (remap_page_range
+	    (vma, vma->vm_start, offset, size, vma->vm_page_prot))
 		return -EAGAIN;
+	vma->vm_file = file;
 	printk(KERN_DEBUG "sgivwfb: mmap framebuffer P(%lx)->V(%lx)\n",
 	       offset, vma->vm_start);
 	return 0;
@@ -745,25 +752,16 @@ int __init sgivwfb_setup(char *options)
 /*
  *  Initialisation
  */
-static int __devinit sgivwfb_probe(struct platform_device *dev)
+int __init sgivwfb_init(void)
 {
-	struct sgivw_par *par;
-	struct fb_info *info;
 	char *monitor;
-
-	info = framebuffer_alloc(sizeof(struct sgivw_par) + sizeof(u32) * 16, &dev->dev);
-	if (!info)
-		return -ENOMEM;
-	par = info->par;
 
 	if (!request_mem_region(DBE_REG_PHYS, DBE_REG_SIZE, "sgivwfb")) {
 		printk(KERN_ERR "sgivwfb: couldn't reserve mmio region\n");
-		framebuffer_release(info);
 		return -EBUSY;
 	}
-
-	par->regs = (struct asregs *) ioremap_nocache(DBE_REG_PHYS, DBE_REG_SIZE);
-	if (!par->regs) {
+	default_par.regs = (struct asregs *) ioremap_nocache(DBE_REG_PHYS, DBE_REG_SIZE);
+	if (!default_par.regs) {
 		printk(KERN_ERR "sgivwfb: couldn't ioremap registers\n");
 		goto fail_ioremap_regs;
 	}
@@ -775,121 +773,66 @@ static int __devinit sgivwfb_probe(struct platform_device *dev)
 	sgivwfb_fix.ywrapstep = ywrap;
 	sgivwfb_fix.ypanstep = ypan;
 
-	info->fix = sgivwfb_fix;
+	fb_info.fix = sgivwfb_fix;
 
 	switch (flatpanel_id) {
 		case FLATPANEL_SGI_1600SW:
-			info->var = sgivwfb_var1600sw;
+			fb_info.var = sgivwfb_var1600sw;
 			monitor = "SGI 1600SW flatpanel";
 			break;
 		default:
-			info->var = sgivwfb_var;
+			fb_info.var = sgivwfb_var;
 			monitor = "CRT";
 	}
 
 	printk(KERN_INFO "sgivwfb: %s monitor selected\n", monitor);
 
-	info->fbops = &sgivwfb_ops;
-	info->pseudo_palette = (void *) (par + 1);
-	info->flags = FBINFO_DEFAULT;
+	fb_info.fbops = &sgivwfb_ops;
+	fb_info.pseudo_palette = pseudo_palette;
+	fb_info.par = &default_par;
+	fb_info.flags = FBINFO_FLAG_DEFAULT;
 
-	info->screen_base = ioremap_nocache((unsigned long) sgivwfb_mem_phys, sgivwfb_mem_size);
-	if (!info->screen_base) {
+	fb_info.screen_base = ioremap_nocache((unsigned long) sgivwfb_mem_phys, sgivwfb_mem_size);
+	if (!fb_info.screen_base) {
 		printk(KERN_ERR "sgivwfb: couldn't ioremap screen_base\n");
 		goto fail_ioremap_fbmem;
 	}
 
-	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0)
-		goto fail_color_map;
+	fb_alloc_cmap(&fb_info.cmap, 256, 0);
 
-	if (register_framebuffer(info) < 0) {
+	if (register_framebuffer(&fb_info) < 0) {
 		printk(KERN_ERR "sgivwfb: couldn't register framebuffer\n");
 		goto fail_register_framebuffer;
 	}
 
-	platform_set_drvdata(dev, info);
-
 	printk(KERN_INFO "fb%d: SGI DBE frame buffer device, using %ldK of video memory at %#lx\n",      
-		info->node, sgivwfb_mem_size >> 10, sgivwfb_mem_phys);
+		fb_info.node, sgivwfb_mem_size >> 10, sgivwfb_mem_phys);
 	return 0;
 
 fail_register_framebuffer:
-	fb_dealloc_cmap(&info->cmap);
-fail_color_map:
-	iounmap((char *) info->screen_base);
+	iounmap((char *) fb_info.screen_base);
 fail_ioremap_fbmem:
-	iounmap(par->regs);
+	iounmap(default_par.regs);
 fail_ioremap_regs:
 	release_mem_region(DBE_REG_PHYS, DBE_REG_SIZE);
-	framebuffer_release(info);
 	return -ENXIO;
 }
-
-static int __devexit sgivwfb_remove(struct platform_device *dev)
-{
-	struct fb_info *info = platform_get_drvdata(dev);
-
-	if (info) {
-		struct sgivw_par *par = info->par;
-
-		unregister_framebuffer(info);
-		dbe_TurnOffDma(par);
-		iounmap(par->regs);
-		iounmap(info->screen_base);
-		release_mem_region(DBE_REG_PHYS, DBE_REG_SIZE);
-		fb_dealloc_cmap(&info->cmap);
-		framebuffer_release(info);
-	}
-	return 0;
-}
-
-static struct platform_driver sgivwfb_driver = {
-	.probe	= sgivwfb_probe,
-	.remove	= __devexit_p(sgivwfb_remove),
-	.driver	= {
-		.name	= "sgivwfb",
-	},
-};
-
-static struct platform_device *sgivwfb_device;
-
-int __init sgivwfb_init(void)
-{
-	int ret;
-
-#ifndef MODULE
-	char *option = NULL;
-
-	if (fb_get_options("sgivwfb", &option))
-		return -ENODEV;
-	sgivwfb_setup(option);
-#endif
-	ret = platform_driver_register(&sgivwfb_driver);
-	if (!ret) {
-		sgivwfb_device = platform_device_alloc("sgivwfb", 0);
-		if (sgivwfb_device) {
-			ret = platform_device_add(sgivwfb_device);
-		} else
-			ret = -ENOMEM;
-		if (ret) {
-			platform_driver_unregister(&sgivwfb_driver);
-			platform_device_put(sgivwfb_device);
-		}
-	}
-	return ret;
-}
-
-module_init(sgivwfb_init);
 
 #ifdef MODULE
 MODULE_LICENSE("GPL");
 
-static void __exit sgivwfb_exit(void)
+int init_module(void)
 {
-	platform_device_unregister(sgivwfb_device);
-	platform_driver_unregister(&sgivwfb_driver);
+	return sgivwfb_init();
 }
 
-module_exit(sgivwfb_exit);
+void cleanup_module(void)
+{
+	unregister_framebuffer(&fb_info);
+	dbe_TurnOffDma();
+	iounmap(regs);
+	iounmap(&fb_info.screen_base);
+	release_mem_region(DBE_REG_PHYS, DBE_REG_SIZE);
+}
 
 #endif				/* MODULE */

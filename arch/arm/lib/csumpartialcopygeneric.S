@@ -22,8 +22,8 @@ dst	.req	r1
 len	.req	r2
 sum	.req	r3
 
-.Lzero:		mov	r0, sum
-		load_regs
+.zero:		mov	r0, sum
+		load_regs	ea
 
 		/*
 		 * Align an unaligned destination pointer.  We know that
@@ -31,22 +31,21 @@ sum	.req	r3
 		 * the length.  Note that the source pointer hasn't been
 		 * aligned yet.
 		 */
-.Ldst_unaligned:
-		tst	dst, #1
-		beq	.Ldst_16bit
+.dst_unaligned:	tst	dst, #1
+		beq	.dst_16bit
 
 		load1b	ip
 		sub	len, len, #1
-		adcs	sum, sum, ip, put_byte_1	@ update checksum
+		adcs	sum, sum, ip, lsl #byte(1)	@ update checksum
 		strb	ip, [dst], #1
 		tst	dst, #2
 		moveq	pc, lr			@ dst is now 32bit aligned
 
-.Ldst_16bit:	load2b	r8, ip
+.dst_16bit:	load2b	r8, ip
 		sub	len, len, #2
-		adcs	sum, sum, r8, put_byte_0
+		adcs	sum, sum, r8, lsl #byte(0)
 		strb	r8, [dst], #1
-		adcs	sum, sum, ip, put_byte_1
+		adcs	sum, sum, ip, lsl #byte(1)
 		strb	ip, [dst], #1
 		mov	pc, lr			@ dst is now 32bit aligned
 
@@ -54,47 +53,48 @@ sum	.req	r3
 		 * Handle 0 to 7 bytes, with any alignment of source and
 		 * destination pointers.  Note that when we get here, C = 0
 		 */
-.Lless8:	teq	len, #0			@ check for zero count
-		beq	.Lzero
+.less8:		teq	len, #0			@ check for zero count
+		beq	.zero
 
 		/* we must have at least one byte. */
 		tst	dst, #1			@ dst 16-bit aligned
-		beq	.Lless8_aligned
+		beq	.less8_aligned
 
 		/* Align dst */
 		load1b	ip
 		sub	len, len, #1
-		adcs	sum, sum, ip, put_byte_1	@ update checksum
+		adcs	sum, sum, ip, lsl #byte(1)	@ update checksum
 		strb	ip, [dst], #1
 		tst	len, #6
-		beq	.Lless8_byteonly
+		beq	.less8_byteonly
 
 1:		load2b	r8, ip
 		sub	len, len, #2
-		adcs	sum, sum, r8, put_byte_0
+		adcs	sum, sum, r8, lsl #byte(0)
 		strb	r8, [dst], #1
-		adcs	sum, sum, ip, put_byte_1
+		adcs	sum, sum, ip, lsl #byte(1)
 		strb	ip, [dst], #1
-.Lless8_aligned:
-		tst	len, #6
+.less8_aligned:	tst	len, #6
 		bne	1b
-.Lless8_byteonly:
+.less8_byteonly:
 		tst	len, #1
-		beq	.Ldone
+		beq	.done
 		load1b	r8
-		adcs	sum, sum, r8, put_byte_0	@ update checksum
+		adcs	sum, sum, r8, lsl #byte(0)	@ update checksum
 		strb	r8, [dst], #1
-		b	.Ldone
+		b	.done
 
 FN_ENTRY
+		mov	ip, sp
 		save_regs
+		sub	fp, ip, #4
 
 		cmp	len, #8			@ Ensure that we have at least
-		blo	.Lless8			@ 8 bytes to copy.
+		blo	.less8			@ 8 bytes to copy.
 
 		adds	sum, sum, #0		@ C = 0
 		tst	dst, #3			@ Test destination alignment
-		blne	.Ldst_unaligned		@ align destination, return here
+		blne	.dst_unaligned		@ align destination, return here
 
 		/*
 		 * Ok, the dst pointer is now 32bit aligned, and we know
@@ -103,7 +103,7 @@ FN_ENTRY
 		 */
 
 		tst	src, #3			@ Test source alignment
-		bne	.Lsrc_not_aligned
+		bne	.src_not_aligned
 
 		/* Routine for src & dst aligned */
 
@@ -136,20 +136,20 @@ FN_ENTRY
 		adcs	sum, sum, r4
 
 4:		ands	len, len, #3
-		beq	.Ldone
+		beq	.done
 		load1l	r4
 		tst	len, #2
-		mov	r5, r4, get_byte_0
-		beq	.Lexit
+		mov	r5, r4, lsr #byte(0)
+		beq	.exit
 		adcs	sum, sum, r4, push #16
 		strb	r5, [dst], #1
-		mov	r5, r4, get_byte_1
+		mov	r5, r4, lsr #byte(1)
 		strb	r5, [dst], #1
-		mov	r5, r4, get_byte_2
-.Lexit:		tst	len, #1
+		mov	r5, r4, lsr #byte(2)
+.exit:		tst	len, #1
 		strneb	r5, [dst], #1
 		andne	r5, r5, #255
-		adcnes	sum, sum, r5, put_byte_0
+		adcnes	sum, sum, r5, lsl #byte(0)
 
 		/*
 		 * If the dst pointer was not 16-bit aligned, we
@@ -157,20 +157,21 @@ FN_ENTRY
 		 * the inefficient byte manipulations in the
 		 * architecture independent code.
 		 */
-.Ldone:		adc	r0, sum, #0
+.done:		adc	r0, sum, #0
 		ldr	sum, [sp, #0]		@ dst
 		tst	sum, #1
-		movne	r0, r0, ror #8
-		load_regs
+		movne	sum, r0, lsl #8
+		orrne	r0, sum, r0, lsr #24
+		load_regs	ea
 
-.Lsrc_not_aligned:
+.src_not_aligned:
 		adc	sum, sum, #0		@ include C from dst alignment
 		and	ip, src, #3
 		bic	src, src, #3
 		load1l	r5
 		cmp	ip, #2
-		beq	.Lsrc2_aligned
-		bhi	.Lsrc3_aligned
+		beq	.src2_aligned
+		bhi	.src3_aligned
 		mov	r4, r5, pull #8		@ C = 0
 		bics	ip, len, #15
 		beq	2f
@@ -211,18 +212,18 @@ FN_ENTRY
 		adcs	sum, sum, r4
 		mov	r4, r5, pull #8
 4:		ands	len, len, #3
-		beq	.Ldone
-		mov	r5, r4, get_byte_0
+		beq	.done
+		mov	r5, r4, lsr #byte(0)
 		tst	len, #2
-		beq	.Lexit
+		beq	.exit
 		adcs	sum, sum, r4, push #16
 		strb	r5, [dst], #1
-		mov	r5, r4, get_byte_1
+		mov	r5, r4, lsr #byte(1)
 		strb	r5, [dst], #1
-		mov	r5, r4, get_byte_2
-		b	.Lexit
+		mov	r5, r4, lsr #byte(2)
+		b	.exit
 
-.Lsrc2_aligned:	mov	r4, r5, pull #16
+.src2_aligned:	mov	r4, r5, pull #16
 		adds	sum, sum, #0
 		bics	ip, len, #15
 		beq	2f
@@ -263,20 +264,20 @@ FN_ENTRY
 		adcs	sum, sum, r4
 		mov	r4, r5, pull #16
 4:		ands	len, len, #3
-		beq	.Ldone
-		mov	r5, r4, get_byte_0
+		beq	.done
+		mov	r5, r4, lsr #byte(0)
 		tst	len, #2
-		beq	.Lexit
+		beq	.exit
 		adcs	sum, sum, r4
 		strb	r5, [dst], #1
-		mov	r5, r4, get_byte_1
+		mov	r5, r4, lsr #byte(1)
 		strb	r5, [dst], #1
 		tst	len, #1
-		beq	.Ldone
+		beq	.done
 		load1b	r5
-		b	.Lexit
+		b	.exit
 
-.Lsrc3_aligned:	mov	r4, r5, pull #24
+.src3_aligned:	mov	r4, r5, pull #24
 		adds	sum, sum, #0
 		bics	ip, len, #15
 		beq	2f
@@ -317,16 +318,15 @@ FN_ENTRY
 		adcs	sum, sum, r4
 		mov	r4, r5, pull #24
 4:		ands	len, len, #3
-		beq	.Ldone
-		mov	r5, r4, get_byte_0
+		beq	.done
+		mov	r5, r4, lsr #byte(0)
 		tst	len, #2
-		beq	.Lexit
+		beq	.exit
 		strb	r5, [dst], #1
 		adcs	sum, sum, r4
 		load1l	r4
-		mov	r5, r4, get_byte_0
+		mov	r5, r4, lsr #byte(0)
 		strb	r5, [dst], #1
 		adcs	sum, sum, r4, push #24
-		mov	r5, r4, get_byte_1
-		b	.Lexit
-FN_EXIT
+		mov	r5, r4, lsr #byte(1)
+		b	.exit

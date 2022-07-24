@@ -20,12 +20,11 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <sound/driver.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
-#include <linux/device.h>
-#include <linux/firmware.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/asoundef.h>
@@ -40,6 +39,20 @@ MODULE_LICENSE("GPL");
 
 
 /*
+ * snd_vx_delay - delay for the specified time
+ * @xmsec: the time to delay in msec
+ */
+void snd_vx_delay(vx_core_t *chip, int xmsec)
+{
+	if (! in_interrupt() && xmsec >= 1000 / HZ) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout((xmsec * HZ + 999) / 1000);
+	} else {
+		mdelay(xmsec);
+	}
+}
+
+/*
  * vx_check_reg_bit - wait for the specified bit is set/reset on a register
  * @reg: register to check
  * @mask: bit mask
@@ -48,7 +61,7 @@ MODULE_LICENSE("GPL");
  *
  * returns zero if a bit matches, or a negative error code.
  */
-int snd_vx_check_reg_bit(struct vx_core *chip, int reg, int mask, int bit, int time)
+int snd_vx_check_reg_bit(vx_core_t *chip, int reg, int mask, int bit, int time)
 {
 	unsigned long end_time = jiffies + (time * HZ + 999) / 1000;
 #ifdef CONFIG_SND_DEBUG
@@ -63,13 +76,11 @@ int snd_vx_check_reg_bit(struct vx_core *chip, int reg, int mask, int bit, int t
 	do {
 		if ((snd_vx_inb(chip, reg) & mask) == bit)
 			return 0;
-		//msleep(10);
+		//snd_vx_delay(chip, 10);
 	} while (time_after_eq(end_time, jiffies));
 	snd_printd(KERN_DEBUG "vx_check_reg_bit: timeout, reg=%s, mask=0x%x, val=0x%x\n", reg_names[reg], mask, snd_vx_inb(chip, reg));
 	return -EIO;
 }
-
-EXPORT_SYMBOL(snd_vx_check_reg_bit);
 
 /*
  * vx_send_irq_dsp - set command irq bit
@@ -79,7 +90,7 @@ EXPORT_SYMBOL(snd_vx_check_reg_bit);
  * returns 0 if successful, or a negative error code.
  * 
  */
-static int vx_send_irq_dsp(struct vx_core *chip, int num)
+static int vx_send_irq_dsp(vx_core_t *chip, int num)
 {
 	int nirq;
 
@@ -100,7 +111,7 @@ static int vx_send_irq_dsp(struct vx_core *chip, int num)
  *
  * returns 0 if successful, or a negative error code.
  */
-static int vx_reset_chk(struct vx_core *chip)
+static int vx_reset_chk(vx_core_t *chip)
 {
 	/* Reset irq CHK */
 	if (vx_send_irq_dsp(chip, IRQ_RESET_CHK) < 0)
@@ -119,7 +130,7 @@ static int vx_reset_chk(struct vx_core *chip)
  * the error code can be VX-specific, retrieved via vx_get_error().
  * NB: call with spinlock held!
  */
-static int vx_transfer_end(struct vx_core *chip, int cmd)
+static int vx_transfer_end(vx_core_t *chip, int cmd)
 {
 	int err;
 
@@ -157,7 +168,7 @@ static int vx_transfer_end(struct vx_core *chip, int cmd)
  * the error code can be VX-specific, retrieved via vx_get_error().
  * NB: call with spinlock held!
  */
-static int vx_read_status(struct vx_core *chip, struct vx_rmh *rmh)
+static int vx_read_status(vx_core_t *chip, struct vx_rmh *rmh)
 {
 	int i, err, val, size;
 
@@ -205,8 +216,7 @@ static int vx_read_status(struct vx_core *chip, struct vx_rmh *rmh)
 
 	if (size < 1)
 		return 0;
-	if (snd_BUG_ON(size > SIZE_MAX_STATUS))
-		return -EINVAL;
+	snd_assert(size <= SIZE_MAX_STATUS, return -EINVAL);
 
 	for (i = 1; i <= size; i++) {
 		/* trigger an irq MESS_WRITE_NEXT */
@@ -238,7 +248,7 @@ static int vx_read_status(struct vx_core *chip, struct vx_rmh *rmh)
  * 
  * this function doesn't call spinlock at all.
  */
-int vx_send_msg_nolock(struct vx_core *chip, struct vx_rmh *rmh)
+int vx_send_msg_nolock(vx_core_t *chip, struct vx_rmh *rmh)
 {
 	int i, err;
 	
@@ -343,14 +353,13 @@ int vx_send_msg_nolock(struct vx_core *chip, struct vx_rmh *rmh)
  * returns 0 if successful, or a negative error code.
  * see vx_send_msg_nolock().
  */
-int vx_send_msg(struct vx_core *chip, struct vx_rmh *rmh)
+int vx_send_msg(vx_core_t *chip, struct vx_rmh *rmh)
 {
-	unsigned long flags;
 	int err;
 
-	spin_lock_irqsave(&chip->lock, flags);
+	spin_lock_bh(&chip->lock);
 	err = vx_send_msg_nolock(chip, rmh);
-	spin_unlock_irqrestore(&chip->lock, flags);
+	spin_unlock_bh(&chip->lock);
 	return err;
 }
 
@@ -366,7 +375,7 @@ int vx_send_msg(struct vx_core *chip, struct vx_rmh *rmh)
  *
  * unlike RMH, no command is sent to DSP.
  */
-int vx_send_rih_nolock(struct vx_core *chip, int cmd)
+int vx_send_rih_nolock(vx_core_t *chip, int cmd)
 {
 	int err;
 
@@ -403,14 +412,13 @@ int vx_send_rih_nolock(struct vx_core *chip, int cmd)
  *
  * see vx_send_rih_nolock().
  */
-int vx_send_rih(struct vx_core *chip, int cmd)
+int vx_send_rih(vx_core_t *chip, int cmd)
 {
-	unsigned long flags;
 	int err;
 
-	spin_lock_irqsave(&chip->lock, flags);
+	spin_lock_bh(&chip->lock);
 	err = vx_send_rih_nolock(chip, cmd);
-	spin_unlock_irqrestore(&chip->lock, flags);
+	spin_unlock_bh(&chip->lock);
 	return err;
 }
 
@@ -420,22 +428,20 @@ int vx_send_rih(struct vx_core *chip, int cmd)
  * snd_vx_boot_xilinx - boot up the xilinx interface
  * @boot: the boot record to load
  */
-int snd_vx_load_boot_image(struct vx_core *chip, const struct firmware *boot)
+int snd_vx_load_boot_image(vx_core_t *chip, const snd_hwdep_dsp_image_t *boot)
 {
 	unsigned int i;
 	int no_fillup = vx_has_new_dsp(chip);
 
 	/* check the length of boot image */
-	if (boot->size <= 0)
-		return -EINVAL;
-	if (boot->size % 3)
-		return -EINVAL;
+	snd_assert(boot->length > 0, return -EINVAL);
+	snd_assert(boot->length % 3 == 0, return -EINVAL);
+	snd_assert(boot->image, return -EINVAL);
 #if 0
 	{
 		/* more strict check */
-		unsigned int c = ((u32)boot->data[0] << 16) | ((u32)boot->data[1] << 8) | boot->data[2];
-		if (boot->size != (c + 2) * 3)
-			return -EINVAL;
+		unsigned int c = ((u32)boot->image[0] << 16) | ((u32)boot->image[1] << 8) | boot->image[2];
+		snd_assert(boot->length == (c + 2) * 3, return -EINVAL);
 	}
 #endif
 
@@ -446,7 +452,7 @@ int snd_vx_load_boot_image(struct vx_core *chip, const struct firmware *boot)
 
 	/* download boot strap */
 	for (i = 0; i < 0x600; i += 3) {
-		if (i >= boot->size) {
+		if (i >= boot->length) {
 			if (no_fillup)
 				break;
 			if (vx_wait_isr_bit(chip, ISR_TX_EMPTY) < 0) {
@@ -457,7 +463,9 @@ int snd_vx_load_boot_image(struct vx_core *chip, const struct firmware *boot)
 			vx_outb(chip, TXM, 0);
 			vx_outb(chip, TXL, 0);
 		} else {
-			const unsigned char *image = boot->data + i;
+			unsigned char image[3];
+			if (copy_from_user(image, boot->image + i, 3))
+				return -EFAULT;
 			if (vx_wait_isr_bit(chip, ISR_TX_EMPTY) < 0) {
 				snd_printk(KERN_ERR "dsp boot failed at %d\n", i);
 				return -EIO;
@@ -470,14 +478,12 @@ int snd_vx_load_boot_image(struct vx_core *chip, const struct firmware *boot)
 	return 0;
 }
 
-EXPORT_SYMBOL(snd_vx_load_boot_image);
-
 /*
  * vx_test_irq_src - query the source of interrupts
  *
  * called from irq handler only
  */
-static int vx_test_irq_src(struct vx_core *chip, unsigned int *ret)
+static int vx_test_irq_src(vx_core_t *chip, unsigned int *ret)
 {
 	int err;
 
@@ -498,7 +504,7 @@ static int vx_test_irq_src(struct vx_core *chip, unsigned int *ret)
  */
 static void vx_interrupt(unsigned long private_data)
 {
-	struct vx_core *chip = (struct vx_core *) private_data;
+	vx_core_t *chip = snd_magic_cast(vx_core_t, (void*)private_data, return);
 	unsigned int events;
 		
 	if (chip->chip_status & VX_STAT_IS_STALE)
@@ -540,33 +546,30 @@ static void vx_interrupt(unsigned long private_data)
 /**
  * snd_vx_irq_handler - interrupt handler
  */
-irqreturn_t snd_vx_irq_handler(int irq, void *dev)
+irqreturn_t snd_vx_irq_handler(int irq, void *dev, struct pt_regs *regs)
 {
-	struct vx_core *chip = dev;
+	vx_core_t *chip = snd_magic_cast(vx_core_t, dev, return IRQ_NONE);
 
 	if (! (chip->chip_status & VX_STAT_CHIP_INIT) ||
 	    (chip->chip_status & VX_STAT_IS_STALE))
 		return IRQ_NONE;
 	if (! vx_test_and_ack(chip))
-		tasklet_schedule(&chip->tq);
+		tasklet_hi_schedule(&chip->tq);
 	return IRQ_HANDLED;
 }
 
-EXPORT_SYMBOL(snd_vx_irq_handler);
 
 /*
  */
-static void vx_reset_board(struct vx_core *chip, int cold_reset)
+static void vx_reset_board(vx_core_t *chip, int cold_reset)
 {
-	if (snd_BUG_ON(!chip->ops->reset_board))
-		return;
+	snd_assert(chip->ops->reset_board, return);
 
 	/* current source, later sync'ed with target */
 	chip->audio_source = VX_AUDIO_SRC_LINE;
 	if (cold_reset) {
 		chip->audio_source_target = chip->audio_source;
 		chip->clock_source = INTERNAL_QUARTZ;
-		chip->clock_mode = VX_CLOCK_MODE_AUTO;
 		chip->freq = 48000;
 		chip->uer_detected = VX_UER_MODE_NOT_PRESENT;
 		chip->uer_bits = SNDRV_PCM_DEFAULT_CON_SPDIF;
@@ -596,20 +599,15 @@ static void vx_reset_board(struct vx_core *chip, int cold_reset)
  * proc interface
  */
 
-static void vx_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *buffer)
+static void vx_proc_read(snd_info_entry_t *entry, snd_info_buffer_t *buffer)
 {
-	struct vx_core *chip = entry->private_data;
+	vx_core_t *chip = snd_magic_cast(vx_core_t, entry->private_data, return);
 	static char *audio_src_vxp[] = { "Line", "Mic", "Digital" };
 	static char *audio_src_vx2[] = { "Analog", "Analog", "Digital" };
-	static char *clock_mode[] = { "Auto", "Internal", "External" };
 	static char *clock_src[] = { "Internal", "External" };
 	static char *uer_type[] = { "Consumer", "Professional", "Not Present" };
 	
 	snd_iprintf(buffer, "%s\n", chip->card->longname);
-	snd_iprintf(buffer, "Xilinx Firmware: %s\n",
-		    chip->chip_status & VX_STAT_XILINX_LOADED ? "Loaded" : "No");
-	snd_iprintf(buffer, "Device Initialized: %s\n",
-		    chip->chip_status & VX_STAT_DEVICE_INIT ? "Yes" : "No");
 	snd_iprintf(buffer, "DSP audio info:");
 	if (chip->audio_info & VX_AUDIO_INFO_REAL_TIME)
 		snd_iprintf(buffer, " realtime");
@@ -629,7 +627,6 @@ static void vx_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *b
 	snd_iprintf(buffer, "Input Source: %s\n", vx_is_pcmcia(chip) ?
 		    audio_src_vxp[chip->audio_source] :
 		    audio_src_vx2[chip->audio_source]);
-	snd_iprintf(buffer, "Clock Mode: %s\n", clock_mode[chip->clock_mode]);
 	snd_iprintf(buffer, "Clock Source: %s\n", clock_src[chip->clock_source]);
 	snd_iprintf(buffer, "Frequency: %d\n", chip->freq);
 	snd_iprintf(buffer, "Detected Frequency: %d\n", chip->freq_detected);
@@ -639,9 +636,9 @@ static void vx_proc_read(struct snd_info_entry *entry, struct snd_info_buffer *b
 		    chip->ibl.granularity);
 }
 
-static void vx_proc_init(struct vx_core *chip)
+static void vx_proc_init(vx_core_t *chip)
 {
-	struct snd_info_entry *entry;
+	snd_info_entry_t *entry;
 
 	if (! snd_card_proc_new(chip->card, "vx-status", &entry))
 		snd_info_set_text_ops(entry, chip, vx_proc_read);
@@ -651,7 +648,7 @@ static void vx_proc_init(struct vx_core *chip)
 /**
  * snd_vx_dsp_boot - load the DSP boot
  */
-int snd_vx_dsp_boot(struct vx_core *chip, const struct firmware *boot)
+int snd_vx_dsp_boot(vx_core_t *chip, const snd_hwdep_dsp_image_t *boot)
 {
 	int err;
 	int cold_reset = !(chip->chip_status & VX_STAT_DEVICE_INIT);
@@ -661,35 +658,32 @@ int snd_vx_dsp_boot(struct vx_core *chip, const struct firmware *boot)
 
 	if ((err = snd_vx_load_boot_image(chip, boot)) < 0)
 		return err;
-	msleep(10);
+	snd_vx_delay(chip, 10);
 
 	return 0;
 }
 
-EXPORT_SYMBOL(snd_vx_dsp_boot);
-
 /**
  * snd_vx_dsp_load - load the DSP image
  */
-int snd_vx_dsp_load(struct vx_core *chip, const struct firmware *dsp)
+int snd_vx_dsp_load(vx_core_t *chip, const snd_hwdep_dsp_image_t *dsp)
 {
 	unsigned int i;
 	int err;
 	unsigned int csum = 0;
-	const unsigned char *image, *cptr;
+	unsigned char image[3], *cptr;
 
-	if (dsp->size % 3)
-		return -EINVAL;
+	snd_assert(dsp->length % 3 == 0, return -EINVAL);
 
 	vx_toggle_dac_mute(chip, 1);
 
 	/* Transfert data buffer from PC to DSP */
-	for (i = 0; i < dsp->size; i += 3) {
-		image = dsp->data + i;
+	for (i = 0; i < dsp->length; i += 3) {
+		if (copy_from_user(image, dsp->image + i, 3))
+			return -EFAULT;
 		/* Wait DSP ready for a new read */
 		if ((err = vx_wait_isr_bit(chip, ISR_TX_EMPTY)) < 0) {
-			printk(KERN_ERR
-			       "dsp loading error at position %d\n", i);
+			printk("dsp loading error at position %d\n", i);
 			return err;
 		}
 		cptr = image;
@@ -705,7 +699,7 @@ int snd_vx_dsp_load(struct vx_core *chip, const struct firmware *dsp)
 	}
 	snd_printdd(KERN_DEBUG "checksum = 0x%08x\n", csum);
 
-	msleep(200);
+	snd_vx_delay(chip, 200);
 
 	if ((err = vx_wait_isr_bit(chip, ISR_CHK)) < 0)
 		return err;
@@ -718,57 +712,8 @@ int snd_vx_dsp_load(struct vx_core *chip, const struct firmware *dsp)
 	return 0;
 }
 
-EXPORT_SYMBOL(snd_vx_dsp_load);
-
-#ifdef CONFIG_PM
-/*
- * suspend
- */
-int snd_vx_suspend(struct vx_core *chip, pm_message_t state)
-{
-	unsigned int i;
-
-	snd_power_change_state(chip->card, SNDRV_CTL_POWER_D3hot);
-	chip->chip_status |= VX_STAT_IN_SUSPEND;
-	for (i = 0; i < chip->hw->num_codecs; i++)
-		snd_pcm_suspend_all(chip->pcm[i]);
-
-	return 0;
-}
-
-EXPORT_SYMBOL(snd_vx_suspend);
-
-/*
- * resume
- */
-int snd_vx_resume(struct vx_core *chip)
-{
-	int i, err;
-
-	chip->chip_status &= ~VX_STAT_CHIP_INIT;
-
-	for (i = 0; i < 4; i++) {
-		if (! chip->firmware[i])
-			continue;
-		err = chip->ops->load_dsp(chip, i, chip->firmware[i]);
-		if (err < 0) {
-			snd_printk(KERN_ERR "vx: firmware resume error at DSP %d\n", i);
-			return -EIO;
-		}
-	}
-
-	chip->chip_status |= VX_STAT_CHIP_INIT;
-	chip->chip_status &= ~VX_STAT_IN_SUSPEND;
-
-	snd_power_change_state(chip->card, SNDRV_CTL_POWER_D0);
-	return 0;
-}
-
-EXPORT_SYMBOL(snd_vx_resume);
-#endif
-
 /**
- * snd_vx_create - constructor for struct vx_core
+ * snd_vx_create - constructor for vx_core_t
  * @hw: hardware specific record
  *
  * this function allocates the instance and prepare for the hardware
@@ -776,16 +721,15 @@ EXPORT_SYMBOL(snd_vx_resume);
  *
  * return the instance pointer if successful, NULL in error.
  */
-struct vx_core *snd_vx_create(struct snd_card *card, struct snd_vx_hardware *hw,
-			      struct snd_vx_ops *ops,
-			      int extra_size)
+vx_core_t *snd_vx_create(snd_card_t *card, struct snd_vx_hardware *hw,
+			 struct snd_vx_ops *ops,
+			 int extra_size)
 {
-	struct vx_core *chip;
+	vx_core_t *chip;
 
-	if (snd_BUG_ON(!card || !hw || !ops))
-		return NULL;
+	snd_assert(card && hw && ops, return NULL);
 
-	chip = kzalloc(sizeof(*chip) + extra_size, GFP_KERNEL);
+	chip = snd_magic_kcalloc(vx_core_t, extra_size, GFP_KERNEL);
 	if (! chip) {
 		snd_printk(KERN_ERR "vx_core: no memory\n");
 		return NULL;
@@ -797,7 +741,7 @@ struct vx_core *snd_vx_create(struct snd_card *card, struct snd_vx_hardware *hw,
 	chip->type = hw->type;
 	chip->ops = ops;
 	tasklet_init(&chip->tq, vx_interrupt, (unsigned long)chip);
-	mutex_init(&chip->mixer_mutex);
+	init_MUTEX(&chip->mixer_mutex);
 
 	chip->card = card;
 	card->private_data = chip;
@@ -809,7 +753,31 @@ struct vx_core *snd_vx_create(struct snd_card *card, struct snd_vx_hardware *hw,
 	return chip;
 }
 
-EXPORT_SYMBOL(snd_vx_create);
+#ifdef CONFIG_PM
+/*
+ * suspend
+ */
+void snd_vx_suspend(vx_core_t *chip)
+{
+	unsigned int i;
+
+	chip->chip_status |= VX_STAT_IN_SUSPEND;
+	for (i = 0; i < chip->hw->num_codecs; i++)
+		snd_pcm_suspend_all(chip->pcm[i]);
+	if (chip->hwdep)
+		chip->hwdep->dsp_loaded = 0;
+}
+
+/*
+ * resume
+ */
+void snd_vx_resume(vx_core_t *chip)
+{
+	/* clear all stuff... */
+	chip->chip_status &= ~(VX_STAT_IN_SUSPEND|VX_STAT_CHIP_INIT);
+}
+
+#endif
 
 /*
  * module entries
@@ -825,3 +793,19 @@ static void __exit alsa_vx_core_exit(void)
 
 module_init(alsa_vx_core_init)
 module_exit(alsa_vx_core_exit)
+
+/*
+ * exports
+ */
+EXPORT_SYMBOL(snd_vx_check_reg_bit);
+EXPORT_SYMBOL(snd_vx_create);
+EXPORT_SYMBOL(snd_vx_hwdep_new);
+EXPORT_SYMBOL(snd_vx_irq_handler);
+EXPORT_SYMBOL(snd_vx_delay);
+EXPORT_SYMBOL(snd_vx_dsp_boot);
+EXPORT_SYMBOL(snd_vx_dsp_load);
+EXPORT_SYMBOL(snd_vx_load_boot_image);
+#ifdef CONFIG_PM
+EXPORT_SYMBOL(snd_vx_suspend);
+EXPORT_SYMBOL(snd_vx_resume);
+#endif

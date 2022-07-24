@@ -12,13 +12,21 @@
 
 #include "autofs_i.h"
 
-static void *autofs4_follow_link(struct dentry *dentry, struct nameidata *nd)
+static int autofs4_readlink(struct dentry *dentry, char *buffer, int buflen)
 {
-	nd_set_link(nd, dentry->d_inode->i_private);
-	return NULL;
+	struct autofs_info *ino = autofs4_dentry_ino(dentry);
+
+	return vfs_readlink(dentry, buffer, buflen, ino->u.symlink);
 }
 
-const struct inode_operations autofs4_symlink_inode_operations = {
-	.readlink	= generic_readlink,
+static int autofs4_follow_link(struct dentry *dentry, struct nameidata *nd)
+{
+	struct autofs_info *ino = autofs4_dentry_ino(dentry);
+
+	return vfs_follow_link(nd, ino->u.symlink);
+}
+
+struct inode_operations autofs4_symlink_inode_operations = {
+	.readlink	= autofs4_readlink,
 	.follow_link	= autofs4_follow_link
 };

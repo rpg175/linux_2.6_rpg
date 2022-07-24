@@ -2,7 +2,7 @@
  *  linux/fs/binfmt_em86.c
  *
  *  Based on linux/fs/binfmt_script.c
- *  Copyright (C) 1996  Martin von LÃ¶wis
+ *  Copyright (C) 1996  Martin von Löwis
  *  original #!-checking implemented by tytso.
  *
  *  em86 changes Copyright (C) 1997  Jim Paradis
@@ -11,6 +11,8 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
 #include <linux/init.h>
@@ -42,7 +44,7 @@ static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 			return -ENOEXEC;
 	}
 
-	bprm->recursion_depth++; /* Well, the bang-shell is implicit... */
+	bprm->sh_bang++;	/* Well, the bang-shell is implicit... */
 	allow_write_access(bprm->file);
 	fput(bprm->file);
 	bprm->file = NULL;
@@ -93,7 +95,7 @@ static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 	return search_binary_handler(bprm, regs);
 }
 
-static struct linux_binfmt em86_format = {
+struct linux_binfmt em86_format = {
 	.module		= THIS_MODULE,
 	.load_binary	= load_em86,
 };
@@ -108,6 +110,6 @@ static void __exit exit_em86_binfmt(void)
 	unregister_binfmt(&em86_format);
 }
 
-core_initcall(init_em86_binfmt);
-module_exit(exit_em86_binfmt);
+module_init(init_em86_binfmt)
+module_exit(exit_em86_binfmt)
 MODULE_LICENSE("GPL");

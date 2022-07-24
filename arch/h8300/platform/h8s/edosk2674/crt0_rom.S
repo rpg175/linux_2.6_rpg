@@ -10,6 +10,7 @@
 
 #define ASSEMBLY
 
+#include <linux/config.h>
 #include <asm/linkage.h>
 #include <asm/regs267x.h>
 		
@@ -167,7 +168,6 @@ gpio_table:
 	;; PHDDR
 	.byte	0x00,0x00
 
-	.section .rodata
 __target_name:	
 	.asciz	"EDOSK-2674"
 	
@@ -180,7 +180,7 @@ __command_line:
 	.long	__start
 	.long	__start
 vector	=	2
-	.rept	126
+	.rept	126-1
 	.long	_interrupt_redirect_table+vector*4
 vector	=	vector + 1
 	.endr

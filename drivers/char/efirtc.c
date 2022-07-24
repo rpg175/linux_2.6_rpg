@@ -6,19 +6,19 @@
  *
  * Based on skeleton from the drivers/char/rtc.c driver by P. Gortmaker
  *
- * This code provides an architected & portable interface to the real time
+ * This code provides a architected & portable interface to the real time 
  * clock by using EFI instead of direct bit fiddling. The functionalities are 
  * quite different from the rtc.c driver. The only way to talk to the device 
  * is by using ioctl(). There is a /proc interface which provides the raw 
  * information.
  *
- * Please note that we have kept the API as close as possible to the
+ * Please note that we have kept the API as close as possible from the 
  * legacy RTC. The standard /sbin/hwclock program should work normally 
  * when used to get/set the time.
  *
  * NOTES:
  *	- Locking is required for safe execution of EFI calls with regards
- *	  to interrupts and SMP.
+ *	  to interrrupts and SMP.
  *
  * TODO (December 1999):
  * 	- provide the API to set/get the WakeUp Alarm (different from the
@@ -26,6 +26,7 @@
  *	- SMP testing
  * 	- Add module support
  */
+
 
 #include <linux/types.h>
 #include <linux/errno.h>
@@ -35,8 +36,8 @@
 #include <linux/rtc.h>
 #include <linux/proc_fs.h>
 #include <linux/efi.h>
-#include <linux/uaccess.h>
 
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #define EFI_RTC_VERSION		"0.4"
@@ -47,10 +48,10 @@
  */
 #define EFI_RTC_EPOCH		1998
 
-static DEFINE_SPINLOCK(efi_rtc_lock);
+static spinlock_t efi_rtc_lock = SPIN_LOCK_UNLOCKED;
 
-static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
-							unsigned long arg);
+static int efi_rtc_ioctl(struct inode *inode, struct file *file,
+		     unsigned int cmd, unsigned long arg);
 
 #define is_leap(year) \
           ((year) % 4 == 0 && ((year) % 100 != 0 || (year) % 400 == 0))
@@ -117,7 +118,6 @@ convert_to_efi_time(struct rtc_time *wtime, efi_time_t *eft)
 static void
 convert_from_efi_time(efi_time_t *eft, struct rtc_time *wtime)
 {
-	memset(wtime, 0, sizeof(*wtime));
 	wtime->tm_sec  = eft->second;
 	wtime->tm_min  = eft->minute;
 	wtime->tm_hour = eft->hour;
@@ -144,8 +144,9 @@ convert_from_efi_time(efi_time_t *eft, struct rtc_time *wtime)
 	}
 }
 
-static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
-							unsigned long arg)
+static int
+efi_rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
+		     unsigned long arg)
 {
 
 	efi_status_t	status;
@@ -153,7 +154,7 @@ static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
 	efi_time_t	eft;
 	efi_time_cap_t	cap;
 	struct rtc_time	wtime;
-	struct rtc_wkalrm __user *ewp;
+	struct rtc_wkalrm *ewp;
 	unsigned char	enabled, pending;
 
 	switch (cmd) {
@@ -172,6 +173,7 @@ static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 
 		case RTC_RD_TIME:
+
 			spin_lock_irqsave(&efi_rtc_lock, flags);
 
 			status = efi.get_time(&eft, &cap);
@@ -186,15 +188,13 @@ static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
 
 			convert_from_efi_time(&eft, &wtime);
 
- 			return copy_to_user((void __user *)arg, &wtime,
-					    sizeof (struct rtc_time)) ? - EFAULT : 0;
+ 			return copy_to_user((void *)arg, &wtime, sizeof (struct rtc_time)) ? - EFAULT : 0;
 
 		case RTC_SET_TIME:
 
 			if (!capable(CAP_SYS_TIME)) return -EACCES;
 
-			if (copy_from_user(&wtime, (struct rtc_time __user *)arg,
-					   sizeof(struct rtc_time)) )
+			if (copy_from_user(&wtime, (struct rtc_time *)arg, sizeof(struct rtc_time)) )
 				return -EFAULT;
 
 			convert_to_efi_time(&wtime, &eft);
@@ -211,19 +211,19 @@ static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
 
 			if (!capable(CAP_SYS_TIME)) return -EACCES;
 
-			ewp = (struct rtc_wkalrm __user *)arg;
+			ewp = (struct rtc_wkalrm *)arg;
 
 			if (  get_user(enabled, &ewp->enabled)
 			   || copy_from_user(&wtime, &ewp->time, sizeof(struct rtc_time)) )
 				return -EFAULT;
 
 			convert_to_efi_time(&wtime, &eft);
-
+			
 			spin_lock_irqsave(&efi_rtc_lock, flags);
 			/*
 			 * XXX Fixme:
 			 * As of EFI 0.92 with the firmware I have on my
-			 * machine this call does not seem to work quite
+			 * machine this call does not seem to work quite 
 			 * right
 			 */
 			status = efi.set_wakeup_time((efi_bool_t)enabled, &eft);
@@ -242,17 +242,16 @@ static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
 
 			if (status != EFI_SUCCESS) return -EINVAL;
 
-			ewp = (struct rtc_wkalrm __user *)arg;
+			ewp = (struct rtc_wkalrm *)arg;
 
 			if (  put_user(enabled, &ewp->enabled)
 			   || put_user(pending, &ewp->pending)) return -EFAULT;
 
 			convert_from_efi_time(&eft, &wtime);
 
-			return copy_to_user(&ewp->time, &wtime,
-					    sizeof(struct rtc_time)) ? -EFAULT : 0;
+			return copy_to_user((void *)&ewp->time, &wtime, sizeof(struct rtc_time)) ? -EFAULT : 0;
 	}
-	return -ENOTTY;
+	return -EINVAL;
 }
 
 /*
@@ -261,7 +260,8 @@ static long efi_rtc_ioctl(struct file *file, unsigned int cmd,
  *	up things on a close.
  */
 
-static int efi_rtc_open(struct inode *inode, struct file *file)
+static int
+efi_rtc_open(struct inode *inode, struct file *file)
 {
 	/*
 	 * nothing special to do here
@@ -271,7 +271,8 @@ static int efi_rtc_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int efi_rtc_close(struct inode *inode, struct file *file)
+static int
+efi_rtc_close(struct inode *inode, struct file *file)
 {
 	return 0;
 }
@@ -280,22 +281,22 @@ static int efi_rtc_close(struct inode *inode, struct file *file)
  *	The various file operations we support.
  */
 
-static const struct file_operations efi_rtc_fops = {
+static struct file_operations efi_rtc_fops = {
 	.owner		= THIS_MODULE,
-	.unlocked_ioctl	= efi_rtc_ioctl,
+	.ioctl		= efi_rtc_ioctl,
 	.open		= efi_rtc_open,
 	.release	= efi_rtc_close,
-	.llseek		= no_llseek,
 };
 
-static struct miscdevice efi_rtc_dev= {
+static struct miscdevice efi_rtc_dev=
+{
 	EFI_RTC_MINOR,
 	"efirtc",
 	&efi_rtc_fops
 };
 
 /*
- *	We export RAW EFI information to /proc/driver/efirtc
+ *	We export RAW EFI information to /proc/efirtc
  */
 static int
 efi_rtc_get_status(char *buf)
@@ -305,10 +306,6 @@ efi_rtc_get_status(char *buf)
 	char		*p = buf;
 	efi_bool_t	enabled, pending;	
 	unsigned long	flags;
-
-	memset(&eft, 0, sizeof(eft));
-	memset(&alm, 0, sizeof(alm));
-	memset(&cap, 0, sizeof(cap));
 
 	spin_lock_irqsave(&efi_rtc_lock, flags);
 

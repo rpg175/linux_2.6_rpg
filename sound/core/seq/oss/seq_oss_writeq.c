@@ -26,20 +26,18 @@
 #include <sound/seq_oss_legacy.h>
 #include "../seq_lock.h"
 #include "../seq_clientmgr.h"
-#include <linux/wait.h>
-#include <linux/slab.h>
 
 
 /*
  * create a write queue record
  */
-struct seq_oss_writeq *
-snd_seq_oss_writeq_new(struct seq_oss_devinfo *dp, int maxlen)
+seq_oss_writeq_t *
+snd_seq_oss_writeq_new(seq_oss_devinfo_t *dp, int maxlen)
 {
-	struct seq_oss_writeq *q;
-	struct snd_seq_client_pool pool;
+	seq_oss_writeq_t *q;
+	snd_seq_client_pool_t pool;
 
-	if ((q = kzalloc(sizeof(*q), GFP_KERNEL)) == NULL)
+	if ((q = snd_kcalloc(sizeof(*q), GFP_KERNEL)) == NULL)
 		return NULL;
 	q->dp = dp;
 	q->maxlen = maxlen;
@@ -62,12 +60,10 @@ snd_seq_oss_writeq_new(struct seq_oss_devinfo *dp, int maxlen)
  * delete the write queue
  */
 void
-snd_seq_oss_writeq_delete(struct seq_oss_writeq *q)
+snd_seq_oss_writeq_delete(seq_oss_writeq_t *q)
 {
-	if (q) {
-		snd_seq_oss_writeq_clear(q);	/* to be sure */
-		kfree(q);
-	}
+	snd_seq_oss_writeq_clear(q);	/* to be sure */
+	kfree(q);
 }
 
 
@@ -75,9 +71,9 @@ snd_seq_oss_writeq_delete(struct seq_oss_writeq *q)
  * reset the write queue
  */
 void
-snd_seq_oss_writeq_clear(struct seq_oss_writeq *q)
+snd_seq_oss_writeq_clear(seq_oss_writeq_t *q)
 {
-	struct snd_seq_remove_events reset;
+	snd_seq_remove_events_t reset;
 
 	memset(&reset, 0, sizeof(reset));
 	reset.remove_mode = SNDRV_SEQ_REMOVE_OUTPUT; /* remove all */
@@ -91,18 +87,19 @@ snd_seq_oss_writeq_clear(struct seq_oss_writeq *q)
  * wait until the write buffer has enough room
  */
 int
-snd_seq_oss_writeq_sync(struct seq_oss_writeq *q)
+snd_seq_oss_writeq_sync(seq_oss_writeq_t *q)
 {
-	struct seq_oss_devinfo *dp = q->dp;
+	seq_oss_devinfo_t *dp = q->dp;
 	abstime_t time;
+	unsigned long flags;
 
 	time = snd_seq_oss_timer_cur_tick(dp->timer);
 	if (q->sync_time >= time)
 		return 0; /* already finished */
 
 	if (! q->sync_event_put) {
-		struct snd_seq_event ev;
-		union evrec *rec;
+		snd_seq_event_t ev;
+		evrec_t *rec;
 
 		/* put echoback event */
 		memset(&ev, 0, sizeof(ev));
@@ -111,27 +108,41 @@ snd_seq_oss_writeq_sync(struct seq_oss_writeq *q)
 		ev.time.tick = time;
 		/* echo back to itself */
 		snd_seq_oss_fill_addr(dp, &ev, dp->addr.client, dp->addr.port);
-		rec = (union evrec *)&ev.data;
+		rec = (evrec_t*)&ev.data;
 		rec->t.code = SEQ_SYNCTIMER;
 		rec->t.time = time;
 		q->sync_event_put = 1;
 		snd_seq_kernel_client_enqueue_blocking(dp->cseq, &ev, NULL, 0, 0);
 	}
 
-	wait_event_interruptible_timeout(q->sync_sleep, ! q->sync_event_put, HZ);
-	if (signal_pending(current))
+	spin_lock_irqsave(&q->sync_lock, flags);
+	if (! q->sync_event_put) { /* echoback event has been received */
+		spin_unlock_irqrestore(&q->sync_lock, flags);
+		return 0;
+	}
+		
+	/* wait for echo event */
+	spin_unlock(&q->sync_lock);
+	interruptible_sleep_on_timeout(&q->sync_sleep, HZ);
+	spin_lock(&q->sync_lock);
+	if (signal_pending(current)) {
 		/* interrupted - return 0 to finish sync */
 		q->sync_event_put = 0;
-	if (! q->sync_event_put || q->sync_time >= time)
+		spin_unlock_irqrestore(&q->sync_lock, flags);
 		return 0;
-	return 1;
+	}
+	spin_unlock_irqrestore(&q->sync_lock, flags);
+	if (q->sync_time >= time)
+		return 0;
+	else
+		return 1;
 }
 
 /*
  * wake up sync - echo event was catched
  */
 void
-snd_seq_oss_writeq_wakeup(struct seq_oss_writeq *q, abstime_t time)
+snd_seq_oss_writeq_wakeup(seq_oss_writeq_t *q, abstime_t time)
 {
 	unsigned long flags;
 
@@ -149,9 +160,9 @@ snd_seq_oss_writeq_wakeup(struct seq_oss_writeq *q, abstime_t time)
  * return the unused pool size
  */
 int
-snd_seq_oss_writeq_get_free_size(struct seq_oss_writeq *q)
+snd_seq_oss_writeq_get_free_size(seq_oss_writeq_t *q)
 {
-	struct snd_seq_client_pool pool;
+	snd_seq_client_pool_t pool;
 	pool.client = q->dp->cseq;
 	snd_seq_oss_control(q->dp, SNDRV_SEQ_IOCTL_GET_CLIENT_POOL, &pool);
 	return pool.output_free;
@@ -162,9 +173,9 @@ snd_seq_oss_writeq_get_free_size(struct seq_oss_writeq *q)
  * set output threshold size from ioctl
  */
 void
-snd_seq_oss_writeq_set_output(struct seq_oss_writeq *q, int val)
+snd_seq_oss_writeq_set_output(seq_oss_writeq_t *q, int val)
 {
-	struct snd_seq_client_pool pool;
+	snd_seq_client_pool_t pool;
 	pool.client = q->dp->cseq;
 	snd_seq_oss_control(q->dp, SNDRV_SEQ_IOCTL_GET_CLIENT_POOL, &pool);
 	pool.output_room = val;

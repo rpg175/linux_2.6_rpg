@@ -2,7 +2,9 @@
  *  linux/fs/isofs/util.c
  */
 
-#include "isofs.h"
+#include <linux/time.h>
+#include <linux/fs.h>
+#include <linux/iso_fs.h>
 
 /* 
  * We have to convert from a MM/DD/YY format to the Unix ctime format.
@@ -78,3 +80,4 @@ int iso_date(char * p, int flag)
 	}
 	return crtime;
 }		
+	

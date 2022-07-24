@@ -6,11 +6,10 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/signal.h>
-#include <linux/security.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
@@ -24,37 +23,8 @@
  */
 #define DCCR_MASK 0x0000001f     /* XNZVC */
 
-/*
- * Get contents of register REGNO in task TASK.
- */
-inline long get_reg(struct task_struct *task, unsigned int regno)
-{
-	/* USP is a special case, it's not in the pt_regs struct but
-	 * in the tasks thread struct
-	 */
-
-	if (regno == PT_USP)
-		return task->thread.usp;
-	else if (regno < PT_MAX)
-		return ((unsigned long *)task_pt_regs(task))[regno];
-	else
-		return 0;
-}
-
-/*
- * Write contents of register REGNO in task TASK.
- */
-inline int put_reg(struct task_struct *task, unsigned int regno,
-			  unsigned long data)
-{
-	if (regno == PT_USP)
-		task->thread.usp = data;
-	else if (regno < PT_MAX)
-		((unsigned long *)task_pt_regs(task))[regno] = data;
-	else
-		return -1;
-	return 0;
-}
+extern inline long get_reg(struct task_struct *, unsigned int);
+extern inline long put_reg(struct task_struct *, unsigned int, unsigned long);
 
 /*
  * Called by kernel/ptrace.c when detaching.
@@ -65,7 +35,6 @@ void
 ptrace_disable(struct task_struct *child)
 {
        /* Todo - pending singlesteps? */
-       clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 }
 
 /* 
@@ -76,55 +45,186 @@ ptrace_disable(struct task_struct *child)
  * (in user space) where the result of the ptrace call is written (instead of
  * being returned).
  */
-long arch_ptrace(struct task_struct *child, long request,
-		 unsigned long addr, unsigned long data)
+asmlinkage int 
+sys_ptrace(long request, long pid, long addr, long data)
 {
+	struct task_struct *child;
 	int ret;
-	unsigned int regno = addr >> 2;
-	unsigned long __user *datap = (unsigned long __user *)data;
+
+	lock_kernel();
+	ret = -EPERM;
+	
+	if (request == PTRACE_TRACEME) {
+		if (current->ptrace & PT_PTRACED)
+			goto out;
+
+		current->ptrace |= PT_PTRACED;
+		ret = 0;
+		goto out;
+	}
+	
+	ret = -ESRCH;
+	read_lock(&tasklist_lock);
+	child = find_task_by_pid(pid);
+	
+	if (child)
+		get_task_struct(child);
+	
+	read_unlock(&tasklist_lock);
+	
+	if (!child)
+		goto out;
+	
+	ret = -EPERM;
+	
+	if (pid == 1)		/* Leave the init process alone! */
+		goto out_tsk;
+	
+	if (request == PTRACE_ATTACH) {
+		ret = ptrace_attach(child);
+		goto out_tsk;
+	}
+	
+	ret = -ESRCH;
+	
+	if (!(child->ptrace & PT_PTRACED))
+		goto out_tsk;
+	
+	if (child->state != TASK_STOPPED) {
+		if (request != PTRACE_KILL)
+			goto out_tsk;
+	}
+	
+	if (child->parent != current)
+		goto out_tsk;
 
 	switch (request) {
 		/* Read word at location address. */ 
 		case PTRACE_PEEKTEXT:
-		case PTRACE_PEEKDATA:
-			ret = generic_ptrace_peekdata(child, addr, data);
+		case PTRACE_PEEKDATA: {
+			unsigned long tmp;
+			int copied;
+
+			copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
+			ret = -EIO;
+			
+			if (copied != sizeof(tmp))
+				break;
+			
+			ret = put_user(tmp,(unsigned long *) data);
 			break;
+		}
 
 		/* Read the word at location address in the USER area. */
 		case PTRACE_PEEKUSR: {
 			unsigned long tmp;
-
+			
 			ret = -EIO;
-			if ((addr & 3) || regno > PT_MAX)
+			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
 				break;
-
-			tmp = get_reg(child, regno);
-			ret = put_user(tmp, datap);
+			
+			tmp = 0;  /* Default return condition */
+			ret = -EIO;
+			
+			if (addr < sizeof(struct pt_regs)) {
+				tmp = get_reg(child, addr >> 2);
+				ret = put_user(tmp, (unsigned long *)data);
+			}
+			
 			break;
 		}
 		
 		/* Write the word at location address. */
 		case PTRACE_POKETEXT:
 		case PTRACE_POKEDATA:
-			ret = generic_ptrace_pokedata(child, addr, data);
+			ret = 0;
+			
+			if (access_process_vm(child, addr, &data, sizeof(data), 1) == sizeof(data))
+				break;
+			
+			ret = -EIO;
 			break;
  
  		/* Write the word at location address in the USER area. */
 		case PTRACE_POKEUSR:
 			ret = -EIO;
-			if ((addr & 3) || regno > PT_MAX)
+			
+			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
 				break;
 
-			if (regno == PT_DCCR) {
-				/* don't allow the tracing process to change stuff like
-				 * interrupt enable, kernel/user bit, dma enables etc.
-				 */
-				data &= DCCR_MASK;
-				data |= get_reg(child, PT_DCCR) & ~DCCR_MASK;
+			if (addr < sizeof(struct pt_regs)) {
+				addr >>= 2;
+
+				if (addr == PT_DCCR) {
+					/*
+					 * Don't allow the tracing process to
+					 * change stuff like interrupt enable,
+					 * kernel/user bit, etc.
+					 */
+					data &= DCCR_MASK;
+					data |= get_reg(child, PT_DCCR) & ~DCCR_MASK;
+				}
+				
+				if (put_reg(child, addr, data))
+					break;
+				
+				ret = 0;
 			}
-			if (put_reg(child, regno, data))
+			break;
+
+		case PTRACE_SYSCALL:
+		case PTRACE_CONT:
+			ret = -EIO;
+			
+			if ((unsigned long) data > _NSIG)
 				break;
+                        
+			if (request == PTRACE_SYSCALL) {
+				set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+			}
+			else {
+				clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+			}
+			
+			child->exit_code = data;
+			
+			/* TODO: make sure any pending breakpoint is killed */
+			wake_up_process(child);
 			ret = 0;
+			
+			break;
+		
+ 		/* Make the child exit by sending it a sigkill. */
+		case PTRACE_KILL:
+			ret = 0;
+			
+			if (child->state == TASK_ZOMBIE)
+				break;
+			
+			child->exit_code = SIGKILL;
+			
+			/* TODO: make sure any pending breakpoint is killed */
+			wake_up_process(child);
+			break;
+
+		/* Set the trap flag. */
+		case PTRACE_SINGLESTEP:
+			ret = -EIO;
+			
+			if ((unsigned long) data > _NSIG)
+				break;
+			
+			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
+
+			/* TODO: set some clever breakpoint mechanism... */
+
+			child->exit_code = data;
+			wake_up_process(child);
+			ret = 0;
+			break;
+
+		case PTRACE_DETACH:
+			ret = ptrace_detach(child, data);
 			break;
 
 		/* Get all GP registers from the child. */
@@ -132,18 +232,18 @@ long arch_ptrace(struct task_struct *child, long request,
 		  	int i;
 			unsigned long tmp;
 			
-			ret = 0;
 			for (i = 0; i <= PT_MAX; i++) {
 				tmp = get_reg(child, i);
 				
-				if (put_user(tmp, datap)) {
+				if (put_user(tmp, (unsigned long *) data)) {
 					ret = -EFAULT;
 					break;
 				}
 				
-				datap++;
+				data += sizeof(long);
 			}
 
+			ret = 0;
 			break;
 		}
 
@@ -152,9 +252,8 @@ long arch_ptrace(struct task_struct *child, long request,
 			int i;
 			unsigned long tmp;
 			
-			ret = 0;
 			for (i = 0; i <= PT_MAX; i++) {
-				if (get_user(tmp, datap)) {
+				if (get_user(tmp, (unsigned long *) data)) {
 					ret = -EFAULT;
 					break;
 				}
@@ -165,9 +264,10 @@ long arch_ptrace(struct task_struct *child, long request,
 				}
 				
 				put_reg(child, i, tmp);
-				datap++;
+				data += sizeof(long);
 			}
 			
+			ret = 0;
 			break;
 		}
 
@@ -175,7 +275,10 @@ long arch_ptrace(struct task_struct *child, long request,
 			ret = ptrace_request(child, request, addr, data);
 			break;
 	}
-
+out_tsk:
+	put_task_struct(child);
+out:
+	unlock_kernel();
 	return ret;
 }
 
@@ -187,10 +290,12 @@ void do_syscall_trace(void)
 	if (!(current->ptrace & PT_PTRACED))
 		return;
 	
-	/* the 0x80 provides a way for the tracing parent to distinguish
-	   between a syscall stop and SIGTRAP delivery */
-	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-				 ? 0x80 : 0));
+	current->exit_code = SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+					? 0x80 : 0);
+	
+	current->state = TASK_STOPPED;
+	notify_parent(current, SIGCHLD);
+	schedule();
 	
 	/*
 	 * This isn't the same as continuing with a signal, but it will do for

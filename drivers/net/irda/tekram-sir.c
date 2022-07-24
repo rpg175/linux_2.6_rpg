@@ -18,7 +18,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
+ *     Neither Dag Brattli nor University of Tromsø admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -32,9 +32,9 @@
 
 #include "sir-dev.h"
 
-static int tekram_delay = 150;		/* default is 150 ms */
-module_param(tekram_delay, int, 0);
+MODULE_PARM(tekram_delay, "i");
 MODULE_PARM_DESC(tekram_delay, "tekram dongle write complete delay");
+static int tekram_delay = 50;		/* default is 50 ms */
 
 static int tekram_open(struct sir_dev *);
 static int tekram_close(struct sir_dev *);
@@ -59,16 +59,14 @@ static struct dongle_driver tekram = {
 	.set_speed	= tekram_change_speed,
 };
 
-static int __init tekram_sir_init(void)
+int __init tekram_sir_init(void)
 {
-	if (tekram_delay < 1  ||  tekram_delay > 500)
+	if (tekram_delay < 1  ||  tekram_delay>500)
 		tekram_delay = 200;
-	IRDA_DEBUG(1, "%s - using %d ms delay\n",
-		tekram.driver_name, tekram_delay);
 	return irda_register_dongle(&tekram);
 }
 
-static void __exit tekram_sir_cleanup(void)
+void __exit tekram_sir_cleanup(void)
 {
 	irda_unregister_dongle(&tekram);
 }
@@ -77,10 +75,9 @@ static int tekram_open(struct sir_dev *dev)
 {
 	struct qos_info *qos = &dev->qos;
 
-	IRDA_DEBUG(2, "%s()\n", __func__);
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
 
-	sirdev_set_dtr_rts(dev, TRUE, TRUE);
-
+	dev->set_dtr_rts(dev, TRUE, TRUE);
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
 	qos->min_turn_time.bits = 0x01; /* Needs at least 10 ms */	
 	irda_qos_bits_to_value(qos);
@@ -92,10 +89,10 @@ static int tekram_open(struct sir_dev *dev)
 
 static int tekram_close(struct sir_dev *dev)
 {
-	IRDA_DEBUG(2, "%s()\n", __func__);
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
 
 	/* Power off dongle */
-	sirdev_set_dtr_rts(dev, FALSE, FALSE);
+	dev->set_dtr_rts(dev, FALSE, FALSE);
 
 	return 0;
 }
@@ -125,20 +122,19 @@ static int tekram_close(struct sir_dev *dev)
 
 static int tekram_change_speed(struct sir_dev *dev, unsigned speed)
 {
-	unsigned state = dev->fsm.substate;
 	unsigned delay = 0;
+	unsigned next_state = dev->fsm.substate;
 	u8 byte;
-	static int ret = 0;
 	
-	IRDA_DEBUG(2, "%s()\n", __func__);
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
 
-	switch(state) {
+	switch(dev->fsm.substate) {
+
 	case SIRDEV_STATE_DONGLE_SPEED:
 
 		switch (speed) {
 		default:
 			speed = 9600;
-			ret = -EINVAL;
 			/* fall thru */
 		case 9600:
 			byte = TEKRAM_PW|TEKRAM_9600;
@@ -158,34 +154,36 @@ static int tekram_change_speed(struct sir_dev *dev, unsigned speed)
 		}
 
 		/* Set DTR, Clear RTS */
-		sirdev_set_dtr_rts(dev, TRUE, FALSE);
+		dev->set_dtr_rts(dev, TRUE, FALSE);
 	
 		/* Wait at least 7us */
 		udelay(14);
 
 		/* Write control byte */
-		sirdev_raw_write(dev, &byte, 1);
+		dev->write(dev, &byte, 1);
 		
 		dev->speed = speed;
 
-		state = TEKRAM_STATE_WAIT_SPEED;
-		delay = tekram_delay;
+		next_state = TEKRAM_STATE_WAIT_SPEED;
+		delay = tekram_delay;		/* default: 50 ms */
 		break;
 
 	case TEKRAM_STATE_WAIT_SPEED:
 		/* Set DTR, Set RTS */
-		sirdev_set_dtr_rts(dev, TRUE, TRUE);
+		dev->set_dtr_rts(dev, TRUE, TRUE);
+
 		udelay(50);
-		break;
+
+		return 0;
 
 	default:
-		IRDA_ERROR("%s - undefined state %d\n", __func__, state);
-		ret = -EINVAL;
-		break;
+		ERROR("%s - undefined state\n", __FUNCTION__);
+		return -EINVAL;
 	}
 
-	dev->fsm.substate = state;
-	return (delay > 0) ? delay : ret;
+	dev->fsm.substate = next_state;
+
+	return delay;
 }
 
 /*
@@ -202,25 +200,43 @@ static int tekram_change_speed(struct sir_dev *dev, unsigned speed)
  *         operation
  */
 
+
+#define TEKRAM_STATE_WAIT_RESET	(SIRDEV_STATE_DONGLE_RESET + 1)
+
 static int tekram_reset(struct sir_dev *dev)
 {
-	IRDA_DEBUG(2, "%s()\n", __func__);
+	unsigned delay = 0;
+	unsigned next_state = dev->fsm.substate;
 
-	/* Clear DTR, Set RTS */
-	sirdev_set_dtr_rts(dev, FALSE, TRUE); 
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
 
-	/* Should sleep 1 ms */
-	msleep(1);
+	switch(dev->fsm.substate) {
 
-	/* Set DTR, Set RTS */
-	sirdev_set_dtr_rts(dev, TRUE, TRUE);
+	case SIRDEV_STATE_DONGLE_RESET:
+		/* Clear DTR, Set RTS */
+		dev->set_dtr_rts(dev, FALSE, TRUE); 
+
+		next_state = TEKRAM_STATE_WAIT_RESET;
+		delay = 1;		/* Should sleep 1 ms */
+		break;
+
+	case TEKRAM_STATE_WAIT_RESET:
+		/* Set DTR, Set RTS */
+		dev->set_dtr_rts(dev, TRUE, TRUE);
 	
-	/* Wait at least 50 us */
-	udelay(75);
+		/* Wait at least 50 us */
+		udelay(75);
 
-	dev->speed = 9600;
+		return 0;
 
-	return 0;
+	default:
+		ERROR("%s - undefined state\n", __FUNCTION__);
+		return -EINVAL;
+	}
+
+	dev->fsm.substate = next_state;
+
+	return delay;
 }
 
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");

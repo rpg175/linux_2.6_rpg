@@ -1,33 +1,15 @@
 /*
- *    Implements HPUX syscalls.
+ * linux/arch/parisc/kernel/sys_hpux.c
  *
- *    Copyright (C) 1999 Matthew Wilcox <willy with parisc-linux.org>
- *    Copyright (C) 2000 Michael Ang <mang with subcarrier.org>
- *    Copyright (C) 2000 John Marvin <jsm with parisc-linux.org>
- *    Copyright (C) 2000 Philipp Rumpf
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License
- *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * implements HPUX syscalls.
  */
 
-#include <linux/kernel.h>
 #include <linux/mm.h>
-#include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/file.h>
-#include <linux/ptrace.h>
+#include <linux/smp_lock.h>
 #include <linux/slab.h>
+#include <linux/ptrace.h>
 #include <asm/errno.h>
 #include <asm/uaccess.h>
 
@@ -36,16 +18,16 @@ int hpux_execve(struct pt_regs *regs)
 	int error;
 	char *filename;
 
-	filename = getname((const char __user *) regs->gr[26]);
+	filename = getname((char *) regs->gr[26]);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
 
-	error = do_execve(filename,
-			  (const char __user *const __user *) regs->gr[25],
-			  (const char __user *const __user *) regs->gr[24],
-			  regs);
+	error = do_execve(filename, (char **) regs->gr[25],
+		(char **)regs->gr[24], regs);
 
+	if (error == 0)
+		current->ptrace &= ~PT_DTRACE;
 	putname(filename);
 
 out:
@@ -61,56 +43,48 @@ struct hpux_dirent {
 };
 
 struct getdents_callback {
-	struct hpux_dirent __user *current_dir;
-	struct hpux_dirent __user *previous;
+	struct hpux_dirent *current_dir;
+	struct hpux_dirent *previous;
 	int count;
 	int error;
 };
 
-#define NAME_OFFSET(de) ((int) ((de)->d_name - (char __user *) (de)))
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+sizeof(long)-1) & ~(sizeof(long)-1))
 
 static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
-		u64 ino, unsigned d_type)
+		ino_t ino, unsigned d_type)
 {
-	struct hpux_dirent __user * dirent;
+	struct hpux_dirent * dirent;
 	struct getdents_callback * buf = (struct getdents_callback *) __buf;
-	ino_t d_ino;
-	int reclen = ALIGN(NAME_OFFSET(dirent) + namlen + 1, sizeof(long));
+	int reclen = ROUND_UP(NAME_OFFSET(dirent) + namlen + 1);
 
 	buf->error = -EINVAL;	/* only used if we fail.. */
 	if (reclen > buf->count)
 		return -EINVAL;
-	d_ino = ino;
-	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino) {
-		buf->error = -EOVERFLOW;
-		return -EOVERFLOW;
-	}
 	dirent = buf->previous;
 	if (dirent)
-		if (put_user(offset, &dirent->d_off))
-			goto Efault;
+		put_user(offset, &dirent->d_off);
 	dirent = buf->current_dir;
-	if (put_user(d_ino, &dirent->d_ino) ||
-	    put_user(reclen, &dirent->d_reclen) ||
-	    put_user(namlen, &dirent->d_namlen) ||
-	    copy_to_user(dirent->d_name, name, namlen) ||
-	    put_user(0, dirent->d_name + namlen))
-		goto Efault;
 	buf->previous = dirent;
-	buf->current_dir = (void __user *)dirent + reclen;
+	put_user(ino, &dirent->d_ino);
+	put_user(reclen, &dirent->d_reclen);
+	put_user(namlen, &dirent->d_namlen);
+	copy_to_user(dirent->d_name, name, namlen);
+	put_user(0, dirent->d_name + namlen);
+	((char *) dirent) += reclen;
+	buf->current_dir = dirent;
 	buf->count -= reclen;
 	return 0;
-Efault:
-	buf->error = -EFAULT;
-	return -EFAULT;
 }
 
 #undef NAME_OFFSET
+#undef ROUND_UP
 
-int hpux_getdents(unsigned int fd, struct hpux_dirent __user *dirent, unsigned int count)
+int hpux_getdents(unsigned int fd, struct hpux_dirent *dirent, unsigned int count)
 {
 	struct file * file;
-	struct hpux_dirent __user * lastdirent;
+	struct hpux_dirent * lastdirent;
 	struct getdents_callback buf;
 	int error = -EBADF;
 
@@ -124,16 +98,16 @@ int hpux_getdents(unsigned int fd, struct hpux_dirent __user *dirent, unsigned i
 	buf.error = 0;
 
 	error = vfs_readdir(file, filldir, &buf);
-	if (error >= 0)
-		error = buf.error;
+	if (error < 0)
+		goto out_putf;
+	error = buf.error;
 	lastdirent = buf.previous;
 	if (lastdirent) {
-		if (put_user(file->f_pos, &lastdirent->d_off))
-			error = -EFAULT;
-		else
-			error = count - buf.count;
+		put_user(file->f_pos, &lastdirent->d_off);
+		error = count - buf.count;
 	}
 
+out_putf:
 	fput(file);
 out:
 	return error;
@@ -145,7 +119,7 @@ int hpux_mount(const char *fs, const char *path, int mflag,
 	return -ENOSYS;
 }
 
-static int cp_hpux_stat(struct kstat *stat, struct hpux_stat64 __user *statbuf)
+static int cp_hpux_stat(struct kstat *stat, struct hpux_stat64 *statbuf)
 {
 	struct hpux_stat64 tmp;
 
@@ -171,7 +145,7 @@ static int cp_hpux_stat(struct kstat *stat, struct hpux_stat64 __user *statbuf)
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-long hpux_stat64(const char __user *filename, struct hpux_stat64 __user *statbuf)
+long hpux_stat64(char *filename, struct hpux_stat64 *statbuf)
 {
 	struct kstat stat;
 	int error = vfs_stat(filename, &stat);
@@ -182,7 +156,7 @@ long hpux_stat64(const char __user *filename, struct hpux_stat64 __user *statbuf
 	return error;
 }
 
-long hpux_fstat64(unsigned int fd, struct hpux_stat64 __user *statbuf)
+long hpux_fstat64(unsigned int fd, struct hpux_stat64 *statbuf)
 {
 	struct kstat stat;
 	int error = vfs_fstat(fd, &stat);
@@ -193,8 +167,7 @@ long hpux_fstat64(unsigned int fd, struct hpux_stat64 __user *statbuf)
 	return error;
 }
 
-long hpux_lstat64(const char __user *filename,
-		  struct hpux_stat64 __user *statbuf)
+long hpux_lstat64(char *filename, struct hpux_stat64 *statbuf)
 {
 	struct kstat stat;
 	int error = vfs_lstat(filename, &stat);

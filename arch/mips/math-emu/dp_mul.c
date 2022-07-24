@@ -3,7 +3,8 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.
+ * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
+ * http://www.algor.co.uk
  *
  * ########################################################################
  *
@@ -104,7 +105,7 @@ ieee754dp ieee754dp_mul(ieee754dp x, ieee754dp y)
 	case CLPAIR(IEEE754_CLASS_NORM, IEEE754_CLASS_NORM):
 		break;
 	}
-	/* rm = xm * ym, re = xe+ye basically */
+	/* rm = xm * ym, re = xe+ye basicly */
 	assert(xm & DP_HIDDEN_BIT);
 	assert(ym & DP_HIDDEN_BIT);
 	{
@@ -120,7 +121,7 @@ ieee754dp ieee754dp_mul(ieee754dp x, ieee754dp y)
 		 */
 
 		/* 32 * 32 => 64 */
-#define DPXMULT(x, y)	((u64)(x) * (u64)y)
+#define DPXMULT(x,y)	((u64)(x) * (u64)y)
 
 		{
 			unsigned lxm = xm;

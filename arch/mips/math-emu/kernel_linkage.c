@@ -24,8 +24,9 @@
 #include <asm/signal.h>
 #include <asm/uaccess.h>
 
-#include <asm/fpu.h>
 #include <asm/fpu_emulator.h>
+
+extern struct mips_fpu_emulator_private fpuemuprivate;
 
 #define SIGNALLING_NAN 0x7ff800007ff80000LL
 
@@ -39,9 +40,9 @@ void fpu_emulator_init_fpu(void)
 		printk("Algorithmics/MIPS FPU Emulator v1.5\n");
 	}
 
-	current->thread.fpu.fcr31 = 0;
+	current->thread.fpu.soft.fcr31 = 0;
 	for (i = 0; i < 32; i++) {
-		current->thread.fpu.fpr[i] = SIGNALLING_NAN;
+		current->thread.fpu.soft.fpr[i] = SIGNALLING_NAN;
 	}
 }
 
@@ -52,63 +53,71 @@ void fpu_emulator_init_fpu(void)
  * with appropriate macros from uaccess.h
  */
 
-int fpu_emulator_save_context(struct sigcontext __user *sc)
+int fpu_emulator_save_context(struct sigcontext *sc)
 {
 	int i;
 	int err = 0;
 
 	for (i = 0; i < 32; i++) {
 		err |=
-		    __put_user(current->thread.fpu.fpr[i], &sc->sc_fpregs[i]);
+		    __put_user(current->thread.fpu.soft.fpr[i],
+			       &sc->sc_fpregs[i]);
 	}
-	err |= __put_user(current->thread.fpu.fcr31, &sc->sc_fpc_csr);
+	err |= __put_user(current->thread.fpu.soft.fcr31, &sc->sc_fpc_csr);
+	err |= __put_user(fpuemuprivate.eir, &sc->sc_fpc_eir);
 
 	return err;
 }
 
-int fpu_emulator_restore_context(struct sigcontext __user *sc)
+int fpu_emulator_restore_context(struct sigcontext *sc)
 {
 	int i;
 	int err = 0;
 
 	for (i = 0; i < 32; i++) {
 		err |=
-		    __get_user(current->thread.fpu.fpr[i], &sc->sc_fpregs[i]);
+		    __get_user(current->thread.fpu.soft.fpr[i],
+			       &sc->sc_fpregs[i]);
 	}
-	err |= __get_user(current->thread.fpu.fcr31, &sc->sc_fpc_csr);
+	err |= __get_user(current->thread.fpu.soft.fcr31, &sc->sc_fpc_csr);
+	err |= __get_user(fpuemuprivate.eir, &sc->sc_fpc_eir);
 
 	return err;
 }
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_MIPS64
 /*
  * This is the o32 version
  */
 
-int fpu_emulator_save_context32(struct sigcontext32 __user *sc)
+int fpu_emulator_save_context32(struct sigcontext32 *sc)
 {
 	int i;
 	int err = 0;
 
 	for (i = 0; i < 32; i+=2) {
 		err |=
-		    __put_user(current->thread.fpu.fpr[i], &sc->sc_fpregs[i]);
+		    __put_user(current->thread.fpu.soft.fpr[i],
+			       &sc->sc_fpregs[i]);
 	}
-	err |= __put_user(current->thread.fpu.fcr31, &sc->sc_fpc_csr);
+	err |= __put_user(current->thread.fpu.soft.fcr31, &sc->sc_fpc_csr);
+	err |= __put_user(fpuemuprivate.eir, &sc->sc_fpc_eir);
 
 	return err;
 }
 
-int fpu_emulator_restore_context32(struct sigcontext32 __user *sc)
+int fpu_emulator_restore_context32(struct sigcontext32 *sc)
 {
 	int i;
 	int err = 0;
 
 	for (i = 0; i < 32; i+=2) {
 		err |=
-		    __get_user(current->thread.fpu.fpr[i], &sc->sc_fpregs[i]);
+		    __get_user(current->thread.fpu.soft.fpr[i],
+			       &sc->sc_fpregs[i]);
 	}
-	err |= __get_user(current->thread.fpu.fcr31, &sc->sc_fpc_csr);
+	err |= __get_user(current->thread.fpu.soft.fcr31, &sc->sc_fpc_csr);
+	err |= __get_user(fpuemuprivate.eir, &sc->sc_fpc_eir);
 
 	return err;
 }

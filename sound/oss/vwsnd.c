@@ -1,6 +1,6 @@
 /*
  * Sound driver for Silicon Graphics 320 and 540 Visual Workstations'
- * onboard audio.  See notes in Documentation/sound/oss/vwsnd .
+ * onboard audio.  See notes in ../../Documentation/sound/vwsnd .
  *
  * Copyright 1999 Silicon Graphics, Inc.  All rights reserved.
  *
@@ -94,7 +94,7 @@
  *	Open will block until the previous client has closed the
  *	device, unless O_NONBLOCK is specified.
  *
- *	The semaphore devc->io_mutex serializes PCM I/O syscalls.  This
+ *	The semaphore devc->io_sema serializes PCM I/O syscalls.  This
  *	is unnecessary in Linux 2.2, because the kernel lock
  *	serializes read, write, and ioctl globally, but it's there,
  *	ready for the brave, new post-kernel-lock world.
@@ -105,7 +105,7 @@
  *	area it owns and update its pointers.  See pcm_output() and
  *	pcm_input() for most of the gory stuff.
  *
- *	devc->mix_mutex serializes all mixer ioctls.  This is also
+ *	devc->mix_sema serializes all mixer ioctls.  This is also
  *	redundant because of the kernel lock.
  *
  *	The lowest level lock is lith->lithium_lock.  It is a
@@ -145,12 +145,11 @@
 #include <linux/init.h>
 
 #include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 #include <linux/wait.h>
 #include <linux/interrupt.h>
-#include <linux/mutex.h>
-#include <linux/slab.h>
-
-#include <asm/visws/cobalt.h>
+#include <asm/semaphore.h>
+#include <asm/mach-visws/cobalt.h>
 
 #include "sound_config.h"
 
@@ -159,7 +158,6 @@
 
 #ifdef VWSND_DEBUG
 
-static DEFINE_MUTEX(vwsnd_mutex);
 static int shut_up = 1;
 
 /*
@@ -195,11 +193,11 @@ static void dbgassert(const char *fcn, int line, const char *expr)
  *	DBGRV	- debug print function return when verbose
  */
 
-#define ASSERT(e)      ((e) ? (void) 0 : dbgassert(__func__, __LINE__, #e))
+#define ASSERT(e)      ((e) ? (void) 0 : dbgassert(__FUNCTION__, __LINE__, #e))
 #define DBGDO(x)            x
 #define DBGX(fmt, args...)  (in_interrupt() ? 0 : printk(KERN_ERR fmt, ##args))
-#define DBGP(fmt, args...)  (DBGX("%s: " fmt, __func__ , ##args))
-#define DBGE(fmt, args...)  (DBGX("%s" fmt, __func__ , ##args))
+#define DBGP(fmt, args...)  (DBGX(__FUNCTION__ ": " fmt, ##args))
+#define DBGE(fmt, args...)  (DBGX(__FUNCTION__ fmt, ##args))
 #define DBGC(rtn)           (DBGP("calling %s\n", rtn))
 #define DBGR()              (DBGP("returning\n"))
 #define DBGXV(fmt, args...) (shut_up ? 0 : DBGX(fmt, ##args))
@@ -242,11 +240,32 @@ enum {
 /* low-level lithium data */
 
 typedef struct lithium {
-	void *		page0;		/* virtual addresses */
-	void *		page1;
-	void *		page2;
+	caddr_t		page0;		/* virtual addresses */
+	caddr_t		page1;
+	caddr_t		page2;
 	spinlock_t	lock;		/* protects codec and UST/MSC access */
 } lithium_t;
+
+/*
+ * li_create initializes the lithium_t structure and sets up vm mappings
+ * to access the registers.
+ * Returns 0 on success, -errno on failure.
+ */
+
+static int __init li_create(lithium_t *lith, unsigned long baseaddr)
+{
+	static void li_destroy(lithium_t *);
+
+	lith->lock = SPIN_LOCK_UNLOCKED;
+	lith->page0 = ioremap_nocache(baseaddr + LI_PAGE0_OFFSET, PAGE_SIZE);
+	lith->page1 = ioremap_nocache(baseaddr + LI_PAGE1_OFFSET, PAGE_SIZE);
+	lith->page2 = ioremap_nocache(baseaddr + LI_PAGE2_OFFSET, PAGE_SIZE);
+	if (!lith->page0 || !lith->page1 || !lith->page2) {
+		li_destroy(lith);
+		return -ENOMEM;
+	}
+	return 0;
+}
 
 /*
  * li_destroy destroys the lithium_t structure and vm mappings.
@@ -266,25 +285,6 @@ static void li_destroy(lithium_t *lith)
 		iounmap(lith->page2);
 		lith->page2 = NULL;
 	}
-}
-
-/*
- * li_create initializes the lithium_t structure and sets up vm mappings
- * to access the registers.
- * Returns 0 on success, -errno on failure.
- */
-
-static int __init li_create(lithium_t *lith, unsigned long baseaddr)
-{
-	spin_lock_init(&lith->lock);
-	lith->page0 = ioremap_nocache(baseaddr + LI_PAGE0_OFFSET, PAGE_SIZE);
-	lith->page1 = ioremap_nocache(baseaddr + LI_PAGE1_OFFSET, PAGE_SIZE);
-	lith->page2 = ioremap_nocache(baseaddr + LI_PAGE2_OFFSET, PAGE_SIZE);
-	if (!lith->page0 || !lith->page1 || !lith->page2) {
-		li_destroy(lith);
-		return -ENOMEM;
-	}
-	return 0;
 }
 
 /*
@@ -629,7 +629,7 @@ static void li_setup_dma(dma_chan_t *chan,
 	ASSERT(!(buffer_paddr & 0xFF));
 	chan->baseval = (buffer_paddr >> 8) | 1 << (37 - 8);
 
-	chan->cfgval = ((chan->cfgval & ~LI_CCFG_LOCK) |
+	chan->cfgval = (!LI_CCFG_LOCK |
 			SHIFT_FIELD(desc->ad1843_slot, LI_CCFG_SLOT) |
 			desc->direction |
 			mode |
@@ -639,9 +639,9 @@ static void li_setup_dma(dma_chan_t *chan,
 	tmask = 13 - fragshift;		/* See Lithium DMA Notes above. */
 	ASSERT(size >= 2 && size <= 7);
 	ASSERT(tmask >= 1 && tmask <= 7);
-	chan->ctlval = ((chan->ctlval & ~LI_CCTL_RESET) |
+	chan->ctlval = (!LI_CCTL_RESET |
 			SHIFT_FIELD(size, LI_CCTL_SIZE) |
-			(chan->ctlval & ~LI_CCTL_DMA_ENABLE) |
+			!LI_CCTL_DMA_ENABLE |
 			SHIFT_FIELD(tmask, LI_CCTL_TMASK) |
 			SHIFT_FIELD(0, LI_CCTL_TPTR));
 
@@ -659,7 +659,7 @@ static void li_setup_dma(dma_chan_t *chan,
 static void li_shutdown_dma(dma_chan_t *chan)
 {
 	lithium_t *lith = chan->lith;
-	void * lith1 = lith->page1;
+	caddr_t lith1 = lith->page1;
 
 	DBGEV("(chan=0x%p)\n", chan);
 	
@@ -698,7 +698,7 @@ static __inline__ void li_activate_dma(dma_chan_t *chan)
 static void li_deactivate_dma(dma_chan_t *chan)
 {
 	lithium_t *lith = chan->lith;
-	void * lith2 = lith->page2;
+	caddr_t lith2 = lith->page2;
 
 	chan->ctlval &= ~(LI_CCTL_DMA_ENABLE | LI_CCTL_RPTR | LI_CCTL_WPTR);
 	DBGPV("ctlval = 0x%lx\n", chan->ctlval);
@@ -1447,11 +1447,11 @@ typedef enum vwsnd_port_flags {
  *
  *	port->lock protects: hwstate, flags, swb_[iu]_avail.
  *
- *	devc->io_mutex protects: swstate, sw_*, swb_[iu]_idx.
+ *	devc->io_sema protects: swstate, sw_*, swb_[iu]_idx.
  *
  *	everything else is only written by open/release or
  *	pcm_{setup,shutdown}(), which are serialized by a
- *	combination of devc->open_mutex and devc->io_mutex.
+ *	combination of devc->open_sema and devc->io_sema.
  */
 
 typedef struct vwsnd_port {
@@ -1480,10 +1480,10 @@ typedef struct vwsnd_port {
 	int		hwbuf_size;
 	unsigned long	hwbuf_paddr;
 	unsigned long	hwbuf_vaddr;
-	void *		hwbuf;		/* hwbuf == hwbuf_vaddr */
+	caddr_t		hwbuf;		/* hwbuf == hwbuf_vaddr */
 	int		hwbuf_max;	/* max bytes to preload */
 
-	void *		swbuf;
+	caddr_t		swbuf;
 	unsigned int	swbuf_size;	/* size in bytes */
 	unsigned int	swb_u_idx;	/* index of next user byte */
 	unsigned int	swb_i_idx;	/* index of next intr byte */
@@ -1507,10 +1507,10 @@ typedef struct vwsnd_dev {
 	int		audio_minor;	/* minor number of audio device */
 	int		mixer_minor;	/* minor number of mixer device */
 
-	struct mutex open_mutex;
-	struct mutex io_mutex;
-	struct mutex mix_mutex;
-	fmode_t		open_mode;
+	struct semaphore open_sema;
+	struct semaphore io_sema;
+	struct semaphore mix_sema;
+	mode_t		open_mode;
 	wait_queue_head_t open_wait;
 
 	lithium_t	lith;
@@ -1633,7 +1633,7 @@ static __inline__ unsigned int swb_inc_i(vwsnd_port_t *port, int inc)
  * mode-setting ioctls have been done, but before the first I/O is
  * done.
  *
- * Locking: called with devc->io_mutex held.
+ * Locking: called with devc->io_sema held.
  *
  * Returns 0 on success, -errno on failure.
  */
@@ -2234,12 +2234,12 @@ static void vwsnd_audio_write_intr(vwsnd_dev_t *devc, unsigned int status)
 		pcm_output(devc, underflown, 0);
 }
 
-static irqreturn_t vwsnd_audio_intr(int irq, void *dev_id)
+static irqreturn_t vwsnd_audio_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
-	vwsnd_dev_t *devc = dev_id;
+	vwsnd_dev_t *devc = (vwsnd_dev_t *) dev_id;
 	unsigned int status;
 
-	DBGEV("(irq=%d, dev_id=0x%p)\n", irq, dev_id);
+	DBGEV("(irq=%d, dev_id=0x%p, regs=0x%p)\n", irq, dev_id, regs);
 
 	status = li_get_clear_intr_status(&devc->lith);
 	vwsnd_audio_read_intr(devc, status);
@@ -2319,9 +2319,9 @@ static ssize_t vwsnd_audio_read(struct file *file,
 	vwsnd_dev_t *devc = file->private_data;
 	ssize_t ret;
 
-	mutex_lock(&devc->io_mutex);
+	down(&devc->io_sema);
 	ret = vwsnd_audio_do_read(file, buffer, count, ppos);
-	mutex_unlock(&devc->io_mutex);
+	up(&devc->io_sema);
 	return ret;
 }
 
@@ -2394,9 +2394,9 @@ static ssize_t vwsnd_audio_write(struct file *file,
 	vwsnd_dev_t *devc = file->private_data;
 	ssize_t ret;
 
-	mutex_lock(&devc->io_mutex);
+	down(&devc->io_sema);
 	ret = vwsnd_audio_do_write(file, buffer, count, ppos);
-	mutex_unlock(&devc->io_mutex);
+	up(&devc->io_sema);
 	return ret;
 }
 
@@ -2429,7 +2429,8 @@ static unsigned int vwsnd_audio_poll(struct file *file,
 	return mask;
 }
 
-static int vwsnd_audio_do_ioctl(struct file *file,
+static int vwsnd_audio_do_ioctl(struct inode *inode,
+				struct file *file,
 				unsigned int cmd,
 				unsigned long arg)
 {
@@ -2445,8 +2446,8 @@ static int vwsnd_audio_do_ioctl(struct file *file,
 	int ival;
 
 	
-	DBGEV("(file=0x%p, cmd=0x%x, arg=0x%lx)\n",
-	      file, cmd, arg);
+	DBGEV("(inode=0x%p, file=0x%p, cmd=0x%x, arg=0x%lx)\n",
+	      inode, file, cmd, arg);
 	switch (cmd) {
 	case OSS_GETVERSION:		/* _SIOR ('M', 118, int) */
 		DBGX("OSS_GETVERSION\n");
@@ -2673,9 +2674,7 @@ static int vwsnd_audio_do_ioctl(struct file *file,
 
 	case SNDCTL_DSP_NONBLOCK:	/* _SIO  ('P',14) */
 		DBGX("SNDCTL_DSP_NONBLOCK\n");
-		spin_lock(&file->f_lock);
 		file->f_flags |= O_NONBLOCK;
-		spin_unlock(&file->f_lock);
 		return 0;
 
 	case SNDCTL_DSP_RESET:		/* _SIO  ('P', 0) */
@@ -2884,19 +2883,17 @@ static int vwsnd_audio_do_ioctl(struct file *file,
 	return -EINVAL;
 }
 
-static long vwsnd_audio_ioctl(struct file *file,
+static int vwsnd_audio_ioctl(struct inode *inode,
+				struct file *file,
 				unsigned int cmd,
 				unsigned long arg)
 {
 	vwsnd_dev_t *devc = (vwsnd_dev_t *) file->private_data;
 	int ret;
 
-	mutex_lock(&vwsnd_mutex);
-	mutex_lock(&devc->io_mutex);
-	ret = vwsnd_audio_do_ioctl(file, cmd, arg);
-	mutex_unlock(&devc->io_mutex);
-	mutex_unlock(&vwsnd_mutex);
-
+	down(&devc->io_sema);
+	ret = vwsnd_audio_do_ioctl(inode, file, cmd, arg);
+	up(&devc->io_sema);
 	return ret;
 }
 
@@ -2922,7 +2919,6 @@ static int vwsnd_audio_open(struct inode *inode, struct file *file)
 
 	DBGE("(inode=0x%p, file=0x%p)\n", inode, file);
 
-	mutex_lock(&vwsnd_mutex);
 	INC_USE_COUNT;
 	for (devc = vwsnd_dev_list; devc; devc = devc->next_dev)
 		if ((devc->audio_minor & ~0x0F) == (minor & ~0x0F))
@@ -2930,28 +2926,25 @@ static int vwsnd_audio_open(struct inode *inode, struct file *file)
 
 	if (devc == NULL) {
 		DEC_USE_COUNT;
-		mutex_unlock(&vwsnd_mutex);
 		return -ENODEV;
 	}
 
-	mutex_lock(&devc->open_mutex);
+	down(&devc->open_sema);
 	while (devc->open_mode & file->f_mode) {
-		mutex_unlock(&devc->open_mutex);
+		up(&devc->open_sema);
 		if (file->f_flags & O_NONBLOCK) {
 			DEC_USE_COUNT;
-			mutex_unlock(&vwsnd_mutex);
 			return -EBUSY;
 		}
 		interruptible_sleep_on(&devc->open_wait);
 		if (signal_pending(current)) {
 			DEC_USE_COUNT;
-			mutex_unlock(&vwsnd_mutex);
 			return -ERESTARTSYS;
 		}
-		mutex_lock(&devc->open_mutex);
+		down(&devc->open_sema);
 	}
 	devc->open_mode |= file->f_mode & (FMODE_READ | FMODE_WRITE);
-	mutex_unlock(&devc->open_mutex);
+	up(&devc->open_sema);
 
 	/* get default sample format from minor number. */
 
@@ -2967,7 +2960,7 @@ static int vwsnd_audio_open(struct inode *inode, struct file *file)
 
 	/* Initialize vwsnd_ports. */
 
-	mutex_lock(&devc->io_mutex);
+	down(&devc->io_sema);
 	{
 		if (file->f_mode & FMODE_READ) {
 			devc->rport.swstate        = SW_INITIAL;
@@ -2994,11 +2987,10 @@ static int vwsnd_audio_open(struct inode *inode, struct file *file)
 			devc->wport.frag_count     = 0;
 		}
 	}
-	mutex_unlock(&devc->io_mutex);
+	up(&devc->io_sema);
 
 	file->private_data = devc;
 	DBGRV();
-	mutex_unlock(&vwsnd_mutex);
 	return 0;
 }
 
@@ -3012,8 +3004,8 @@ static int vwsnd_audio_release(struct inode *inode, struct file *file)
 	vwsnd_port_t *wport = NULL, *rport = NULL;
 	int err = 0;
 
-	mutex_lock(&vwsnd_mutex);
-	mutex_lock(&devc->io_mutex);
+	lock_kernel();
+	down(&devc->io_sema);
 	{
 		DBGEV("(inode=0x%p, file=0x%p)\n", inode, file);
 
@@ -3030,27 +3022,27 @@ static int vwsnd_audio_release(struct inode *inode, struct file *file)
 		if (wport)
 			wport->swstate = SW_OFF;
 	}
-	mutex_unlock(&devc->io_mutex);
+	up(&devc->io_sema);
 
-	mutex_lock(&devc->open_mutex);
+	down(&devc->open_sema);
 	{
 		devc->open_mode &= ~file->f_mode;
 	}
-	mutex_unlock(&devc->open_mutex);
+	up(&devc->open_sema);
 	wake_up(&devc->open_wait);
 	DEC_USE_COUNT;
 	DBGR();
-	mutex_unlock(&vwsnd_mutex);
+	unlock_kernel();
 	return err;
 }
 
-static const struct file_operations vwsnd_audio_fops = {
+static struct file_operations vwsnd_audio_fops = {
 	.owner =	THIS_MODULE,
 	.llseek =	no_llseek,
 	.read =		vwsnd_audio_read,
 	.write =	vwsnd_audio_write,
 	.poll =		vwsnd_audio_poll,
-	.unlocked_ioctl = vwsnd_audio_ioctl,
+	.ioctl =	vwsnd_audio_ioctl,
 	.mmap =		vwsnd_audio_mmap,
 	.open =		vwsnd_audio_open,
 	.release =	vwsnd_audio_release,
@@ -3068,18 +3060,15 @@ static int vwsnd_mixer_open(struct inode *inode, struct file *file)
 	DBGEV("(inode=0x%p, file=0x%p)\n", inode, file);
 
 	INC_USE_COUNT;
-	mutex_lock(&vwsnd_mutex);
 	for (devc = vwsnd_dev_list; devc; devc = devc->next_dev)
 		if (devc->mixer_minor == iminor(inode))
 			break;
 
 	if (devc == NULL) {
 		DEC_USE_COUNT;
-		mutex_unlock(&vwsnd_mutex);
 		return -ENODEV;
 	}
 	file->private_data = devc;
-	mutex_unlock(&vwsnd_mutex);
 	return 0;
 }
 
@@ -3094,7 +3083,7 @@ static int vwsnd_mixer_release(struct inode *inode, struct file *file)
 
 /* mixer_read_ioctl handles all read ioctls on the mixer device. */
 
-static int mixer_read_ioctl(vwsnd_dev_t *devc, unsigned int nr, void __user *arg)
+static int mixer_read_ioctl(vwsnd_dev_t *devc, unsigned int nr, caddr_t arg)
 {
 	int val = -1;
 
@@ -3156,19 +3145,19 @@ static int mixer_read_ioctl(vwsnd_dev_t *devc, unsigned int nr, void __user *arg
 	default:
 		return -EINVAL;
 	}
-	return put_user(val, (int __user *) arg);
+	return put_user(val, (int *) arg);
 }
 
 /* mixer_write_ioctl handles all write ioctls on the mixer device. */
 
-static int mixer_write_ioctl(vwsnd_dev_t *devc, unsigned int nr, void __user *arg)
+static int mixer_write_ioctl(vwsnd_dev_t *devc, unsigned int nr, caddr_t arg)
 {
 	int val;
 	int err;
 
 	DBGEV("(devc=0x%p, nr=0x%x, arg=0x%p)\n", devc, nr, arg);
 
-	err = get_user(val, (int __user *) arg);
+	err = get_user(val, (int *) arg);
 	if (err)
 		return -EFAULT;
 	switch (nr) {
@@ -3207,12 +3196,13 @@ static int mixer_write_ioctl(vwsnd_dev_t *devc, unsigned int nr, void __user *ar
 	}
 	if (val < 0)
 		return val;
-	return put_user(val, (int __user *) arg);
+	return put_user(val, (int *) arg);
 }
 
 /* This is the ioctl entry to the mixer driver. */
 
-static long vwsnd_mixer_ioctl(struct file *file,
+static int vwsnd_mixer_ioctl(struct inode *ioctl,
+			      struct file *file,
 			      unsigned int cmd,
 			      unsigned long arg)
 {
@@ -3223,25 +3213,23 @@ static long vwsnd_mixer_ioctl(struct file *file,
 
 	DBGEV("(devc=0x%p, cmd=0x%x, arg=0x%lx)\n", devc, cmd, arg);
 
-	mutex_lock(&vwsnd_mutex);
-	mutex_lock(&devc->mix_mutex);
+	down(&devc->mix_sema);
 	{
 		if ((cmd & ~nrmask) == MIXER_READ(0))
-			retval = mixer_read_ioctl(devc, nr, (void __user *) arg);
+			retval = mixer_read_ioctl(devc, nr, (caddr_t) arg);
 		else if ((cmd & ~nrmask) == MIXER_WRITE(0))
-			retval = mixer_write_ioctl(devc, nr, (void __user *) arg);
+			retval = mixer_write_ioctl(devc, nr, (caddr_t) arg);
 		else
 			retval = -EINVAL;
 	}
-	mutex_unlock(&devc->mix_mutex);
-	mutex_unlock(&vwsnd_mutex);
+	up(&devc->mix_sema);
 	return retval;
 }
 
-static const struct file_operations vwsnd_mixer_fops = {
+static struct file_operations vwsnd_mixer_fops = {
 	.owner =	THIS_MODULE,
 	.llseek =	no_llseek,
-	.unlocked_ioctl = vwsnd_mixer_ioctl,
+	.ioctl =	vwsnd_mixer_ioctl,
 	.open =		vwsnd_mixer_open,
 	.release =	vwsnd_mixer_release,
 };
@@ -3325,7 +3313,7 @@ static int __init attach_vwsnd(struct address_info *hw_config)
 	devc->rport.hwbuf_vaddr = __get_free_pages(GFP_KERNEL, HWBUF_ORDER);
 	if (!devc->rport.hwbuf_vaddr)
 		goto fail2;
-	devc->rport.hwbuf = (void *) devc->rport.hwbuf_vaddr;
+	devc->rport.hwbuf = (caddr_t) devc->rport.hwbuf_vaddr;
 	devc->rport.hwbuf_paddr = virt_to_phys(devc->rport.hwbuf);
 
 	/*
@@ -3348,7 +3336,7 @@ static int __init attach_vwsnd(struct address_info *hw_config)
 	devc->wport.hwbuf_vaddr = __get_free_pages(GFP_KERNEL, HWBUF_ORDER);
 	if (!devc->wport.hwbuf_vaddr)
 		goto fail3;
-	devc->wport.hwbuf = (void *) devc->wport.hwbuf_vaddr;
+	devc->wport.hwbuf = (caddr_t) devc->wport.hwbuf_vaddr;
 	devc->wport.hwbuf_paddr = virt_to_phys(devc->wport.hwbuf);
 	DBGP("wport hwbuf = 0x%p\n", devc->wport.hwbuf);
 
@@ -3388,17 +3376,17 @@ static int __init attach_vwsnd(struct address_info *hw_config)
 
 	/* Initialize as much of *devc as possible */
 
-	mutex_init(&devc->open_mutex);
-	mutex_init(&devc->io_mutex);
-	mutex_init(&devc->mix_mutex);
+	init_MUTEX(&devc->open_sema);
+	init_MUTEX(&devc->io_sema);
+	init_MUTEX(&devc->mix_sema);
 	devc->open_mode = 0;
-	spin_lock_init(&devc->rport.lock);
+	devc->rport.lock = SPIN_LOCK_UNLOCKED;
 	init_waitqueue_head(&devc->rport.queue);
 	devc->rport.swstate = SW_OFF;
 	devc->rport.hwstate = HW_STOPPED;
 	devc->rport.flags = 0;
 	devc->rport.swbuf = NULL;
-	spin_lock_init(&devc->wport.lock);
+	devc->wport.lock = SPIN_LOCK_UNLOCKED;
 	init_waitqueue_head(&devc->wport.queue);
 	devc->wport.swstate = SW_OFF;
 	devc->wport.hwstate = HW_STOPPED;

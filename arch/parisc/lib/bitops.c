@@ -6,26 +6,29 @@
  * Copyright 2000 Grant Grundler (grundler@cup.hp.com)
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
 #include <asm/system.h>
 #include <asm/atomic.h>
 
 #ifdef CONFIG_SMP
-arch_spinlock_t __atomic_hash[ATOMIC_HASH_SIZE] __lock_aligned = {
-	[0 ... (ATOMIC_HASH_SIZE-1)]  = __ARCH_SPIN_LOCK_UNLOCKED
+spinlock_t __atomic_hash[ATOMIC_HASH_SIZE] = {
+	[0 ... (ATOMIC_HASH_SIZE-1)]  = SPIN_LOCK_UNLOCKED
 };
 #endif
 
-#ifdef CONFIG_64BIT
+spinlock_t __atomic_lock = SPIN_LOCK_UNLOCKED;
+
+#ifdef __LP64__
 unsigned long __xchg64(unsigned long x, unsigned long *ptr)
 {
 	unsigned long temp, flags;
 
-	_atomic_spin_lock_irqsave(ptr, flags);
+	SPIN_LOCK_IRQSAVE(ATOMIC_HASH(ptr), flags);
 	temp = *ptr;
 	*ptr = x;
-	_atomic_spin_unlock_irqrestore(ptr, flags);
+	SPIN_UNLOCK_IRQRESTORE(ATOMIC_HASH(ptr), flags);
 	return temp;
 }
 #endif
@@ -33,39 +36,39 @@ unsigned long __xchg64(unsigned long x, unsigned long *ptr)
 unsigned long __xchg32(int x, int *ptr)
 {
 	unsigned long flags;
-	long temp;
+	unsigned long temp;
 
-	_atomic_spin_lock_irqsave(ptr, flags);
-	temp = (long) *ptr;	/* XXX - sign extension wanted? */
+	SPIN_LOCK_IRQSAVE(ATOMIC_HASH(ptr), flags);
+	(long) temp = (long) *ptr;	/* XXX - sign extension wanted? */
 	*ptr = x;
-	_atomic_spin_unlock_irqrestore(ptr, flags);
-	return (unsigned long)temp;
+	SPIN_UNLOCK_IRQRESTORE(ATOMIC_HASH(ptr), flags);
+	return temp;
 }
 
 
 unsigned long __xchg8(char x, char *ptr)
 {
 	unsigned long flags;
-	long temp;
+	unsigned long temp;
 
-	_atomic_spin_lock_irqsave(ptr, flags);
-	temp = (long) *ptr;	/* XXX - sign extension wanted? */
+	SPIN_LOCK_IRQSAVE(ATOMIC_HASH(ptr), flags);
+	(long) temp = (long) *ptr;	/* XXX - sign extension wanted? */
 	*ptr = x;
-	_atomic_spin_unlock_irqrestore(ptr, flags);
-	return (unsigned long)temp;
+	SPIN_UNLOCK_IRQRESTORE(ATOMIC_HASH(ptr), flags);
+	return temp;
 }
 
 
-#ifdef CONFIG_64BIT
+#ifdef __LP64__
 unsigned long __cmpxchg_u64(volatile unsigned long *ptr, unsigned long old, unsigned long new)
 {
 	unsigned long flags;
 	unsigned long prev;
 
-	_atomic_spin_lock_irqsave(ptr, flags);
+	SPIN_LOCK_IRQSAVE(ATOMIC_HASH(ptr), flags);
 	if ((prev = *ptr) == old)
 		*ptr = new;
-	_atomic_spin_unlock_irqrestore(ptr, flags);
+	SPIN_UNLOCK_IRQRESTORE(ATOMIC_HASH(ptr), flags);
 	return prev;
 }
 #endif
@@ -75,9 +78,9 @@ unsigned long __cmpxchg_u32(volatile unsigned int *ptr, unsigned int old, unsign
 	unsigned long flags;
 	unsigned int prev;
 
-	_atomic_spin_lock_irqsave(ptr, flags);
+	SPIN_LOCK_IRQSAVE(ATOMIC_HASH(ptr), flags);
 	if ((prev = *ptr) == old)
 		*ptr = new;
-	_atomic_spin_unlock_irqrestore(ptr, flags);
+	SPIN_UNLOCK_IRQRESTORE(ATOMIC_HASH(ptr), flags);
 	return (unsigned long)prev;
 }

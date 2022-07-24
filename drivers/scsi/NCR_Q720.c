@@ -10,21 +10,22 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mca.h>
-#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <asm/io.h>
 
 #include "scsi.h"
-#include <scsi/scsi_host.h>
+#include "hosts.h"
 
 #include "ncr53c8xx.h"
 
 #include "NCR_Q720.h"
 
-static struct ncr_chip q720_chip __initdata = {
+static ncr_chip q720_chip __initdata = {
+	.device_id =	PSEUDO_720_ID,
 	.revision_id =	0x0f,
+	.name =		"720",
 	.burst_max =	3,
 	.offset_max =	8,
 	.nr_divisor =	4,
@@ -40,7 +41,7 @@ MODULE_LICENSE("GPL");
 /* We needs this helper because we have up to four hosts per struct device */
 struct NCR_Q720_private {
 	struct device		*dev;
-	void __iomem *		mem_base;
+	__u32			mem_base;
 	__u32			phys_mem_base;
 	__u32			mem_size;
 	__u8			irq;
@@ -49,13 +50,13 @@ struct NCR_Q720_private {
 	struct Scsi_Host	*hosts[4];
 };
 
-static struct scsi_host_template NCR_Q720_tpnt = {
+Scsi_Host_Template NCR_Q720_tpnt = {
 	.module			= THIS_MODULE,
 	.proc_name		= "NCR_Q720",
 };
 
 static irqreturn_t
-NCR_Q720_intr(int irq, void *data)
+NCR_Q720_intr(int irq, void *data, struct pt_regs * regs)
 {
 	struct NCR_Q720_private *p = (struct NCR_Q720_private *)data;
 	__u8 sir = (readb(p->mem_base + 0x0d) & 0xf0) >> 4;
@@ -69,14 +70,14 @@ NCR_Q720_intr(int irq, void *data)
 
 	while((siop = ffz(sir)) < p->siops) {
 		sir |= 1<<siop;
-		ncr53c8xx_intr(irq, p->hosts[siop]);
+		ncr53c8xx_intr(irq, p->hosts[siop], regs);
 	}
 	return IRQ_HANDLED;
 }
 
 static int __init
 NCR_Q720_probe_one(struct NCR_Q720_private *p, int siop,
-		int irq, int slot, __u32 paddr, void __iomem *vaddr)
+		int irq, int slot, __u32 paddr, __u32 vaddr)
 {
 	struct ncr_device device;
 	__u8 scsi_id;
@@ -147,12 +148,13 @@ NCR_Q720_probe(struct device *dev)
 	__u8 pos2, pos4, asr2, asr9, asr10;
 	__u16 io_base;
 	__u32 base_addr, mem_size;
-	void __iomem *mem_base;
+	__u32 mem_base;
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
+	p = kmalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 
+	memset(p, 0, sizeof(*p));
 	pos2 = mca_device_read_pos(mca_dev, 2);
 	/* enable device */
 	pos2 |=  NCR_Q720_POS2_BOARD_ENABLE | NCR_Q720_POS2_INTERRUPT_ENABLE;
@@ -216,21 +218,7 @@ NCR_Q720_probe(struct device *dev)
 		goto out_free;
 	}
 	
-	if (dma_declare_coherent_memory(dev, base_addr, base_addr,
-					mem_size, DMA_MEMORY_MAP)
-	    != DMA_MEMORY_MAP) {
-		printk(KERN_ERR "NCR_Q720: DMA declare memory failed\n");
-		goto out_release_region;
-	}
-
-	/* The first 1k of the memory buffer is a memory map of the registers
-	 */
-	mem_base = dma_mark_declared_memory_occupied(dev, base_addr,
-							    1024);
-	if (IS_ERR(mem_base)) {
-		printk("NCR_Q720 failed to reserve memory mapped region\n");
-		goto out_release;
-	}
+	mem_base = (__u32)ioremap(base_addr, mem_size);
 
 	/* now also enable accesses in asr 2 */
 	asr2 = inb(io_base + 0x0a);
@@ -265,13 +253,13 @@ NCR_Q720_probe(struct device *dev)
 	p->irq = irq;
 	p->siops = siops;
 
-	if (request_irq(irq, NCR_Q720_intr, IRQF_SHARED, "NCR_Q720", p)) {
+	if (request_irq(irq, NCR_Q720_intr, SA_SHIRQ, "NCR_Q720", p)) {
 		printk(KERN_ERR "NCR_Q720: request irq %d failed\n", irq);
 		goto out_release;
 	}
 	/* disable all the siop interrupts */
 	for(i = 0; i < siops; i++) {
-		void __iomem *reg_scsr1 = mem_base + NCR_Q720_CHIP_REGISTER_OFFSET
+		__u32 reg_scsr1 = mem_base + NCR_Q720_CHIP_REGISTER_OFFSET
 			+ i*NCR_Q720_SIOP_SHIFT + NCR_Q720_SCSR_OFFSET + 1;
 		__u8 scsr1 = readb(reg_scsr1);
 		scsr1 |= 0x01;
@@ -280,7 +268,7 @@ NCR_Q720_probe(struct device *dev)
 
 	/* plumb in all 720 chips */
 	for (i = 0; i < siops; i++) {
-		void __iomem *siop_v_base = mem_base + NCR_Q720_CHIP_REGISTER_OFFSET
+		__u32 siop_v_base = mem_base + NCR_Q720_CHIP_REGISTER_OFFSET
 			+ i*NCR_Q720_SIOP_SHIFT;
 		__u32 siop_p_base = base_addr + NCR_Q720_CHIP_REGISTER_OFFSET
 			+ i*NCR_Q720_SIOP_SHIFT;
@@ -310,8 +298,7 @@ NCR_Q720_probe(struct device *dev)
 	return 0;
 
  out_release:
-	dma_release_declared_memory(dev);
- out_release_region:
+	iounmap((void *)mem_base);
 	release_mem_region(base_addr, mem_size);
  out_free:
 	kfree(p);
@@ -336,7 +323,7 @@ NCR_Q720_remove(struct device *dev)
 		if(p->hosts[i])
 			NCR_Q720_remove_one(p->hosts[i]);
 
-	dma_release_declared_memory(dev);
+	iounmap((void *)p->mem_base);
 	release_mem_region(p->phys_mem_base, p->mem_size);
 	free_irq(p->irq, p);
 	kfree(p);
@@ -345,7 +332,7 @@ NCR_Q720_remove(struct device *dev)
 
 static short NCR_Q720_id_table[] = { NCR_Q720_MCA_ID, 0 };
 
-static struct mca_driver NCR_Q720_driver = {
+struct mca_driver NCR_Q720_driver = {
 	.id_table = NCR_Q720_id_table,
 	.driver = {
 		.name		= "NCR_Q720",
@@ -358,19 +345,13 @@ static struct mca_driver NCR_Q720_driver = {
 static int __init
 NCR_Q720_init(void)
 {
-	int ret = ncr53c8xx_init();
-	if (!ret)
-		ret = mca_register_driver(&NCR_Q720_driver);
-	if (ret)
-		ncr53c8xx_exit();
-	return ret;
+	return mca_register_driver(&NCR_Q720_driver);
 }
 
 static void __exit
 NCR_Q720_exit(void)
 {
 	mca_unregister_driver(&NCR_Q720_driver);
-	ncr53c8xx_exit();
 }
 
 module_init(NCR_Q720_init);

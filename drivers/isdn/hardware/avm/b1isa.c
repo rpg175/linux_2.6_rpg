@@ -1,4 +1,4 @@
-/* $Id: b1isa.c,v 1.1.2.3 2004/02/10 01:07:12 keil Exp $
+/* $Id: b1isa.c,v 1.10.6.6 2001/09/23 22:24:33 kai Exp $
  * 
  * Module for AVM B1 ISA-card.
  * 
@@ -24,10 +24,6 @@
 #include <linux/isdn/capiutil.h>
 #include <linux/isdn/capilli.h>
 #include "avmcard.h"
-
-/* ------------------------------------------------------------- */
-
-static char *revision = "$Revision: 1.1.2.3 $";
 
 /* ------------------------------------------------------------- */
 
@@ -60,7 +56,7 @@ static void b1isa_remove(struct pci_dev *pdev)
 
 static char *b1isa_procinfo(struct capi_ctr *ctrl);
 
-static int b1isa_probe(struct pci_dev *pdev)
+static int __init b1isa_probe(struct pci_dev *pdev)
 {
 	avmctrl_info *cinfo;
 	avmcard *card;
@@ -112,7 +108,6 @@ static int b1isa_probe(struct pci_dev *pdev)
 	b1_reset(card->port);
 	b1_getrevision(card);
 
-	cinfo->capi_ctrl.owner = THIS_MODULE;
 	cinfo->capi_ctrl.driver_name   = "b1isa";
 	cinfo->capi_ctrl.driverdata    = cinfo;
 	cinfo->capi_ctrl.register_appl = b1_register_appl;
@@ -121,8 +116,9 @@ static int b1isa_probe(struct pci_dev *pdev)
 	cinfo->capi_ctrl.load_firmware = b1_load_firmware;
 	cinfo->capi_ctrl.reset_ctr     = b1_reset_ctr;
 	cinfo->capi_ctrl.procinfo      = b1isa_procinfo;
-	cinfo->capi_ctrl.proc_fops = &b1ctl_proc_fops;
+	cinfo->capi_ctrl.ctr_read_proc = b1ctl_read_proc;
 	strcpy(cinfo->capi_ctrl.name, card->name);
+	cinfo->capi_ctrl.owner = THIS_MODULE;
 
 	retval = attach_capi_ctr(&cinfo->capi_ctrl);
 	if (retval) {
@@ -169,61 +165,28 @@ static struct pci_dev isa_dev[MAX_CARDS];
 static int io[MAX_CARDS];
 static int irq[MAX_CARDS];
 
-module_param_array(io, int, NULL, 0);
-module_param_array(irq, int, NULL, 0);
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_CARDS) "i");
 MODULE_PARM_DESC(io, "I/O base address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
 
-static int b1isa_add_card(struct capi_driver *driver, capicardparams *data)
-{
-	int i;
-
-	for (i = 0; i < MAX_CARDS; i++) {
-		if (isa_dev[i].resource[0].start)
-			continue;
-
-		isa_dev[i].resource[0].start = data->port;
-		isa_dev[i].irq = data->irq;
-
-		if (b1isa_probe(&isa_dev[i]) == 0)
-			return 0;
-	}
-	return -ENODEV;
-}
-
-static struct capi_driver capi_driver_b1isa = {
-	.name		= "b1isa",
-	.revision	= "1.0",
-	.add_card       = b1isa_add_card,
-};
-
 static int __init b1isa_init(void)
 {
-	char *p;
-	char rev[32];
 	int i;
-
-	if ((p = strchr(revision, ':')) != NULL && p[1]) {
-		strlcpy(rev, p + 2, 32);
-		if ((p = strchr(rev, '$')) != NULL && p > rev)
-		   *(p-1) = 0;
-	} else
-		strcpy(rev, "1.0");
+	int found = 0;
 
 	for (i = 0; i < MAX_CARDS; i++) {
 		if (!io[i])
 			break;
 
 		isa_dev[i].resource[0].start = io[i];
-		isa_dev[i].irq = irq[i];
+		isa_dev[i].irq_resource[0].start = irq[i];
 
-		if (b1isa_probe(&isa_dev[i]) != 0)
-			return -ENODEV;
+		if (b1isa_probe(&isa_dev[i]) == 0)
+			found++;
 	}
-
-	strlcpy(capi_driver_b1isa.revision, rev, 32);
-	register_capi_driver(&capi_driver_b1isa);
-	printk(KERN_INFO "b1isa: revision %s\n", rev);
+	if (found == 0)
+		return -ENODEV;
 
 	return 0;
 }
@@ -233,10 +196,11 @@ static void __exit b1isa_exit(void)
 	int i;
 
 	for (i = 0; i < MAX_CARDS; i++) {
-		if (isa_dev[i].resource[0].start)
-			b1isa_remove(&isa_dev[i]);
+		if (!io[i])
+			break;
+
+		b1isa_remove(&isa_dev[i]);
 	}
-	unregister_capi_driver(&capi_driver_b1isa);
 }
 
 module_init(b1isa_init);

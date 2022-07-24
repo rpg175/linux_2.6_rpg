@@ -5,11 +5,10 @@
 /**********************************************/
 
 #include <linux/font.h>
-#include <linux/module.h>
 
 #define FONTDATAMAX 4096
 
-static const unsigned char fontdata_8x16[FONTDATAMAX] = {
+static unsigned char fontdata_8x16[FONTDATAMAX] = {
 
 	/* 0 0x00 '^@' */
 	0x00, /* 00000000 */
@@ -4622,12 +4621,11 @@ static const unsigned char fontdata_8x16[FONTDATAMAX] = {
 };
 
 
-const struct font_desc font_vga_8x16 = {
-	.idx	= VGA8x16_IDX,
-	.name	= "VGA8x16",
-	.width	= 8,
-	.height	= 16,
-	.data	= fontdata_8x16,
-	.pref	= 0,
+struct font_desc font_vga_8x16 = {
+	VGA8x16_IDX,
+	"VGA8x16",
+	8,
+	16,
+	fontdata_8x16,
+	0
 };
-EXPORT_SYMBOL(font_vga_8x16);

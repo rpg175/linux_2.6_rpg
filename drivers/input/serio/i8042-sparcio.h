@@ -1,11 +1,13 @@
 #ifndef _I8042_SPARCIO_H
 #define _I8042_SPARCIO_H
 
-#include <linux/of_device.h>
-
+#include <linux/config.h>
 #include <asm/io.h>
+
+#ifdef CONFIG_PCI
 #include <asm/oplib.h>
-#include <asm/prom.h>
+#include <asm/ebus.h>
+#endif
 
 static int i8042_kbd_irq = -1;
 static int i8042_aux_irq = -1;
@@ -16,8 +18,7 @@ static int i8042_aux_irq = -1;
 #define I8042_AUX_PHYS_DESC "sparcps2/serio1"
 #define I8042_MUX_PHYS_DESC "sparcps2/serio%d"
 
-static void __iomem *kbd_iobase;
-static struct resource *kbd_res;
+static unsigned long kbd_iobase;
 
 #define I8042_COMMAND_REG	(kbd_iobase + 0x64UL)
 #define I8042_DATA_REG		(kbd_iobase + 0x60UL)
@@ -42,116 +43,74 @@ static inline void i8042_write_command(int val)
 	writeb(val, kbd_iobase + 0x64UL);
 }
 
-#ifdef CONFIG_PCI
-
 #define OBP_PS2KBD_NAME1	"kb_ps2"
 #define OBP_PS2KBD_NAME2	"keyboard"
 #define OBP_PS2MS_NAME1		"kdmouse"
 #define OBP_PS2MS_NAME2		"mouse"
 
-static int __devinit sparc_i8042_probe(struct platform_device *op)
+static int i8042_platform_init(void)
 {
-	struct device_node *dp = op->dev.of_node;
+#ifndef CONFIG_PCI
+	return -1;
+#else
+	char prop[128];
+	int len;
 
-	dp = dp->child;
-	while (dp) {
-		if (!strcmp(dp->name, OBP_PS2KBD_NAME1) ||
-		    !strcmp(dp->name, OBP_PS2KBD_NAME2)) {
-			struct platform_device *kbd = of_find_device_by_node(dp);
-			unsigned int irq = kbd->archdata.irqs[0];
-			if (irq == 0xffffffff)
-				irq = op->archdata.irqs[0];
-			i8042_kbd_irq = irq;
-			kbd_iobase = of_ioremap(&kbd->resource[0],
-						0, 8, "kbd");
-			kbd_res = &kbd->resource[0];
-		} else if (!strcmp(dp->name, OBP_PS2MS_NAME1) ||
-			   !strcmp(dp->name, OBP_PS2MS_NAME2)) {
-			struct platform_device *ms = of_find_device_by_node(dp);
-			unsigned int irq = ms->archdata.irqs[0];
-			if (irq == 0xffffffff)
-				irq = op->archdata.irqs[0];
-			i8042_aux_irq = irq;
-		}
-
-		dp = dp->sibling;
+	len = prom_getproperty(prom_root_node, "name", prop, sizeof(prop));
+	if (len < 0) {
+		printk("i8042: Cannot get name property of root OBP node.\n");
+		return -1;
 	}
-
-	return 0;
-}
-
-static int __devexit sparc_i8042_remove(struct platform_device *op)
-{
-	of_iounmap(kbd_res, kbd_iobase, 8);
-
-	return 0;
-}
-
-static const struct of_device_id sparc_i8042_match[] = {
-	{
-		.name = "8042",
-	},
-	{},
-};
-MODULE_DEVICE_TABLE(of, sparc_i8042_match);
-
-static struct platform_driver sparc_i8042_driver = {
-	.driver = {
-		.name = "i8042",
-		.owner = THIS_MODULE,
-		.of_match_table = sparc_i8042_match,
-	},
-	.probe		= sparc_i8042_probe,
-	.remove		= __devexit_p(sparc_i8042_remove),
-};
-
-static int __init i8042_platform_init(void)
-{
-	struct device_node *root = of_find_node_by_path("/");
-
-	if (!strcmp(root->name, "SUNW,JavaStation-1")) {
+	if (strncmp(prop, "SUNW,JavaStation-1", len) == 0) {
 		/* Hardcoded values for MrCoffee.  */
 		i8042_kbd_irq = i8042_aux_irq = 13 | 0x20;
-		kbd_iobase = ioremap(0x71300060, 8);
+		kbd_iobase = (unsigned long) ioremap(0x71300060, 8);
 		if (!kbd_iobase)
-			return -ENODEV;
+			return -1;
 	} else {
-		int err = platform_driver_register(&sparc_i8042_driver);
-		if (err)
-			return err;
+		struct linux_ebus *ebus;
+		struct linux_ebus_device *edev;
+		struct linux_ebus_child *child;
 
+		for_each_ebus(ebus) {
+			for_each_ebusdev(edev, ebus) {
+				if (!strcmp(edev->prom_name, "8042"))
+					goto edev_found;
+			}
+		}
+		return -1;
+
+	edev_found:
+		for_each_edevchild(edev, child) {
+			if (!strcmp(child->prom_name, OBP_PS2KBD_NAME1) ||
+			    !strcmp(child->prom_name, OBP_PS2KBD_NAME2)) {
+				i8042_kbd_irq = child->irqs[0];
+				kbd_iobase = (unsigned long)
+					ioremap(child->resource[0].start, 8);
+			}
+			if (!strcmp(child->prom_name, OBP_PS2MS_NAME1) ||
+			    !strcmp(child->prom_name, OBP_PS2MS_NAME2))
+				i8042_aux_irq = child->irqs[0];
+		}
 		if (i8042_kbd_irq == -1 ||
 		    i8042_aux_irq == -1) {
-			if (kbd_iobase) {
-				of_iounmap(kbd_res, kbd_iobase, 8);
-				kbd_iobase = (void __iomem *) NULL;
-			}
-			return -ENODEV;
+			printk("i8042: Error, 8042 device lacks both kbd and "
+			       "mouse nodes.\n");
+			return -1;
 		}
 	}
 
 	i8042_reset = 1;
 
 	return 0;
+#endif /* CONFIG_PCI */
 }
 
 static inline void i8042_platform_exit(void)
 {
-	struct device_node *root = of_find_node_by_path("/");
-
-	if (strcmp(root->name, "SUNW,JavaStation-1"))
-		platform_driver_unregister(&sparc_i8042_driver);
+#ifdef CONFIG_PCI
+	iounmap((void *)kbd_iobase);
+#endif
 }
-
-#else /* !CONFIG_PCI */
-static int __init i8042_platform_init(void)
-{
-	return -ENODEV;
-}
-
-static inline void i8042_platform_exit(void)
-{
-}
-#endif /* !CONFIG_PCI */
 
 #endif /* _I8042_SPARCIO_H */

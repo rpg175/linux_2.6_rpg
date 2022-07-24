@@ -5,6 +5,7 @@
  * Copyright (C) 1996 Paul Mackerras.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
@@ -15,16 +16,13 @@
 #include <linux/init.h>
 #include <linux/crc32.h>
 #include <linux/spinlock.h>
-#include <linux/bitrev.h>
-#include <linux/slab.h>
 #include <asm/prom.h>
 #include <asm/dbdma.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/macio.h>
-
 #include "mace.h"
 
+static struct net_device *mace_devs;
 static int port_aaui = -1;
 
 #define N_RX_RING	8
@@ -41,10 +39,10 @@ static int port_aaui = -1;
 #define TX_DMA_ERR	0x80
 
 struct mace_data {
-    volatile struct mace __iomem *mace;
-    volatile struct dbdma_regs __iomem *tx_dma;
+    volatile struct mace *mace;
+    volatile struct dbdma_regs *tx_dma;
     int tx_dma_intr;
-    volatile struct dbdma_regs __iomem *rx_dma;
+    volatile struct dbdma_regs *rx_dma;
     int rx_dma_intr;
     volatile struct dbdma_cmd *tx_cmds;	/* xmit dma command list */
     volatile struct dbdma_cmd *rx_cmds;	/* recv dma command list */
@@ -58,11 +56,13 @@ struct mace_data {
     unsigned char tx_fullup;
     unsigned char tx_active;
     unsigned char tx_bad_runt;
+    struct net_device_stats stats;
     struct timer_list tx_timeout;
     int timeout_active;
     int port_aaui;
     int chipid;
-    struct macio_dev *mdev;
+    struct device_node* of_node;
+    struct net_device *next_mace;
     spinlock_t lock;
 };
 
@@ -75,18 +75,22 @@ struct mace_data {
 #define PRIV_BYTES	(sizeof(struct mace_data) \
 	+ (N_RX_RING + NCMDS_TX * N_TX_RING + 3) * sizeof(struct dbdma_cmd))
 
+static int bitrev(int);
+static int mace_probe(void);
+static void mace_probe1(struct device_node *mace);
 static int mace_open(struct net_device *dev);
 static int mace_close(struct net_device *dev);
 static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev);
+static struct net_device_stats *mace_stats(struct net_device *dev);
 static void mace_set_multicast(struct net_device *dev);
 static void mace_reset(struct net_device *dev);
 static int mace_set_address(struct net_device *dev, void *addr);
-static irqreturn_t mace_interrupt(int irq, void *dev_id);
-static irqreturn_t mace_txdma_intr(int irq, void *dev_id);
-static irqreturn_t mace_rxdma_intr(int irq, void *dev_id);
+static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mace_txdma_intr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs);
 static void mace_set_timeout(struct net_device *dev);
 static void mace_tx_timeout(unsigned long data);
-static inline void dbdma_reset(volatile struct dbdma_regs __iomem *dma);
+static inline void dbdma_reset(volatile struct dbdma_regs *dma);
 static inline void mace_clean_rings(struct mace_data *mp);
 static void __mace_set_address(struct net_device *dev, void *addr);
 
@@ -95,108 +99,108 @@ static void __mace_set_address(struct net_device *dev, void *addr);
  */
 static unsigned char *dummy_buf;
 
-static const struct net_device_ops mace_netdev_ops = {
-	.ndo_open		= mace_open,
-	.ndo_stop		= mace_close,
-	.ndo_start_xmit		= mace_xmit_start,
-	.ndo_set_multicast_list	= mace_set_multicast,
-	.ndo_set_mac_address	= mace_set_address,
-	.ndo_change_mtu		= eth_change_mtu,
-	.ndo_validate_addr	= eth_validate_addr,
-};
-
-static int __devinit mace_probe(struct macio_dev *mdev, const struct of_device_id *match)
+/* Bit-reverse one byte of an ethernet hardware address. */
+static inline int
+bitrev(int b)
 {
-	struct device_node *mace = macio_get_of_node(mdev);
+    int d = 0, i;
+
+    for (i = 0; i < 8; ++i, b >>= 1)
+	d = (d << 1) | (b & 1);
+    return d;
+}
+
+static int __init mace_probe(void)
+{
+	struct device_node *mace;
+
+	for (mace = find_devices("mace"); mace != NULL; mace = mace->next)
+		mace_probe1(mace);
+	return mace_devs? 0: -ENODEV;
+}
+
+static void __init mace_probe1(struct device_node *mace)
+{
+	int j, rev;
 	struct net_device *dev;
 	struct mace_data *mp;
-	const unsigned char *addr;
-	int j, rev, rc = -EBUSY;
+	unsigned char *addr;
 
-	if (macio_resource_count(mdev) != 3 || macio_irq_count(mdev) != 3) {
+	if (mace->n_addrs != 3 || mace->n_intrs != 3) {
 		printk(KERN_ERR "can't use MACE %s: need 3 addrs and 3 irqs\n",
 		       mace->full_name);
-		return -ENODEV;
+		return;
 	}
 
-	addr = of_get_property(mace, "mac-address", NULL);
+	addr = get_property(mace, "mac-address", NULL);
 	if (addr == NULL) {
-		addr = of_get_property(mace, "local-mac-address", NULL);
+		addr = get_property(mace, "local-mac-address", NULL);
 		if (addr == NULL) {
 			printk(KERN_ERR "Can't get mac-address for MACE %s\n",
 			       mace->full_name);
-			return -ENODEV;
+			return;
 		}
 	}
 
-	/*
-	 * lazy allocate the driver-wide dummy buffer. (Note that we
-	 * never have more than one MACE in the system anyway)
-	 */
 	if (dummy_buf == NULL) {
 		dummy_buf = kmalloc(RX_BUFLEN+2, GFP_KERNEL);
 		if (dummy_buf == NULL) {
 			printk(KERN_ERR "MACE: couldn't allocate dummy buffer\n");
-			return -ENOMEM;
+			return;
 		}
 	}
 
-	if (macio_request_resources(mdev, "mace")) {
-		printk(KERN_ERR "MACE: can't request IO resources !\n");
-		return -EBUSY;
+	dev = init_etherdev(0, PRIV_BYTES);
+	if (!dev)
+		return;
+	SET_MODULE_OWNER(dev);
+
+	mp = dev->priv;
+	mp->of_node = mace;
+	
+	if (!request_OF_resource(mace, 0, " (mace)")) {
+		printk(KERN_ERR "MACE: can't request IO resource !\n");
+		goto err_out;
+	}
+	if (!request_OF_resource(mace, 1, " (mace tx dma)")) {
+		printk(KERN_ERR "MACE: can't request TX DMA resource !\n");
+		goto err_out;
 	}
 
-	dev = alloc_etherdev(PRIV_BYTES);
-	if (!dev) {
-		printk(KERN_ERR "MACE: can't allocate ethernet device !\n");
-		rc = -ENOMEM;
-		goto err_release;
+	if (!request_OF_resource(mace, 2, " (mace tx dma)")) {
+		printk(KERN_ERR "MACE: can't request RX DMA resource !\n");
+		goto err_out;
 	}
-	SET_NETDEV_DEV(dev, &mdev->ofdev.dev);
 
-	mp = netdev_priv(dev);
-	mp->mdev = mdev;
-	macio_set_drvdata(mdev, dev);
+	dev->base_addr = mace->addrs[0].address;
+	mp->mace = (volatile struct mace *)
+		ioremap(mace->addrs[0].address, 0x1000);
+	dev->irq = mace->intrs[0].line;
 
-	dev->base_addr = macio_resource_start(mdev, 0);
-	mp->mace = ioremap(dev->base_addr, 0x1000);
-	if (mp->mace == NULL) {
-		printk(KERN_ERR "MACE: can't map IO resources !\n");
-		rc = -ENOMEM;
-		goto err_free;
-	}
-	dev->irq = macio_irq(mdev, 0);
-
+	printk(KERN_INFO "%s: MACE at", dev->name);
 	rev = addr[0] == 0 && addr[1] == 0xA0;
 	for (j = 0; j < 6; ++j) {
-		dev->dev_addr[j] = rev ? bitrev8(addr[j]): addr[j];
+		dev->dev_addr[j] = rev? bitrev(addr[j]): addr[j];
+		printk("%c%.2x", (j? ':': ' '), dev->dev_addr[j]);
 	}
 	mp->chipid = (in_8(&mp->mace->chipid_hi) << 8) |
 			in_8(&mp->mace->chipid_lo);
+	printk(", chip revision %d.%d\n", mp->chipid >> 8, mp->chipid & 0xff);
+		
 
-
-	mp = netdev_priv(dev);
+	mp = (struct mace_data *) dev->priv;
 	mp->maccc = ENXMT | ENRCV;
-
-	mp->tx_dma = ioremap(macio_resource_start(mdev, 1), 0x1000);
-	if (mp->tx_dma == NULL) {
-		printk(KERN_ERR "MACE: can't map TX DMA resources !\n");
-		rc = -ENOMEM;
-		goto err_unmap_io;
-	}
-	mp->tx_dma_intr = macio_irq(mdev, 1);
-
-	mp->rx_dma = ioremap(macio_resource_start(mdev, 2), 0x1000);
-	if (mp->rx_dma == NULL) {
-		printk(KERN_ERR "MACE: can't map RX DMA resources !\n");
-		rc = -ENOMEM;
-		goto err_unmap_tx_dma;
-	}
-	mp->rx_dma_intr = macio_irq(mdev, 2);
+	mp->tx_dma = (volatile struct dbdma_regs *)
+		ioremap(mace->addrs[1].address, 0x1000);
+	mp->tx_dma_intr = mace->intrs[1].line;
+	mp->rx_dma = (volatile struct dbdma_regs *)
+		ioremap(mace->addrs[2].address, 0x1000);
+	mp->rx_dma_intr = mace->intrs[2].line;
 
 	mp->tx_cmds = (volatile struct dbdma_cmd *) DBDMA_ALIGN(mp + 1);
 	mp->rx_cmds = mp->tx_cmds + NCMDS_TX * N_TX_RING + 1;
 
+	memset(&mp->stats, 0, sizeof(mp->stats));
 	memset((char *) mp->tx_cmds, 0,
 	       (NCMDS_TX*N_TX_RING + N_RX_RING + 2) * sizeof(struct dbdma_cmd));
 	init_timer(&mp->tx_timeout);
@@ -207,101 +211,52 @@ static int __devinit mace_probe(struct macio_dev *mdev, const struct of_device_i
 		mp->port_aaui = port_aaui;
 	else {
 		/* Apple Network Server uses the AAUI port */
-		if (of_machine_is_compatible("AAPL,ShinerESB"))
+		if (machine_is_compatible("AAPL,ShinerESB"))
 			mp->port_aaui = 1;
 		else {
 #ifdef CONFIG_MACE_AAUI_PORT
 			mp->port_aaui = 1;
 #else
 			mp->port_aaui = 0;
-#endif
+#endif			
 		}
 	}
 
-	dev->netdev_ops = &mace_netdev_ops;
+	dev->open = mace_open;
+	dev->stop = mace_close;
+	dev->hard_start_xmit = mace_xmit_start;
+	dev->get_stats = mace_stats;
+	dev->set_multicast_list = mace_set_multicast;
+	dev->set_mac_address = mace_set_address;
 
-	/*
-	 * Most of what is below could be moved to mace_open()
-	 */
+	ether_setup(dev);
+
 	mace_reset(dev);
 
-	rc = request_irq(dev->irq, mace_interrupt, 0, "MACE", dev);
-	if (rc) {
+	if (request_irq(dev->irq, mace_interrupt, 0, "MACE", dev))
 		printk(KERN_ERR "MACE: can't get irq %d\n", dev->irq);
-		goto err_unmap_rx_dma;
-	}
-	rc = request_irq(mp->tx_dma_intr, mace_txdma_intr, 0, "MACE-txdma", dev);
-	if (rc) {
-		printk(KERN_ERR "MACE: can't get irq %d\n", mp->tx_dma_intr);
-		goto err_free_irq;
-	}
-	rc = request_irq(mp->rx_dma_intr, mace_rxdma_intr, 0, "MACE-rxdma", dev);
-	if (rc) {
-		printk(KERN_ERR "MACE: can't get irq %d\n", mp->rx_dma_intr);
-		goto err_free_tx_irq;
-	}
+	if (request_irq(mace->intrs[1].line, mace_txdma_intr, 0, "MACE-txdma",
+			dev))
+		printk(KERN_ERR "MACE: can't get irq %d\n", mace->intrs[1].line);
+	if (request_irq(mace->intrs[2].line, mace_rxdma_intr, 0, "MACE-rxdma",
+			dev))
+		printk(KERN_ERR "MACE: can't get irq %d\n", mace->intrs[2].line);
 
-	rc = register_netdev(dev);
-	if (rc) {
-		printk(KERN_ERR "MACE: Cannot register net device, aborting.\n");
-		goto err_free_rx_irq;
-	}
-
-	printk(KERN_INFO "%s: MACE at %pM, chip revision %d.%d\n",
-	       dev->name, dev->dev_addr,
-	       mp->chipid >> 8, mp->chipid & 0xff);
-
-	return 0;
-
- err_free_rx_irq:
-	free_irq(macio_irq(mdev, 2), dev);
- err_free_tx_irq:
-	free_irq(macio_irq(mdev, 1), dev);
- err_free_irq:
-	free_irq(macio_irq(mdev, 0), dev);
- err_unmap_rx_dma:
-	iounmap(mp->rx_dma);
- err_unmap_tx_dma:
-	iounmap(mp->tx_dma);
- err_unmap_io:
-	iounmap(mp->mace);
- err_free:
-	free_netdev(dev);
- err_release:
-	macio_release_resources(mdev);
-
-	return rc;
-}
-
-static int __devexit mace_remove(struct macio_dev *mdev)
-{
-	struct net_device *dev = macio_get_drvdata(mdev);
-	struct mace_data *mp;
-
-	BUG_ON(dev == NULL);
-
-	macio_set_drvdata(mdev, NULL);
-
-	mp = netdev_priv(dev);
-
+	mp->next_mace = mace_devs;
+	mace_devs = dev;
+	return;
+	
+err_out:
 	unregister_netdev(dev);
-
-	free_irq(dev->irq, dev);
-	free_irq(mp->tx_dma_intr, dev);
-	free_irq(mp->rx_dma_intr, dev);
-
-	iounmap(mp->rx_dma);
-	iounmap(mp->tx_dma);
-	iounmap(mp->mace);
-
+	if (mp->of_node) {
+		release_OF_resource(mp->of_node, 0);
+		release_OF_resource(mp->of_node, 1);
+		release_OF_resource(mp->of_node, 2);
+	}
 	free_netdev(dev);
-
-	macio_release_resources(mdev);
-
-	return 0;
 }
 
-static void dbdma_reset(volatile struct dbdma_regs __iomem *dma)
+static void dbdma_reset(volatile struct dbdma_regs *dma)
 {
     int i;
 
@@ -318,8 +273,8 @@ static void dbdma_reset(volatile struct dbdma_regs __iomem *dma)
 
 static void mace_reset(struct net_device *dev)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
     int i;
 
     /* soft-reset the chip */
@@ -373,8 +328,8 @@ static void mace_reset(struct net_device *dev)
 
 static void __mace_set_address(struct net_device *dev, void *addr)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
     unsigned char *p = addr;
     int i;
 
@@ -394,8 +349,8 @@ static void __mace_set_address(struct net_device *dev, void *addr)
 
 static int mace_set_address(struct net_device *dev, void *addr)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
     unsigned long flags;
 
     spin_lock_irqsave(&mp->lock, flags);
@@ -415,9 +370,9 @@ static inline void mace_clean_rings(struct mace_data *mp)
 
     /* free some skb's */
     for (i = 0; i < N_RX_RING; ++i) {
-	if (mp->rx_bufs[i] != NULL) {
+	if (mp->rx_bufs[i] != 0) {
 	    dev_kfree_skb(mp->rx_bufs[i]);
-	    mp->rx_bufs[i] = NULL;
+	    mp->rx_bufs[i] = 0;
 	}
     }
     for (i = mp->tx_empty; i != mp->tx_fill; ) {
@@ -429,10 +384,10 @@ static inline void mace_clean_rings(struct mace_data *mp)
 
 static int mace_open(struct net_device *dev)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
-    volatile struct dbdma_regs __iomem *rd = mp->rx_dma;
-    volatile struct dbdma_regs __iomem *td = mp->tx_dma;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
+    volatile struct dbdma_regs *rd = mp->rx_dma;
+    volatile struct dbdma_regs *td = mp->tx_dma;
     volatile struct dbdma_cmd *cp;
     int i;
     struct sk_buff *skb;
@@ -447,7 +402,7 @@ static int mace_open(struct net_device *dev)
     cp = mp->rx_cmds;
     for (i = 0; i < N_RX_RING - 1; ++i) {
 	skb = dev_alloc_skb(RX_BUFLEN + 2);
-	if (!skb) {
+	if (skb == 0) {
 	    data = dummy_buf;
 	} else {
 	    skb_reserve(skb, 2);	/* so IP header lands on 4-byte bdry */
@@ -460,7 +415,7 @@ static int mace_open(struct net_device *dev)
 	cp->xfer_status = 0;
 	++cp;
     }
-    mp->rx_bufs[i] = NULL;
+    mp->rx_bufs[i] = 0;
     st_le16(&cp->command, DBDMA_STOP);
     mp->rx_fill = i;
     mp->rx_empty = 0;
@@ -499,10 +454,10 @@ static int mace_open(struct net_device *dev)
 
 static int mace_close(struct net_device *dev)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
-    volatile struct dbdma_regs __iomem *rd = mp->rx_dma;
-    volatile struct dbdma_regs __iomem *td = mp->tx_dma;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
+    volatile struct dbdma_regs *rd = mp->rx_dma;
+    volatile struct dbdma_regs *td = mp->tx_dma;
 
     /* disable rx and tx */
     out_8(&mb->maccc, 0);
@@ -519,7 +474,7 @@ static int mace_close(struct net_device *dev)
 
 static inline void mace_set_timeout(struct net_device *dev)
 {
-    struct mace_data *mp = netdev_priv(dev);
+    struct mace_data *mp = (struct mace_data *) dev->priv;
 
     if (mp->timeout_active)
 	del_timer(&mp->tx_timeout);
@@ -532,8 +487,8 @@ static inline void mace_set_timeout(struct net_device *dev)
 
 static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct dbdma_regs __iomem *td = mp->tx_dma;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct dbdma_regs *td = mp->tx_dma;
     volatile struct dbdma_cmd *cp, *np;
     unsigned long flags;
     int fill, next, len;
@@ -548,7 +503,7 @@ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	mp->tx_fullup = 1;
 	spin_unlock_irqrestore(&mp->lock, flags);
-	return NETDEV_TX_BUSY;		/* can't take it at the moment */
+	return 1;		/* can't take it at the moment */
     }
     spin_unlock_irqrestore(&mp->lock, flags);
 
@@ -582,14 +537,21 @@ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
     spin_unlock_irqrestore(&mp->lock, flags);
 
-    return NETDEV_TX_OK;
+    return 0;
+}
+
+static struct net_device_stats *mace_stats(struct net_device *dev)
+{
+    struct mace_data *p = (struct mace_data *) dev->priv;
+
+    return &p->stats;
 }
 
 static void mace_set_multicast(struct net_device *dev)
 {
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
-    int i;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
+    int i, j;
     u32 crc;
     unsigned long flags;
 
@@ -599,7 +561,7 @@ static void mace_set_multicast(struct net_device *dev)
 	mp->maccc |= PROM;
     } else {
 	unsigned char multicast_filter[8];
-	struct netdev_hw_addr *ha;
+	struct dev_mc_list *dmi = dev->mc_list;
 
 	if (dev->flags & IFF_ALLMULTI) {
 	    for (i = 0; i < 8; i++)
@@ -607,10 +569,11 @@ static void mace_set_multicast(struct net_device *dev)
 	} else {
 	    for (i = 0; i < 8; i++)
 		multicast_filter[i] = 0;
-	    netdev_for_each_mc_addr(ha, dev) {
-	        crc = ether_crc_le(6, ha->addr);
-		i = crc >> 26;	/* bit number in multicast_filter */
-		multicast_filter[i >> 3] |= 1 << (i & 7);
+	    for (i = 0; i < dev->mc_count; i++) {
+	        crc = ether_crc_le(6, dmi->dmi_addr);
+		j = crc >> 26;	/* bit number in multicast_filter */
+		multicast_filter[j >> 3] |= 1 << (j & 7);
+		dmi = dmi->next;
 	    }
 	}
 #if 0
@@ -637,19 +600,19 @@ static void mace_set_multicast(struct net_device *dev)
     spin_unlock_irqrestore(&mp->lock, flags);
 }
 
-static void mace_handle_misc_intrs(struct mace_data *mp, int intr, struct net_device *dev)
+static void mace_handle_misc_intrs(struct mace_data *mp, int intr)
 {
-    volatile struct mace __iomem *mb = mp->mace;
+    volatile struct mace *mb = mp->mace;
     static int mace_babbles, mace_jabbers;
 
     if (intr & MPCO)
-	dev->stats.rx_missed_errors += 256;
-    dev->stats.rx_missed_errors += in_8(&mb->mpc);   /* reading clears it */
+	mp->stats.rx_missed_errors += 256;
+    mp->stats.rx_missed_errors += in_8(&mb->mpc);   /* reading clears it */
     if (intr & RNTPCO)
-	dev->stats.rx_length_errors += 256;
-    dev->stats.rx_length_errors += in_8(&mb->rntpc); /* reading clears it */
+	mp->stats.rx_length_errors += 256;
+    mp->stats.rx_length_errors += in_8(&mb->rntpc); /* reading clears it */
     if (intr & CERR)
-	++dev->stats.tx_heartbeat_errors;
+	++mp->stats.tx_heartbeat_errors;
     if (intr & BABBLE)
 	if (mace_babbles++ < 4)
 	    printk(KERN_DEBUG "mace: babbling transmitter\n");
@@ -658,12 +621,12 @@ static void mace_handle_misc_intrs(struct mace_data *mp, int intr, struct net_de
 	    printk(KERN_DEBUG "mace: jabbering transceiver\n");
 }
 
-static irqreturn_t mace_interrupt(int irq, void *dev_id)
+static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     struct net_device *dev = (struct net_device *) dev_id;
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
-    volatile struct dbdma_regs __iomem *td = mp->tx_dma;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
+    volatile struct dbdma_regs *td = mp->tx_dma;
     volatile struct dbdma_cmd *cp;
     int intr, fs, i, stat, x;
     int xcount, dstat;
@@ -673,7 +636,7 @@ static irqreturn_t mace_interrupt(int irq, void *dev_id)
     spin_lock_irqsave(&mp->lock, flags);
     intr = in_8(&mb->ir);		/* read interrupt register */
     in_8(&mb->xmtrc);			/* get retries */
-    mace_handle_misc_intrs(mp, intr, dev);
+    mace_handle_misc_intrs(mp, intr);
 
     i = mp->tx_empty;
     while (in_8(&mb->pr) & XMTSV) {
@@ -686,7 +649,7 @@ static irqreturn_t mace_interrupt(int irq, void *dev_id)
 	 */
 	intr = in_8(&mb->ir);
 	if (intr != 0)
-	    mace_handle_misc_intrs(mp, intr, dev);
+	    mace_handle_misc_intrs(mp, intr);
 	if (mp->tx_bad_runt) {
 	    fs = in_8(&mb->xmtfs);
 	    mp->tx_bad_runt = 0;
@@ -760,14 +723,14 @@ static irqreturn_t mace_interrupt(int irq, void *dev_id)
 	}
 	/* Update stats */
 	if (fs & (UFLO|LCOL|LCAR|RTRY)) {
-	    ++dev->stats.tx_errors;
+	    ++mp->stats.tx_errors;
 	    if (fs & LCAR)
-		++dev->stats.tx_carrier_errors;
+		++mp->stats.tx_carrier_errors;
 	    if (fs & (UFLO|LCOL|RTRY))
-		++dev->stats.tx_aborted_errors;
+		++mp->stats.tx_aborted_errors;
 	} else {
-	    dev->stats.tx_bytes += mp->tx_bufs[i]->len;
-	    ++dev->stats.tx_packets;
+	    mp->stats.tx_bytes += mp->tx_bufs[i]->len;
+	    ++mp->stats.tx_packets;
 	}
 	dev_kfree_skb_irq(mp->tx_bufs[i]);
 	--mp->tx_active;
@@ -807,10 +770,10 @@ static irqreturn_t mace_interrupt(int irq, void *dev_id)
 static void mace_tx_timeout(unsigned long data)
 {
     struct net_device *dev = (struct net_device *) data;
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct mace __iomem *mb = mp->mace;
-    volatile struct dbdma_regs __iomem *td = mp->tx_dma;
-    volatile struct dbdma_regs __iomem *rd = mp->rx_dma;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
+    volatile struct dbdma_regs *td = mp->tx_dma;
+    volatile struct dbdma_regs *rd = mp->rx_dma;
     volatile struct dbdma_cmd *cp;
     unsigned long flags;
     int i;
@@ -821,7 +784,7 @@ static void mace_tx_timeout(unsigned long data)
 	goto out;
 
     /* update various counters */
-    mace_handle_misc_intrs(mp, in_8(&mb->ir), dev);
+    mace_handle_misc_intrs(mp, in_8(&mb->ir));
 
     cp = mp->tx_cmds + NCMDS_TX * mp->tx_empty;
 
@@ -841,7 +804,7 @@ static void mace_tx_timeout(unsigned long data)
     /* fix up the transmit side */
     i = mp->tx_empty;
     mp->tx_active = 0;
-    ++dev->stats.tx_errors;
+    ++mp->stats.tx_errors;
     if (mp->tx_bad_runt) {
 	mp->tx_bad_runt = 0;
     } else if (i != mp->tx_fill) {
@@ -870,16 +833,16 @@ out:
     spin_unlock_irqrestore(&mp->lock, flags);
 }
 
-static irqreturn_t mace_txdma_intr(int irq, void *dev_id)
+static irqreturn_t mace_txdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t mace_rxdma_intr(int irq, void *dev_id)
+static irqreturn_t mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
     struct net_device *dev = (struct net_device *) dev_id;
-    struct mace_data *mp = netdev_priv(dev);
-    volatile struct dbdma_regs __iomem *rd = mp->rx_dma;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct dbdma_regs *rd = mp->rx_dma;
     volatile struct dbdma_cmd *cp, *np;
     int i, nb, stat, next;
     struct sk_buff *skb;
@@ -897,8 +860,8 @@ static irqreturn_t mace_rxdma_intr(int irq, void *dev_id)
 	    if (next >= N_RX_RING)
 		next = 0;
 	    np = mp->rx_cmds + next;
-	    if (next != mp->rx_fill &&
-		(ld_le16(&np->xfer_status) & ACTIVE) != 0) {
+	    if (next != mp->rx_fill
+		&& (ld_le16(&np->xfer_status) & ACTIVE) != 0) {
 		printk(KERN_DEBUG "mace: lost a status word\n");
 		++mace_lost_status;
 	    } else
@@ -908,19 +871,19 @@ static irqreturn_t mace_rxdma_intr(int irq, void *dev_id)
 	out_le16(&cp->command, DBDMA_STOP);
 	/* got a packet, have a look at it */
 	skb = mp->rx_bufs[i];
-	if (!skb) {
-	    ++dev->stats.rx_dropped;
+	if (skb == 0) {
+	    ++mp->stats.rx_dropped;
 	} else if (nb > 8) {
 	    data = skb->data;
 	    frame_status = (data[nb-3] << 8) + data[nb-4];
 	    if (frame_status & (RS_OFLO|RS_CLSN|RS_FRAMERR|RS_FCSERR)) {
-		++dev->stats.rx_errors;
+		++mp->stats.rx_errors;
 		if (frame_status & RS_OFLO)
-		    ++dev->stats.rx_over_errors;
+		    ++mp->stats.rx_over_errors;
 		if (frame_status & RS_FRAMERR)
-		    ++dev->stats.rx_frame_errors;
+		    ++mp->stats.rx_frame_errors;
 		if (frame_status & RS_FCSERR)
-		    ++dev->stats.rx_crc_errors;
+		    ++mp->stats.rx_crc_errors;
 	    } else {
 		/* Mace feature AUTO_STRIP_RCV is on by default, dropping the
 		 * FCS on frames with 802.3 headers. This means that Ethernet
@@ -931,15 +894,17 @@ static irqreturn_t mace_rxdma_intr(int irq, void *dev_id)
 		else	/* Ethernet header; mace includes FCS */
 		    nb -= 8;
 		skb_put(skb, nb);
+		skb->dev = dev;
 		skb->protocol = eth_type_trans(skb, dev);
-		dev->stats.rx_bytes += skb->len;
+		mp->stats.rx_bytes += skb->len;
 		netif_rx(skb);
-		mp->rx_bufs[i] = NULL;
-		++dev->stats.rx_packets;
+		dev->last_rx = jiffies;
+		mp->rx_bufs[i] = 0;
+		++mp->stats.rx_packets;
 	    }
 	} else {
-	    ++dev->stats.rx_errors;
-	    ++dev->stats.rx_length_errors;
+	    ++mp->stats.rx_errors;
+	    ++mp->stats.rx_length_errors;
 	}
 
 	/* advance to next */
@@ -957,9 +922,9 @@ static irqreturn_t mace_rxdma_intr(int irq, void *dev_id)
 	    break;
 	cp = mp->rx_cmds + i;
 	skb = mp->rx_bufs[i];
-	if (!skb) {
+	if (skb == 0) {
 	    skb = dev_alloc_skb(RX_BUFLEN + 2);
-	    if (skb) {
+	    if (skb != 0) {
 		skb_reserve(skb, 2);
 		mp->rx_bufs[i] = skb;
 	    }
@@ -986,45 +951,37 @@ static irqreturn_t mace_rxdma_intr(int irq, void *dev_id)
     return IRQ_HANDLED;
 }
 
-static struct of_device_id mace_match[] =
-{
-	{
-	.name 		= "mace",
-	},
-	{},
-};
-MODULE_DEVICE_TABLE (of, mace_match);
-
-static struct macio_driver mace_driver =
-{
-	.driver = {
-		.name 		= "mace",
-		.owner		= THIS_MODULE,
-		.of_match_table	= mace_match,
-	},
-	.probe		= mace_probe,
-	.remove		= mace_remove,
-};
-
-
-static int __init mace_init(void)
-{
-	return macio_register_driver(&mace_driver);
-}
-
-static void __exit mace_cleanup(void)
-{
-	macio_unregister_driver(&mace_driver);
-
-	kfree(dummy_buf);
-	dummy_buf = NULL;
-}
-
 MODULE_AUTHOR("Paul Mackerras");
 MODULE_DESCRIPTION("PowerMac MACE driver.");
-module_param(port_aaui, int, 0);
+MODULE_PARM(port_aaui, "i");
 MODULE_PARM_DESC(port_aaui, "MACE uses AAUI port (0-1)");
 MODULE_LICENSE("GPL");
 
-module_init(mace_init);
+static void __exit mace_cleanup (void)
+{
+    struct net_device *dev;
+    struct mace_data *mp;
+
+    while ((dev = mace_devs) != 0) {
+		mp = (struct mace_data *) mace_devs->priv;
+		mace_devs = mp->next_mace;
+
+		unregister_netdev(dev);
+		free_irq(dev->irq, dev);
+		free_irq(mp->tx_dma_intr, dev);
+		free_irq(mp->rx_dma_intr, dev);
+
+		release_OF_resource(mp->of_node, 0);
+		release_OF_resource(mp->of_node, 1);
+		release_OF_resource(mp->of_node, 2);
+
+		kfree(dev);
+    }
+    if (dummy_buf != NULL) {
+		kfree(dummy_buf);
+		dummy_buf = NULL;
+    }
+}
+
+module_init(mace_probe);
 module_exit(mace_cleanup);

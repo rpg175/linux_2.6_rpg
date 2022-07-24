@@ -1,126 +1,117 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright © 2001-2007 Red Hat, Inc.
- * Copyright © 2004-2010 David Woodhouse <dwmw2@infradead.org>
+ * Copyright (C) 2001-2003 Red Hat, Inc.
  *
- * Created by David Woodhouse <dwmw2@infradead.org>
+ * Created by David Woodhouse <dwmw2@redhat.com>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
  *
+ * $Id: background.c,v 1.44 2003/10/08 13:29:55 dwmw2 Exp $
+ *
  */
+
+#define __KERNEL_SYSCALLS__
 
 #include <linux/kernel.h>
 #include <linux/jffs2.h>
 #include <linux/mtd/mtd.h>
 #include <linux/completion.h>
 #include <linux/sched.h>
-#include <linux/freezer.h>
-#include <linux/kthread.h>
+#include <linux/unistd.h>
+#include <linux/suspend.h>
 #include "nodelist.h"
 
 
 static int jffs2_garbage_collect_thread(void *);
+static int thread_should_wake(struct jffs2_sb_info *c);
 
 void jffs2_garbage_collect_trigger(struct jffs2_sb_info *c)
 {
-	assert_spin_locked(&c->erase_completion_lock);
-	if (c->gc_task && jffs2_thread_should_wake(c))
-		send_sig(SIGHUP, c->gc_task, 1);
+	spin_lock(&c->erase_completion_lock);
+        if (c->gc_task && thread_should_wake(c))
+                send_sig(SIGHUP, c->gc_task, 1);
+	spin_unlock(&c->erase_completion_lock);
 }
 
 /* This must only ever be called when no GC thread is currently running */
 int jffs2_start_garbage_collect_thread(struct jffs2_sb_info *c)
 {
-	struct task_struct *tsk;
+	pid_t pid;
 	int ret = 0;
 
-	BUG_ON(c->gc_task);
+	if (c->gc_task)
+		BUG();
 
-	init_completion(&c->gc_thread_start);
+	init_MUTEX_LOCKED(&c->gc_thread_start);
 	init_completion(&c->gc_thread_exit);
 
-	tsk = kthread_run(jffs2_garbage_collect_thread, c, "jffs2_gcd_mtd%d", c->mtd->index);
-	if (IS_ERR(tsk)) {
-		printk(KERN_WARNING "fork failed for JFFS2 garbage collect thread: %ld\n", -PTR_ERR(tsk));
+	pid = kernel_thread(jffs2_garbage_collect_thread, c, CLONE_FS|CLONE_FILES);
+	if (pid < 0) {
+		printk(KERN_WARNING "fork failed for JFFS2 garbage collect thread: %d\n", -pid);
 		complete(&c->gc_thread_exit);
-		ret = PTR_ERR(tsk);
+		ret = pid;
 	} else {
 		/* Wait for it... */
-		D1(printk(KERN_DEBUG "JFFS2: Garbage collect thread is pid %d\n", tsk->pid));
-		wait_for_completion(&c->gc_thread_start);
-		ret = tsk->pid;
+		D1(printk(KERN_DEBUG "JFFS2: Garbage collect thread is pid %d\n", pid));
+		down(&c->gc_thread_start);
 	}
-
+ 
 	return ret;
 }
 
 void jffs2_stop_garbage_collect_thread(struct jffs2_sb_info *c)
 {
-	int wait = 0;
 	spin_lock(&c->erase_completion_lock);
 	if (c->gc_task) {
 		D1(printk(KERN_DEBUG "jffs2: Killing GC task %d\n", c->gc_task->pid));
 		send_sig(SIGKILL, c->gc_task, 1);
-		wait = 1;
 	}
 	spin_unlock(&c->erase_completion_lock);
-	if (wait)
-		wait_for_completion(&c->gc_thread_exit);
+	wait_for_completion(&c->gc_thread_exit);
 }
 
 static int jffs2_garbage_collect_thread(void *_c)
 {
 	struct jffs2_sb_info *c = _c;
 
+	daemonize("jffs2_gcd_mtd%d", c->mtd->index);
 	allow_signal(SIGKILL);
 	allow_signal(SIGSTOP);
 	allow_signal(SIGCONT);
 
 	c->gc_task = current;
-	complete(&c->gc_thread_start);
+	up(&c->gc_thread_start);
 
 	set_user_nice(current, 10);
 
-	set_freezable();
 	for (;;) {
 		allow_signal(SIGHUP);
-	again:
-		spin_lock(&c->erase_completion_lock);
-		if (!jffs2_thread_should_wake(c)) {
+
+		if (!thread_should_wake(c)) {
 			set_current_state (TASK_INTERRUPTIBLE);
-			spin_unlock(&c->erase_completion_lock);
 			D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread sleeping...\n"));
+			/* Yes, there's a race here; we checked thread_should_wake() before
+			   setting current->state to TASK_INTERRUPTIBLE. But it doesn't
+			   matter - We don't care if we miss a wakeup, because the GC thread
+			   is only an optimisation anyway. */
 			schedule();
-		} else
-			spin_unlock(&c->erase_completion_lock);
-			
-
-		/* Problem - immediately after bootup, the GCD spends a lot
-		 * of time in places like jffs2_kill_fragtree(); so much so
-		 * that userspace processes (like gdm and X) are starved
-		 * despite plenty of cond_resched()s and renicing.  Yield()
-		 * doesn't help, either (presumably because userspace and GCD
-		 * are generally competing for a higher latency resource -
-		 * disk).
-		 * This forces the GCD to slow the hell down.   Pulling an
-		 * inode in with read_inode() is much preferable to having
-		 * the GC thread get there first. */
-		schedule_timeout_interruptible(msecs_to_jiffies(50));
-
-		if (kthread_should_stop()) {
-			D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread():  kthread_stop() called.\n"));
-			goto die;
 		}
 
-		/* Put_super will send a SIGKILL and then wait on the sem.
+		if (current->flags & PF_FREEZE) {
+			refrigerator(0);
+			/* refrigerator() should recalc sigpending for us
+			   but doesn't. No matter - allow_signal() will. */
+			continue;
+		}
+
+		cond_resched();
+
+		/* Put_super will send a SIGKILL and then wait on the sem. 
 		 */
-		while (signal_pending(current) || freezing(current)) {
+		while (signal_pending(current)) {
 			siginfo_t info;
 			unsigned long signr;
-
-			if (try_to_freeze())
-				goto again;
 
 			signr = dequeue_signal_lock(current, &current->blocked, &info);
 
@@ -133,7 +124,11 @@ static int jffs2_garbage_collect_thread(void *_c)
 
 			case SIGKILL:
 				D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread(): SIGKILL received.\n"));
-				goto die;
+			die:
+				spin_lock(&c->erase_completion_lock);
+				c->gc_task = NULL;
+				spin_unlock(&c->erase_completion_lock);
+				complete_and_exit(&c->gc_thread_exit, 0);
 
 			case SIGHUP:
 				D1(printk(KERN_DEBUG "jffs2_garbage_collect_thread(): SIGHUP received.\n"));
@@ -151,9 +146,35 @@ static int jffs2_garbage_collect_thread(void *_c)
 			goto die;
 		}
 	}
- die:
-	spin_lock(&c->erase_completion_lock);
-	c->gc_task = NULL;
-	spin_unlock(&c->erase_completion_lock);
-	complete_and_exit(&c->gc_thread_exit, 0);
+}
+
+static int thread_should_wake(struct jffs2_sb_info *c)
+{
+	int ret = 0;
+	uint32_t dirty;
+
+	if (c->unchecked_size) {
+		D1(printk(KERN_DEBUG "thread_should_wake(): unchecked_size %d, checked_ino #%d\n",
+			  c->unchecked_size, c->checked_ino));
+		return 1;
+	}
+
+	/* dirty_size contains blocks on erase_pending_list
+	 * those blocks are counted in c->nr_erasing_blocks.
+	 * If one block is actually erased, it is not longer counted as dirty_space
+	 * but it is counted in c->nr_erasing_blocks, so we add it and subtract it
+	 * with c->nr_erasing_blocks * c->sector_size again.
+	 * Blocks on erasable_list are counted as dirty_size, but not in c->nr_erasing_blocks
+	 * This helps us to force gc and pick eventually a clean block to spread the load.
+	 */
+	dirty = c->dirty_size + c->erasing_size - c->nr_erasing_blocks * c->sector_size;
+
+	if (c->nr_free_blocks + c->nr_erasing_blocks < c->resv_blocks_gctrigger && 
+			(dirty > c->nospc_dirty_size)) 
+		ret = 1;
+
+	D1(printk(KERN_DEBUG "thread_should_wake(): nr_free_blocks %d, nr_erasing_blocks %d, dirty_size 0x%x: %s\n", 
+		  c->nr_free_blocks, c->nr_erasing_blocks, c->dirty_size, ret?"yes":"no"));
+
+	return ret;
 }

@@ -15,16 +15,19 @@
  */
 
 #include <linux/module.h>
-#include <linux/console.h>
+#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/tty.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/fb.h>
 #include <linux/init.h>
+#include <linux/pci.h>
 #include <asm/io.h>
 #include <asm/jazz.h>
 
@@ -199,9 +202,6 @@ int __init g364fb_init(void)
 	    (volatile unsigned int *) CURS_PAL_REG;
 	int mem, i, j;
 
-	if (fb_get_options("g364fb", NULL))
-		return -ENODEV;
-
 	/* TBD: G364 detection */
 
 	/* get the resolution set by ARC console */
@@ -241,7 +241,7 @@ int __init g364fb_init(void)
 	fb_info.screen_base = (char *) G364_MEM_BASE;	/* virtual kernel address */
 	fb_info.var = fb_var;
 	fb_info.fix = fb_fix;
-	fb_info.flags = FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN;
+	fb_info.flags = FBINFO_FLAG_DEFAULT;
 
 	fb_alloc_cmap(&fb_info.cmap, 255, 0);
 
@@ -250,5 +250,4 @@ int __init g364fb_init(void)
 	return 0;
 }
 
-module_init(g364fb_init);
 MODULE_LICENSE("GPL");

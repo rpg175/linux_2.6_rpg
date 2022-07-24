@@ -24,7 +24,6 @@
  * **********************
  */
 #include <linux/module.h>
-#include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/if_arp.h>
 #include <net/arp.h>
@@ -35,7 +34,7 @@
 #define VERSION "arcnet: RFC1051 \"simple standard\" (`s') encapsulation support loaded.\n"
 
 
-static __be16 type_trans(struct sk_buff *skb, struct net_device *dev);
+static unsigned short type_trans(struct sk_buff *skb, struct net_device *dev);
 static void rx(struct net_device *dev, int bufnum,
 	       struct archdr *pkthdr, int length);
 static int build_header(struct sk_buff *skb, struct net_device *dev,
@@ -44,16 +43,13 @@ static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		      int bufnum);
 
 
-static struct ArcProto rfc1051_proto =
+struct ArcProto rfc1051_proto =
 {
 	.suffix		= 's',
 	.mtu		= XMTU - RFC1051_HDR_SIZE,
-	.is_ip          = 1,
 	.rx		= rx,
 	.build_header	= build_header,
 	.prepare_tx	= prepare_tx,
-	.continue_tx    = NULL,
-	.ack_tx         = NULL
 };
 
 
@@ -87,14 +83,15 @@ MODULE_LICENSE("GPL");
  * 
  * With ARCnet we have to convert everything to Ethernet-style stuff.
  */
-static __be16 type_trans(struct sk_buff *skb, struct net_device *dev)
+static unsigned short type_trans(struct sk_buff *skb, struct net_device *dev)
 {
+	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	struct archdr *pkt = (struct archdr *) skb->data;
 	struct arc_rfc1051 *soft = &pkt->soft.rfc1051;
 	int hdr_size = ARC_HDR_SIZE + RFC1051_HDR_SIZE;
 
 	/* Pull off the arcnet header. */
-	skb_reset_mac_header(skb);
+	skb->mac.raw = skb->data;
 	skb_pull(skb, hdr_size);
 
 	if (pkt->hard.dest == 0)
@@ -112,8 +109,8 @@ static __be16 type_trans(struct sk_buff *skb, struct net_device *dev)
 		return htons(ETH_P_ARP);
 
 	default:
-		dev->stats.rx_errors++;
-		dev->stats.rx_crc_errors++;
+		lp->stats.rx_errors++;
+		lp->stats.rx_crc_errors++;
 		return 0;
 	}
 
@@ -125,7 +122,7 @@ static __be16 type_trans(struct sk_buff *skb, struct net_device *dev)
 static void rx(struct net_device *dev, int bufnum,
 	       struct archdr *pkthdr, int length)
 {
-	struct arcnet_local *lp = netdev_priv(dev);
+	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	struct sk_buff *skb;
 	struct archdr *pkt = pkthdr;
 	int ofs;
@@ -140,7 +137,7 @@ static void rx(struct net_device *dev, int bufnum,
 	skb = alloc_skb(length + ARC_HDR_SIZE, GFP_ATOMIC);
 	if (skb == NULL) {
 		BUGMSG(D_NORMAL, "Memory squeeze, dropping packet.\n");
-		dev->stats.rx_dropped++;
+		lp->stats.rx_dropped++;
 		return;
 	}
 	skb_put(skb, length + ARC_HDR_SIZE);
@@ -159,6 +156,7 @@ static void rx(struct net_device *dev, int bufnum,
 
 	skb->protocol = type_trans(skb, dev);
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 }
 
 
@@ -168,6 +166,7 @@ static void rx(struct net_device *dev, int bufnum,
 static int build_header(struct sk_buff *skb, struct net_device *dev,
 			unsigned short type, uint8_t daddr)
 {
+	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	int hdr_size = ARC_HDR_SIZE + RFC1051_HDR_SIZE;
 	struct archdr *pkt = (struct archdr *) skb_push(skb, hdr_size);
 	struct arc_rfc1051 *soft = &pkt->soft.rfc1051;
@@ -183,8 +182,8 @@ static int build_header(struct sk_buff *skb, struct net_device *dev,
 	default:
 		BUGMSG(D_NORMAL, "RFC1051: I don't understand protocol %d (%Xh)\n",
 		       type, type);
-		dev->stats.tx_errors++;
-		dev->stats.tx_aborted_errors++;
+		lp->stats.tx_errors++;
+		lp->stats.tx_aborted_errors++;
 		return 0;
 	}
 
@@ -218,7 +217,7 @@ static int build_header(struct sk_buff *skb, struct net_device *dev,
 static int prepare_tx(struct net_device *dev, struct archdr *pkt, int length,
 		      int bufnum)
 {
-	struct arcnet_local *lp = netdev_priv(dev);
+	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	struct arc_hardware *hard = &pkt->hard;
 	int ofs;
 

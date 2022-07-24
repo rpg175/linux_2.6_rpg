@@ -1,33 +1,30 @@
 /*
- * System-specific setup, especially interrupts.
+ * Setup the interrupt stuff.
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1998 Harald Koerfgen
- * Copyright (C) 2000, 2001, 2002, 2003, 2005  Maciej W. Rozycki
+ * Copyright (C) 2000, 2001, 2002, 2003  Maciej W. Rozycki
  */
+#include <linux/config.h>
+#include <linux/sched.h>
+#include <linux/interrupt.h>
+#include <linux/mc146818rtc.h>
+#include <linux/param.h>
 #include <linux/console.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
-#include <linux/ioport.h>
 #include <linux/module.h>
-#include <linux/param.h>
-#include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
-#include <linux/pm.h>
-#include <linux/irq.h>
 
-#include <asm/bootinfo.h>
 #include <asm/cpu.h>
-#include <asm/cpu-features.h>
+#include <asm/bootinfo.h>
 #include <asm/irq.h>
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
 #include <asm/reboot.h>
-#include <asm/time.h>
 #include <asm/traps.h>
 #include <asm/wbflush.h>
 
@@ -41,26 +38,19 @@
 #include <asm/dec/kn02ca.h>
 #include <asm/dec/kn03.h>
 #include <asm/dec/kn230.h>
-#include <asm/dec/system.h>
 
 
 extern void dec_machine_restart(char *command);
 extern void dec_machine_halt(void);
 extern void dec_machine_power_off(void);
-extern irqreturn_t dec_intr_halt(int irq, void *dev_id);
+extern void dec_intr_halt(int irq, void *dev_id, struct pt_regs *regs);
 
-unsigned long dec_kn_slot_base, dec_kn_slot_size;
+extern asmlinkage void decstation_handle_int(void);
 
-EXPORT_SYMBOL(dec_kn_slot_base);
-EXPORT_SYMBOL(dec_kn_slot_size);
-
-int dec_tc_bus;
-
-DEFINE_SPINLOCK(ioasic_ssr_lock);
+spinlock_t ioasic_ssr_lock;
 
 volatile u32 *ioasic_base;
-
-EXPORT_SYMBOL(ioasic_base);
+unsigned long dec_kn_slot_size;
 
 /*
  * IRQ routing and priority tables.  Priorites are set as follows:
@@ -87,9 +77,6 @@ EXPORT_SYMBOL(ioasic_base);
 int dec_interrupt[DEC_NR_INTS] = {
 	[0 ... DEC_NR_INTS - 1] = -1
 };
-
-EXPORT_SYMBOL(dec_interrupt);
-
 int_ptr cpu_mask_nr_tbl[DEC_MAX_CPU_INTS][2] = {
 	{ { .i = ~0 }, { .p = dec_intr_unimplemented } },
 };
@@ -108,7 +95,7 @@ static struct irqaction fpuirq = {
 };
 
 static struct irqaction busirq = {
-	.flags = IRQF_DISABLED,
+	.flags = SA_INTERRUPT,
 	.name = "bus error",
 };
 
@@ -118,23 +105,36 @@ static struct irqaction haltirq = {
 };
 
 
+void (*board_time_init)(struct irqaction *irq);
+
+
+/*
+ * enable the periodic interrupts
+ */
+static void __init dec_time_init(struct irqaction *irq)
+{
+	/*
+	* Here we go, enable periodic rtc interrupts.
+	*/
+
+#ifndef LOG_2_HZ
+#  define LOG_2_HZ 7
+#endif
+
+	CMOS_WRITE(RTC_REF_CLCK_32KHZ | (16 - LOG_2_HZ), RTC_REG_A);
+	CMOS_WRITE(CMOS_READ(RTC_REG_B) | RTC_PIE, RTC_REG_B);
+	setup_irq(dec_interrupt[DEC_IRQ_RTC], irq);
+}
+
+
 /*
  * Bus error (DBE/IBE exceptions and bus interrupts) handling setup.
  */
-static void __init dec_be_init(void)
+void __init dec_be_init(void)
 {
 	switch (mips_machtype) {
 	case MACH_DS23100:	/* DS2100/DS3100 Pmin/Pmax */
-		board_be_handler = dec_kn01_be_handler;
-		busirq.handler = dec_kn01_be_interrupt;
-		busirq.flags |= IRQF_SHARED;
-		dec_kn01_be_init();
-		break;
-	case MACH_DS5000_1XX:	/* DS5000/1xx 3min */
-	case MACH_DS5000_XX:	/* DS5000/xx Maxine */
-		board_be_handler = dec_kn02xa_be_handler;
-		busirq.handler = dec_kn02xa_be_interrupt;
-		dec_kn02xa_be_init();
+		busirq.flags |= SA_SHIRQ;
 		break;
 	case MACH_DS5000_200:	/* DS5000/200 3max */
 	case MACH_DS5000_2X0:	/* DS5000/240 3max+ */
@@ -146,19 +146,25 @@ static void __init dec_be_init(void)
 	}
 }
 
-void __init plat_mem_setup(void)
+
+void __init decstation_setup(void)
 {
 	board_be_init = dec_be_init;
+	board_time_init = dec_time_init;
 
 	wbflush_setup();
 
 	_machine_restart = dec_machine_restart;
 	_machine_halt = dec_machine_halt;
-	pm_power_off = dec_machine_power_off;
+	_machine_power_off = dec_machine_power_off;
 
-	ioport_resource.start = ~0UL;
-	ioport_resource.end = 0UL;
+#ifdef CONFIG_FB
+	conswitchp = &dummy_con;
+#endif
+
+	rtc_ops = &dec_rtc_ops;
 }
+
 
 /*
  * Machine-specific initialisation for KN01, aka DS2100 (aka Pmin)
@@ -223,7 +229,7 @@ static int_ptr kn01_cpu_mask_nr_tbl[][2] __initdata = {
 		{ .p = cpu_all_int } },
 };
 
-static void __init dec_init_kn01(void)
+void __init dec_init_kn01(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn01_interrupt,
@@ -233,7 +239,7 @@ static void __init dec_init_kn01(void)
 	memcpy(&cpu_mask_nr_tbl, &kn01_cpu_mask_nr_tbl,
 		sizeof(kn01_cpu_mask_nr_tbl));
 
-	mips_cpu_irq_init();
+	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
 
 }				/* dec_init_kn01 */
 
@@ -298,7 +304,7 @@ static int_ptr kn230_cpu_mask_nr_tbl[][2] __initdata = {
 		{ .p = cpu_all_int } },
 };
 
-static void __init dec_init_kn230(void)
+void __init dec_init_kn230(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn230_interrupt,
@@ -308,7 +314,7 @@ static void __init dec_init_kn230(void)
 	memcpy(&cpu_mask_nr_tbl, &kn230_cpu_mask_nr_tbl,
 		sizeof(kn230_cpu_mask_nr_tbl));
 
-	mips_cpu_irq_init();
+	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
 
 }				/* dec_init_kn230 */
 
@@ -388,7 +394,7 @@ static int_ptr kn02_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = kn02_all_int } },
 };
 
-static void __init dec_init_kn02(void)
+void __init dec_init_kn02(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn02_interrupt,
@@ -402,7 +408,7 @@ static void __init dec_init_kn02(void)
 	memcpy(&asic_mask_nr_tbl, &kn02_asic_mask_nr_tbl,
 		sizeof(kn02_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init();
+	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
 	init_kn02_irqs(KN02_IRQ_BASE);
 
 }				/* dec_init_kn02 */
@@ -489,7 +495,7 @@ static int_ptr kn02ba_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = asic_all_int } },
 };
 
-static void __init dec_init_kn02ba(void)
+void __init dec_init_kn02ba(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn02ba_interrupt,
@@ -503,7 +509,7 @@ static void __init dec_init_kn02ba(void)
 	memcpy(&asic_mask_nr_tbl, &kn02ba_asic_mask_nr_tbl,
 		sizeof(kn02ba_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init();
+	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
 	init_ioasic_irqs(IO_IRQ_BASE);
 
 }				/* dec_init_kn02ba */
@@ -586,7 +592,7 @@ static int_ptr kn02ca_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = asic_all_int } },
 };
 
-static void __init dec_init_kn02ca(void)
+void __init dec_init_kn02ca(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn02ca_interrupt,
@@ -600,7 +606,7 @@ static void __init dec_init_kn02ca(void)
 	memcpy(&asic_mask_nr_tbl, &kn02ca_asic_mask_nr_tbl,
 		sizeof(kn02ca_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init();
+	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
 	init_ioasic_irqs(IO_IRQ_BASE);
 
 }				/* dec_init_kn02ca */
@@ -687,7 +693,7 @@ static int_ptr kn03_asic_mask_nr_tbl[][2] __initdata = {
 		{ .p = asic_all_int } },
 };
 
-static void __init dec_init_kn03(void)
+void __init dec_init_kn03(void)
 {
 	/* IRQ routing. */
 	memcpy(&dec_interrupt, &kn03_interrupt,
@@ -701,13 +707,13 @@ static void __init dec_init_kn03(void)
 	memcpy(&asic_mask_nr_tbl, &kn03_asic_mask_nr_tbl,
 		sizeof(kn03_asic_mask_nr_tbl));
 
-	mips_cpu_irq_init();
+	mips_cpu_irq_init(DEC_CPU_IRQ_BASE);
 	init_ioasic_irqs(IO_IRQ_BASE);
 
 }				/* dec_init_kn03 */
 
 
-void __init arch_init_irq(void)
+void __init init_IRQ(void)
 {
 	switch (mips_machtype) {
 	case MACH_DS23100:	/* DS2100/DS3100 Pmin/Pmax */
@@ -739,6 +745,7 @@ void __init arch_init_irq(void)
 		panic("Don't know how to set this up!");
 		break;
 	}
+	set_except_vector(0, decstation_handle_int);
 
 	/* Free the FPU interrupt if the exception is present. */
 	if (!cpu_has_nofpuex) {
@@ -761,8 +768,6 @@ void __init arch_init_irq(void)
 		setup_irq(dec_interrupt[DEC_IRQ_HALT], &haltirq);
 }
 
-asmlinkage unsigned int dec_irq_dispatch(unsigned int irq)
-{
-	do_IRQ(irq);
-	return 0;
-}
+EXPORT_SYMBOL(ioasic_base);
+EXPORT_SYMBOL(dec_kn_slot_size);
+EXPORT_SYMBOL(dec_interrupt);

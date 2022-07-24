@@ -4,7 +4,8 @@
  * Kernel entry-points.
  */
 
-#include <asm/asm-offsets.h>
+#include <linux/config.h>
+#include <asm/asm_offsets.h>
 #include <asm/thread_info.h>
 #include <asm/pal.h>
 #include <asm/errno.h>
@@ -73,6 +74,8 @@
 	ldq	$20, HAE_REG($19);	\
 	stq	$21, HAE_CACHE($19);	\
 	stq	$21, 0($20);		\
+	ldq	$0, 0($sp);		\
+	ldq	$1, 8($sp);		\
 99:;					\
 	ldq	$19, 72($sp);		\
 	ldq	$20, 80($sp);		\
@@ -193,7 +196,6 @@ entUna:
 	stq	$26, 208($sp)
 	stq	$27, 216($sp)
 	stq	$28, 224($sp)
-	mov	$sp, $19
 	stq	$gp, 232($sp)
 	lda	$8, 0x3fff
 	stq	$31, 248($sp)
@@ -314,23 +316,18 @@ ret_from_sys_call:
 	cmovne	$26, 0, $19		/* $19 = 0 => non-restartable */
 	ldq	$0, SP_OFF($sp)
 	and	$0, 8, $0
-	beq	$0, ret_to_kernel
-ret_to_user:
+	beq	$0, restore_all
+ret_from_reschedule:
 	/* Make sure need_resched and sigpending don't change between
 		sampling and the rti.  */
 	lda	$16, 7
 	call_pal PAL_swpipl
 	ldl	$5, TI_FLAGS($8)
 	and	$5, _TIF_WORK_MASK, $2
-	bne	$2, work_pending
+	bne	$5, work_pending
 restore_all:
 	RESTORE_ALL
 	call_pal PAL_rti
-
-ret_to_kernel:
-	lda	$16, 7
-	call_pal PAL_swpipl
-	br restore_all
 
 	.align 3
 $syscall_error:
@@ -366,7 +363,7 @@ $ret_success:
  *       $8: current.
  *      $19: The old syscall number, or zero if this is not a return
  *           from a syscall that errored and is possibly restartable.
- *      $20: The old a3 value
+ *      $20: Error indication.
  */
 
 	.align	4
@@ -394,19 +391,14 @@ $work_resched:
 	bne	$2, $work_resched
 
 $work_notifysig:
-	mov	$sp, $16
-	bsr	$1, do_switch_stack
 	mov	$sp, $17
-	mov	$5, $18
-	mov	$19, $9		/* save old syscall number */
-	mov	$20, $10	/* save old a3 */
-	and	$5, _TIF_SIGPENDING, $2
-	cmovne	$2, 0, $9	/* we don't want double syscall restarts */
+	br	$1, do_switch_stack
+	mov	$5, $21
+	mov	$sp, $18
+	mov	$31, $16
 	jsr	$26, do_notify_resume
-	mov	$9, $19
-	mov	$10, $20
 	bsr	$1, undo_switch_stack
-	br	ret_to_user
+	br	restore_all
 .end work_pending
 
 /*
@@ -439,7 +431,6 @@ strace:
 	beq	$1, 1f
 	ldq	$27, 0($2)
 1:	jsr	$26, ($27), sys_gettimeofday
-ret_from_straced:
 	ldgp	$gp, 0($26)
 
 	/* check return.. */
@@ -660,16 +651,16 @@ kernel_thread:
 	/* We don't actually care for a3 success widgetry in the kernel.
 	   Not for positive errno values.  */
 	stq	$0, 0($sp)		/* $0 */
-	br	ret_to_kernel
+	br	restore_all
 .end kernel_thread
 
 /*
- * kernel_execve(path, argv, envp)
+ * execve(path, argv, envp)
  */
 	.align	4
-	.globl	kernel_execve
-	.ent	kernel_execve
-kernel_execve:
+	.globl	execve
+	.ent	execve
+execve:
 	/* We can be called from a module.  */
 	ldgp	$gp, 0($27)
 	lda	$sp, -(32+SIZEOF_PT_REGS+8)($sp)
@@ -713,7 +704,7 @@ kernel_execve:
 
 1:	lda	$sp, 32+SIZEOF_PT_REGS+8($sp)
 	ret
-.end kernel_execve
+.end execve
 
 
 /*
@@ -767,15 +758,11 @@ sys_vfork:
 	.ent	sys_sigreturn
 sys_sigreturn:
 	.prologue 0
-	lda	$9, ret_from_straced
-	cmpult	$26, $9, $9
 	mov	$sp, $17
 	lda	$18, -SWITCH_STACK_SIZE($sp)
 	lda	$sp, -SWITCH_STACK_SIZE($sp)
 	jsr	$26, do_sigreturn
-	bne	$9, 1f
-	jsr	$26, syscall_trace
-1:	br	$1, undo_switch_stack
+	br	$1, undo_switch_stack
 	br	ret_from_sys_call
 .end sys_sigreturn
 
@@ -784,17 +771,45 @@ sys_sigreturn:
 	.ent	sys_rt_sigreturn
 sys_rt_sigreturn:
 	.prologue 0
-	lda	$9, ret_from_straced
-	cmpult	$26, $9, $9
 	mov	$sp, $17
 	lda	$18, -SWITCH_STACK_SIZE($sp)
 	lda	$sp, -SWITCH_STACK_SIZE($sp)
 	jsr	$26, do_rt_sigreturn
-	bne	$9, 1f
-	jsr	$26, syscall_trace
-1:	br	$1, undo_switch_stack
+	br	$1, undo_switch_stack
 	br	ret_from_sys_call
 .end sys_rt_sigreturn
+
+	.align	4
+	.globl	sys_sigsuspend
+	.ent	sys_sigsuspend
+sys_sigsuspend:
+	.prologue 0
+	mov	$sp, $17
+	br	$1, do_switch_stack
+	mov	$sp, $18
+	subq	$sp, 16, $sp
+	stq	$26, 0($sp)
+	jsr	$26, do_sigsuspend
+	ldq	$26, 0($sp)
+	lda	$sp, SWITCH_STACK_SIZE+16($sp)
+	ret
+.end sys_sigsuspend
+
+	.align	4
+	.globl	sys_rt_sigsuspend
+	.ent	sys_rt_sigsuspend
+sys_rt_sigsuspend:
+	.prologue 0
+	mov	$sp, $18
+	br	$1, do_switch_stack
+	mov	$sp, $19
+	subq	$sp, 16, $sp
+	stq	$26, 0($sp)
+	jsr	$26, do_rt_sigsuspend
+	ldq	$26, 0($sp)
+	lda	$sp, SWITCH_STACK_SIZE+16($sp)
+	ret
+.end sys_rt_sigsuspend
 
 	.align	4
 	.globl	sys_sethae
@@ -836,9 +851,8 @@ osf_getpriority:
 sys_getxuid:
 	.prologue 0
 	ldq	$2, TI_TASK($8)
-	ldq	$3, TASK_CRED($2)
-	ldl	$0, CRED_UID($3)
-	ldl	$1, CRED_EUID($3)
+	ldl	$0, TASK_UID($2)
+	ldl	$1, TASK_EUID($2)
 	stq	$1, 80($sp)
 	ret
 .end sys_getxuid
@@ -849,9 +863,8 @@ sys_getxuid:
 sys_getxgid:
 	.prologue 0
 	ldq	$2, TI_TASK($8)
-	ldq	$3, TASK_CRED($2)
-	ldl	$0, CRED_GID($3)
-	ldl	$1, CRED_EGID($3)
+	ldl	$0, TASK_GID($2)
+	ldl	$1, TASK_EGID($2)
 	stq	$1, 80($sp)
 	ret
 .end sys_getxgid
@@ -865,33 +878,30 @@ sys_getxpid:
 
 	/* See linux/kernel/timer.c sys_getppid for discussion
 	   about this loop.  */
-	ldq	$3, TASK_GROUP_LEADER($2)
-	ldq	$4, TASK_REAL_PARENT($3)
-	ldl	$0, TASK_TGID($2)
-1:	ldl	$1, TASK_TGID($4)
+	ldq	$3, TASK_REAL_PARENT($2)
+1:	ldl	$1, TASK_TGID($3)
 #ifdef CONFIG_SMP
-	mov	$4, $5
+	mov	$3, $4
 	mb
-	ldq	$3, TASK_GROUP_LEADER($2)
-	ldq	$4, TASK_REAL_PARENT($3)
-	cmpeq	$4, $5, $5
-	beq	$5, 1b
+	ldq	$3, TASK_REAL_PARENT($2)
+	cmpeq	$3, $4, $4
+	beq	$4, 1b
 #endif
 	stq	$1, 80($sp)
+	ldl	$0, TASK_TGID($2)
 	ret
 .end sys_getxpid
 
 	.align	4
-	.globl	sys_alpha_pipe
-	.ent	sys_alpha_pipe
-sys_alpha_pipe:
+	.globl	sys_pipe
+	.ent	sys_pipe
+sys_pipe:
 	lda	$sp, -16($sp)
 	stq	$26, 0($sp)
 	.prologue 0
 
-	mov	$31, $17
 	lda	$16, 8($sp)
-	jsr	$26, do_pipe_flags
+	jsr	$26, do_pipe
 
 	ldq	$26, 0($sp)
 	bne	$0, 1f
@@ -903,16 +913,16 @@ sys_alpha_pipe:
 	stq	$1, 80+16($sp)
 1:	lda	$sp, 16($sp)
 	ret
-.end sys_alpha_pipe
+.end sys_pipe
 
 	.align	4
-	.globl	sys_execve
-	.ent	sys_execve
-sys_execve:
+	.globl	sys_ptrace
+	.ent	sys_ptrace
+sys_ptrace:
 	.prologue 0
-	mov	$sp, $19
-	jmp	$31, do_sys_execve
-.end sys_execve
+	mov	$sp, $20
+	jmp	$31, do_sys_ptrace
+.end sys_ptrace
 
 	.align	4
 	.globl	alpha_ni_syscall

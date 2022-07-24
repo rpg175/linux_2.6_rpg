@@ -101,7 +101,8 @@ ev4_handle_interrupt(unsigned long which, struct pt_regs *regs,
 		return;
 
 	/* Record the sample.  */
-	oprofile_add_sample(regs, which);
+	oprofile_add_sample(regs->pc, !user_mode(regs),
+			    which, smp_processor_id());
 }
 
 

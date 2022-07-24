@@ -38,6 +38,7 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/pci.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/init.h>
@@ -111,28 +112,28 @@ typedef	struct _st_cpc_tty_area {
 static struct tty_driver serial_drv;
 
 /* local variables */
-static st_cpc_tty_area	cpc_tty_area[CPC_TTY_NPORTS];
+st_cpc_tty_area	cpc_tty_area[CPC_TTY_NPORTS];
 
-static int cpc_tty_cnt = 0;	/* number of intrfaces configured with MLPPP */
-static int cpc_tty_unreg_flag = 0;
+int cpc_tty_cnt=0;	/* number of intrfaces configured with MLPPP */
+int cpc_tty_unreg_flag = 0;
 
 /* TTY functions prototype */
 static int cpc_tty_open(struct tty_struct *tty, struct file *flip);
 static void cpc_tty_close(struct tty_struct *tty, struct file *flip);
-static int cpc_tty_write(struct tty_struct *tty, const unsigned char *buf, int count);
+static int cpc_tty_write(struct tty_struct *tty, int from_user,
+				const unsigned char *buf, int count);
 static int cpc_tty_write_room(struct tty_struct *tty);
 static int cpc_tty_chars_in_buffer(struct tty_struct *tty);
+static int cpc_tty_ioctl(struct tty_struct *tty, struct file *file,
+				unsigned int cmd, unsigned long arg);
 static void cpc_tty_flush_buffer(struct tty_struct *tty);
 static void cpc_tty_hangup(struct tty_struct *tty);
-static void cpc_tty_rx_work(struct work_struct *work);
-static void cpc_tty_tx_work(struct work_struct *work);
+static void cpc_tty_rx_work(void *data);
+static void cpc_tty_tx_work(void *data);
 static int cpc_tty_send_to_card(pc300dev_t *dev,void *buf, int len);
 static void cpc_tty_trace(pc300dev_t *dev, char* buf, int len, char rxtx);
-static void cpc_tty_signal_off(pc300dev_t *pc300dev, unsigned char);
-static void cpc_tty_signal_on(pc300dev_t *pc300dev, unsigned char);
-
-static int pc300_tiocmset(struct tty_struct *, unsigned int, unsigned int);
-static int pc300_tiocmget(struct tty_struct *);
+static void cpc_tty_dtr_off(pc300dev_t *pc300dev);
+static void cpc_tty_dtr_on(pc300dev_t *pc300dev);
 
 /* functions called by PC300 driver */
 void cpc_tty_init(pc300dev_t *dev);
@@ -142,54 +143,40 @@ void cpc_tty_trigger_poll(pc300dev_t *pc300dev);
 void cpc_tty_reset_var(void);
 
 /*
- * PC300 TTY clear "signal"
+ * PC300 TTY clear DTR signal
  */
-static void cpc_tty_signal_off(pc300dev_t *pc300dev, unsigned char signal)
+static void cpc_tty_dtr_off(pc300dev_t *pc300dev)
 {
 	pc300ch_t *pc300chan = (pc300ch_t *)pc300dev->chan; 
 	pc300_t *card = (pc300_t *) pc300chan->card; 
 	int ch = pc300chan->channel; 
 	unsigned long flags; 
 
-	CPC_TTY_DBG("%s-tty: Clear signal %x\n",
-		pc300dev->dev->name, signal);
+	CPC_TTY_DBG("%s-tty: Clear signal DTR\n",
+		((struct net_device*)(pc300dev->hdlc))->name);
 	CPC_TTY_LOCK(card, flags); 
 	cpc_writeb(card->hw.scabase + M_REG(CTL,ch), 
-		cpc_readb(card->hw.scabase+M_REG(CTL,ch))& signal);
+		cpc_readb(card->hw.scabase+M_REG(CTL,ch))& CTL_DTR); 
 	CPC_TTY_UNLOCK(card,flags); 
 }
 
 /*
- * PC300 TTY set "signal" to ON
+ * PC300 TTY set DTR signal to ON
  */
-static void cpc_tty_signal_on(pc300dev_t *pc300dev, unsigned char signal)
+static void cpc_tty_dtr_on(pc300dev_t *pc300dev)
 {
 	pc300ch_t *pc300chan = (pc300ch_t *)pc300dev->chan; 
 	pc300_t *card = (pc300_t *) pc300chan->card; 
 	int ch = pc300chan->channel; 
 	unsigned long flags; 
 
-	CPC_TTY_DBG("%s-tty: Set signal %x\n",
-		pc300dev->dev->name, signal);
+	CPC_TTY_DBG("%s-tty: Set signal DTR\n",
+		((struct net_device*)(pc300dev->hdlc))->name);
 	CPC_TTY_LOCK(card, flags); 
 	cpc_writeb(card->hw.scabase + M_REG(CTL,ch), 
-		cpc_readb(card->hw.scabase+M_REG(CTL,ch))& ~signal);
+		cpc_readb(card->hw.scabase+M_REG(CTL,ch))& ~CTL_DTR); 
 	CPC_TTY_UNLOCK(card,flags); 
 }
-
-
-static const struct tty_operations pc300_ops = {
-	.open = cpc_tty_open,
-	.close = cpc_tty_close,
-	.write = cpc_tty_write,
-	.write_room = cpc_tty_write_room,
-	.chars_in_buffer = cpc_tty_chars_in_buffer,
-	.tiocmset = pc300_tiocmset,
-	.tiocmget = pc300_tiocmget,
-	.flush_buffer = cpc_tty_flush_buffer,
-	.hangup = cpc_tty_hangup,
-};
-
 
 /*
  * PC300 TTY initialization routine
@@ -203,22 +190,21 @@ static const struct tty_operations pc300_ops = {
  */
 void cpc_tty_init(pc300dev_t *pc300dev)
 {
-	unsigned long port;
-	int aux;
+	int port, aux;
 	st_cpc_tty_area * cpc_tty;
 
 	/* hdlcX - X=interface number */
-	port = pc300dev->dev->name[4] - '0';
+	port = ((struct net_device*)(pc300dev->hdlc))->name[4] - '0';
 	if (port >= CPC_TTY_NPORTS) {
-		printk("%s-tty: invalid interface selected (0-%i): %li",
-			pc300dev->dev->name,
+		printk("%s-tty: invalid interface selected (0-%i): %i", 
+			((struct net_device*)(pc300dev->hdlc))->name,
 			CPC_TTY_NPORTS-1,port);
 		return;
 	}
 
 	if (cpc_tty_cnt == 0) { /* first TTY connection -> register driver */
 		CPC_TTY_DBG("%s-tty: driver init, major:%i, minor range:%i=%i\n",
-			pc300dev->dev->name,
+			((struct net_device*)(pc300dev->hdlc))->name,
 			CPC_TTY_MAJOR, CPC_TTY_MINOR_START,
 			CPC_TTY_MINOR_START+CPC_TTY_NPORTS);
 		/* initialize tty driver struct */
@@ -238,12 +224,19 @@ void cpc_tty_init(pc300dev_t *pc300dev)
 		serial_drv.flags = TTY_DRIVER_REAL_RAW;
 
 		/* interface routines from the upper tty layer to the tty driver */
-		tty_set_operations(&serial_drv, &pc300_ops);
+		serial_drv.open = cpc_tty_open;
+		serial_drv.close = cpc_tty_close;
+		serial_drv.write = cpc_tty_write; 
+		serial_drv.write_room = cpc_tty_write_room; 
+		serial_drv.chars_in_buffer = cpc_tty_chars_in_buffer; 
+		serial_drv.ioctl = cpc_tty_ioctl; 
+		serial_drv.flush_buffer = cpc_tty_flush_buffer; 
+		serial_drv.hangup = cpc_tty_hangup;
 
 		/* register the TTY driver */
 		if (tty_register_driver(&serial_drv)) { 
 			printk("%s-tty: Failed to register serial driver! ",
-				pc300dev->dev->name);
+				((struct net_device*)(pc300dev->hdlc))->name);
 		   	return;
 		} 
 
@@ -255,7 +248,7 @@ void cpc_tty_init(pc300dev_t *pc300dev)
 	
 	if (cpc_tty->state != CPC_TTY_ST_IDLE) {
 		CPC_TTY_DBG("%s-tty: TTY port %i, already in use.\n",
-				pc300dev->dev->name, port);
+					((struct net_device*)(pc300dev->hdlc))->name,port);
 		return;
 	}
 
@@ -265,19 +258,19 @@ void cpc_tty_init(pc300dev_t *pc300dev)
 	cpc_tty->tty_minor = port + CPC_TTY_MINOR_START;
 	cpc_tty->pc300dev = pc300dev; 
 
-	INIT_WORK(&cpc_tty->tty_tx_work, cpc_tty_tx_work);
-	INIT_WORK(&cpc_tty->tty_rx_work, cpc_tty_rx_work);
+	INIT_WORK(&cpc_tty->tty_tx_work, cpc_tty_tx_work, (void *)cpc_tty);
+	INIT_WORK(&cpc_tty->tty_rx_work, cpc_tty_rx_work, (void *)port);
 	
-	cpc_tty->buf_rx.first = cpc_tty->buf_rx.last = NULL;
+	cpc_tty->buf_rx.first = cpc_tty->buf_rx.last = 0;
 
 	pc300dev->cpc_tty = (void *)cpc_tty; 
 	
-	aux = strlen(pc300dev->dev->name);
-	memcpy(cpc_tty->name, pc300dev->dev->name, aux);
+	aux = strlen(((struct net_device*)(pc300dev->hdlc))->name);
+	memcpy(cpc_tty->name,((struct net_device*)(pc300dev->hdlc))->name,aux);
 	memcpy(&cpc_tty->name[aux], "-tty", 5);
 	
-	cpc_open(pc300dev->dev);
-	cpc_tty_signal_off(pc300dev, CTL_DTR);
+	cpc_open((struct net_device *)pc300dev->hdlc);
+	cpc_tty_dtr_off(pc300dev);
 
 	CPC_TTY_DBG("%s: Initializing TTY Sync Driver, tty major#%d minor#%i\n",
 			cpc_tty->name,CPC_TTY_MAJOR,cpc_tty->tty_minor); 
@@ -318,7 +311,7 @@ static int cpc_tty_open(struct tty_struct *tty, struct file *flip)
 	if (cpc_tty->num_open == 0) { /* first open of this tty */
 		if (!cpc_tty_area[port].buf_tx){
 			cpc_tty_area[port].buf_tx = kmalloc(CPC_TTY_MAX_MTU,GFP_KERNEL);
-			if (!cpc_tty_area[port].buf_tx) {
+			if (cpc_tty_area[port].buf_tx == 0){
 				CPC_TTY_DBG("%s: error in memory allocation\n",cpc_tty->name);
 				return -ENOMEM;
 			}
@@ -339,7 +332,7 @@ static int cpc_tty_open(struct tty_struct *tty, struct file *flip)
 		cpc_tty_area[port].tty = tty;
 		tty->driver_data = &cpc_tty_area[port];
 
-		cpc_tty_signal_on(cpc_tty->pc300dev, CTL_DTR);
+		cpc_tty_dtr_on(cpc_tty->pc300dev);
 	} 
 
 	cpc_tty->num_open++;
@@ -365,7 +358,7 @@ static void cpc_tty_close(struct tty_struct *tty, struct file *flip)
 	int res;
 
 	if (!tty || !tty->driver_data ) {
-		CPC_TTY_DBG("hdlx-tty: no TTY in close\n");
+		CPC_TTY_DBG("hdlx-tty: no TTY in close \n");
 		return;
 	}
 
@@ -386,7 +379,7 @@ static void cpc_tty_close(struct tty_struct *tty, struct file *flip)
 		return;
 	}
 
-	cpc_tty_signal_off(cpc_tty->pc300dev, CTL_DTR);
+	cpc_tty_dtr_off(cpc_tty->pc300dev);
 
 	CPC_TTY_LOCK(cpc_tty->pc300dev->chan->card, flags);  /* lock irq */ 
 	cpc_tty->tty = NULL;
@@ -404,8 +397,10 @@ static void cpc_tty_close(struct tty_struct *tty, struct file *flip)
 		cpc_tty->buf_rx.last = NULL;
 	}
 	
-	kfree(cpc_tty->buf_tx);
-	cpc_tty->buf_tx = NULL;
+	if (cpc_tty->buf_tx) {
+		kfree(cpc_tty->buf_tx);
+		cpc_tty->buf_tx = NULL;
+	}
 
 	CPC_TTY_DBG("%s: TTY closed\n",cpc_tty->name);
 	
@@ -428,7 +423,8 @@ static void cpc_tty_close(struct tty_struct *tty, struct file *flip)
  * o verify the DCD signal
  * o send characters to board and start the transmission
  */
-static int cpc_tty_write(struct tty_struct *tty, const unsigned char *buf, int count)
+static int cpc_tty_write(struct tty_struct *tty, int from_user,
+			const unsigned char *buf, int count)
 {
 	st_cpc_tty_area    *cpc_tty; 
 	pc300ch_t *pc300chan; 
@@ -454,10 +450,11 @@ static int cpc_tty_write(struct tty_struct *tty, const unsigned char *buf, int c
 		return -EINVAL;        /* frame too big */ 
 	}
 
-	CPC_TTY_DBG("%s: cpc_tty_write data len=%i\n",cpc_tty->name,count);
+	CPC_TTY_DBG("%s: cpc_tty_write %s data len=%i\n",cpc_tty->name,
+		(from_user)?"from user" : "from kernel",count);
 	
 	pc300chan = (pc300ch_t *)((pc300dev_t*)cpc_tty->pc300dev)->chan; 
-	stats = &cpc_tty->pc300dev->dev->stats;
+	stats = &((pc300dev_t*)cpc_tty->pc300dev)->hdlc->stats;
 	card = (pc300_t *) pc300chan->card;
 	ch = pc300chan->channel; 
 
@@ -481,10 +478,27 @@ static int cpc_tty_write(struct tty_struct *tty, const unsigned char *buf, int c
 		return -EINVAL; 
 	}
 
-	if (cpc_tty_send_to_card(cpc_tty->pc300dev, (void*)buf, count)) { 
-	   /* failed to send */
-	   CPC_TTY_DBG("%s: trasmition error\n", cpc_tty->name);
-	   return 0;
+	if (from_user) { 
+		unsigned char *buf_tmp; 
+
+		buf_tmp = cpc_tty->buf_tx;
+		if (copy_from_user(buf_tmp, buf, count)) { 
+			/* failed to copy from user */
+			CPC_TTY_DBG("%s: error in copy from user\n",cpc_tty->name);
+			return -EINVAL; 
+		}
+
+		if (cpc_tty_send_to_card(cpc_tty->pc300dev, (void*) buf_tmp,count)) { 
+			/* failed to send */ 
+			CPC_TTY_DBG("%s: transmission error\n",cpc_tty->name);
+			return 0; 
+		}
+	} else {
+		if (cpc_tty_send_to_card(cpc_tty->pc300dev, (void*)buf, count)) { 
+		   /* failed to send */
+		   CPC_TTY_DBG("%s: trasmition error\n", cpc_tty->name);
+		   return 0;
+		}
 	}
 	return count; 
 } 
@@ -539,15 +553,20 @@ static int cpc_tty_chars_in_buffer(struct tty_struct *tty)
 		return -ENODEV; 
 	}
    
-	return 0;
+	return(0); 
 } 
 
-static int pc300_tiocmset(struct tty_struct *tty,
-			  unsigned int set, unsigned int clear)
+/*
+ * PC300 TTY IOCTL routine
+ *
+ * This routine treats TIOCMBIS (set DTR signal) and TIOCMBIC (clear DTR
+ * signal)IOCTL commands. 
+ */
+static int cpc_tty_ioctl(struct tty_struct *tty, struct file *file,
+		unsigned int cmd, unsigned long arg)
+
 {
 	st_cpc_tty_area    *cpc_tty; 
-
-	CPC_TTY_DBG("%s: set:%x clear:%x\n", __func__, set, clear);
 
 	if (!tty || !tty->driver_data ) {
 	   	CPC_TTY_DBG("hdlcX-tty: no TTY to chars in buffer\n");	
@@ -556,44 +575,26 @@ static int pc300_tiocmset(struct tty_struct *tty,
 
 	cpc_tty = (st_cpc_tty_area *) tty->driver_data; 
 
-	if (set & TIOCM_RTS)
-		cpc_tty_signal_on(cpc_tty->pc300dev, CTL_RTS);
-	if (set & TIOCM_DTR)
-		cpc_tty_signal_on(cpc_tty->pc300dev, CTL_DTR);
+	if ((cpc_tty->tty != tty) ||  (cpc_tty->state != CPC_TTY_ST_OPEN)) { 
+		CPC_TTY_DBG("%s: TTY is not opened\n",cpc_tty->name);
+		return -ENODEV; 
+	}
 
-	if (clear & TIOCM_RTS)
-		cpc_tty_signal_off(cpc_tty->pc300dev, CTL_RTS);
-	if (clear & TIOCM_DTR)
-		cpc_tty_signal_off(cpc_tty->pc300dev, CTL_DTR);
+	CPC_TTY_DBG("%s: IOCTL cmd %x\n",cpc_tty->name,cmd);
+	
+	switch (cmd) { 
+		case TIOCMBIS :    /* set DTR */
+			cpc_tty_dtr_on(cpc_tty->pc300dev);
+			break; 
 
+		case TIOCMBIC:     /* clear DTR */ 
+			cpc_tty_dtr_off(cpc_tty->pc300dev);
+			break; 
+		default :
+			return -ENOIOCTLCMD;
+	}
 	return 0;
-}
-
-static int pc300_tiocmget(struct tty_struct *tty)
-{
-	unsigned int result;
-	unsigned char status;
-	unsigned long flags;
-	st_cpc_tty_area  *cpc_tty = (st_cpc_tty_area *) tty->driver_data;
-	pc300dev_t *pc300dev = cpc_tty->pc300dev;
-	pc300ch_t *pc300chan = (pc300ch_t *)pc300dev->chan;
-	pc300_t *card = (pc300_t *) pc300chan->card;
-	int ch = pc300chan->channel;
-
-	cpc_tty = (st_cpc_tty_area *) tty->driver_data;
-
-	CPC_TTY_DBG("%s-tty: tiocmget\n",
-		((struct net_device*)(pc300dev->hdlc))->name);
-
-	CPC_TTY_LOCK(card, flags);
-	status = cpc_readb(card->hw.scabase+M_REG(CTL,ch));
-	CPC_TTY_UNLOCK(card,flags);
-
-	result = ((status & CTL_DTR) ? TIOCM_DTR : 0) |
-		 ((status & CTL_RTS) ? TIOCM_RTS : 0);
-
-	return result;
-}
+} 
 
 /*
  * PC300 TTY Flush Buffer routine
@@ -617,8 +618,14 @@ static void cpc_tty_flush_buffer(struct tty_struct *tty)
 	}
 
 	CPC_TTY_DBG("%s: call wake_up_interruptible\n",cpc_tty->name);
+	
+	wake_up_interruptible(&tty->write_wait); 
 
-	tty_wakeup(tty);	
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup){
+		CPC_TTY_DBG("%s: call line disc. wake up\n",cpc_tty->name);
+		tty->ldisc.write_wakeup(tty); 
+	} 
+
 	return; 
 } 
 
@@ -653,7 +660,7 @@ static void cpc_tty_hangup(struct tty_struct *tty)
 							cpc_tty->name,res);
 		}
 	}
-	cpc_tty_signal_off(cpc_tty->pc300dev, CTL_DTR);
+	cpc_tty_dtr_off(cpc_tty->pc300dev);
 }
 
 /*
@@ -663,39 +670,30 @@ static void cpc_tty_hangup(struct tty_struct *tty)
  * o call the line disc. read
  * o free memory
  */
-static void cpc_tty_rx_work(struct work_struct *work)
+static void cpc_tty_rx_work(void * data)
 {
-	st_cpc_tty_area *cpc_tty;
-	unsigned long port;
-	int i, j;
-	volatile st_cpc_rx_buf *buf;
+	int port, i, j;
+	st_cpc_tty_area *cpc_tty; 
+	volatile st_cpc_rx_buf * buf;
 	char flags=0,flg_rx=1; 
-	struct tty_ldisc *ld;
 
 	if (cpc_tty_cnt == 0) return;
-	
+
 	for (i=0; (i < 4) && flg_rx ; i++) {
 		flg_rx = 0;
-
-		cpc_tty = container_of(work, st_cpc_tty_area, tty_rx_work);
-		port = cpc_tty - cpc_tty_area;
-
+		port = (int) data;
 		for (j=0; j < CPC_TTY_NPORTS; j++) {
 			cpc_tty = &cpc_tty_area[port];
 		
-			if ((buf=cpc_tty->buf_rx.first) != NULL) {
-				if (cpc_tty->tty) {
-					ld = tty_ldisc_ref(cpc_tty->tty);
-					if (ld) {
-						if (ld->ops->receive_buf) {
-							CPC_TTY_DBG("%s: call line disc. receive_buf\n",cpc_tty->name);
-							ld->ops->receive_buf(cpc_tty->tty, (char *)(buf->data), &flags, buf->size);
-						}
-						tty_ldisc_deref(ld);
-					}
+			if ((buf=cpc_tty->buf_rx.first) != 0) {
+															
+				if (cpc_tty->tty && (cpc_tty->tty->ldisc.receive_buf)) { 
+					CPC_TTY_DBG("%s: call line disc. receive_buf\n",cpc_tty->name);
+					cpc_tty->tty->ldisc.receive_buf(cpc_tty->tty, (char *)(buf->data), 
+					&flags, buf->size);
 				}	
 				cpc_tty->buf_rx.first = cpc_tty->buf_rx.first->next;
-				kfree((void *)buf);
+				kfree((unsigned char *)buf);
 				buf = cpc_tty->buf_rx.first;
 				flg_rx = 1;
 			}
@@ -714,13 +712,13 @@ static void cpc_tty_rx_work(struct work_struct *work)
  */
 static void cpc_tty_rx_disc_frame(pc300ch_t *pc300chan)
 {
-	volatile pcsca_bd_t __iomem * ptdescr; 
+	volatile pcsca_bd_t * ptdescr; 
 	volatile unsigned char status; 
 	pc300_t *card = (pc300_t *)pc300chan->card; 
 	int ch = pc300chan->channel; 
 
 	/* dma buf read */ 
-	ptdescr = (pcsca_bd_t __iomem *)(card->hw.rambase + 
+	ptdescr = (pcsca_bd_t *)(card->hw.rambase + 
 				RX_BD_ADDR(ch, pc300chan->rx_first_bd)); 
 	while (pc300chan->rx_first_bd != pc300chan->rx_last_bd) { 
 		status = cpc_readb(&ptdescr->status); 
@@ -731,22 +729,22 @@ static void cpc_tty_rx_disc_frame(pc300ch_t *pc300chan)
 		if (status & DST_EOM) { 
 			break; /* end of message */
 		}
-		ptdescr = (pcsca_bd_t __iomem *)(card->hw.rambase + cpc_readl(&ptdescr->next)); 
+		ptdescr = (pcsca_bd_t *)(card->hw.rambase + cpc_readl(&ptdescr->next)); 
 	}
 }
 
 void cpc_tty_receive(pc300dev_t *pc300dev)
 {
-	st_cpc_tty_area *cpc_tty; 
+	st_cpc_tty_area    *cpc_tty; 
 	pc300ch_t *pc300chan = (pc300ch_t *)pc300dev->chan; 
 	pc300_t *card = (pc300_t *)pc300chan->card; 
 	int ch = pc300chan->channel; 
-	volatile pcsca_bd_t  __iomem * ptdescr; 
-	struct net_device_stats *stats = &pc300dev->dev->stats;
+	volatile pcsca_bd_t * ptdescr; 
+	struct net_device_stats *stats = &pc300dev->hdlc->stats; 
 	int rx_len, rx_aux; 
 	volatile unsigned char status; 
 	unsigned short first_bd = pc300chan->rx_first_bd;
-	st_cpc_rx_buf *new = NULL;
+	st_cpc_rx_buf	*new;
 	unsigned char dsr_rx;
 
 	if (pc300dev->cpc_tty == NULL) { 
@@ -759,14 +757,14 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 
 	while (1) { 
 		rx_len = 0;
-		ptdescr = (pcsca_bd_t  __iomem *)(card->hw.rambase + RX_BD_ADDR(ch, first_bd));
+		ptdescr = (pcsca_bd_t *)(card->hw.rambase + RX_BD_ADDR(ch, first_bd));
 		while ((status = cpc_readb(&ptdescr->status)) & DST_OSB) {
 			rx_len += cpc_readw(&ptdescr->len);
 			first_bd = (first_bd + 1) & (N_DMA_RX_BUF - 1);
 			if (status & DST_EOM) {
 				break;
 			}
-			ptdescr = (pcsca_bd_t __iomem *)(card->hw.rambase+cpc_readl(&ptdescr->next));
+			ptdescr=(pcsca_bd_t*)(card->hw.rambase+cpc_readl(&ptdescr->next));
 		}
 			
 		if (!rx_len) { 
@@ -775,7 +773,6 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 				cpc_writel(card->hw.scabase + DRX_REG(EDAL, ch), 
 						RX_BD_ADDR(ch, pc300chan->rx_last_bd)); 
 			}
-			kfree(new);
 			return; 
 		}
 		
@@ -788,14 +785,14 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 			continue;
 		} 
 		
-		new = kmalloc(rx_len + sizeof(st_cpc_rx_buf), GFP_ATOMIC);
-		if (!new) {
+		new = (st_cpc_rx_buf *) kmalloc(rx_len + sizeof(st_cpc_rx_buf), GFP_ATOMIC);
+		if (new == 0) {
 			cpc_tty_rx_disc_frame(pc300chan);
 			continue;
 		}
 		
 		/* dma buf read */ 
-		ptdescr = (pcsca_bd_t __iomem *)(card->hw.rambase + 
+		ptdescr = (pcsca_bd_t *)(card->hw.rambase + 
 				RX_BD_ADDR(ch, pc300chan->rx_first_bd)); 
 
 		rx_len = 0;	/* counter frame size */
@@ -821,8 +818,7 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 						cpc_tty->name);
 				cpc_tty_rx_disc_frame(pc300chan);
 				rx_len = 0;
-				kfree(new);
-				new = NULL;
+				kfree((unsigned char *)new);
 				break; /* read next frame - while(1) */
 			}
 
@@ -831,15 +827,14 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 				cpc_tty_rx_disc_frame(pc300chan);
 				stats->rx_dropped++; 
 				rx_len = 0; 
-				kfree(new);
-				new = NULL;
+				kfree((unsigned char *)new);
 				break; /* read next frame - while(1) */
 			}
 
 			/* read the segment of the frame */
 			if (rx_aux != 0) {
 				memcpy_fromio((new->data + rx_len), 
-					(void __iomem *)(card->hw.rambase + 
+					(void *)(card->hw.rambase + 
 					 cpc_readl(&ptdescr->ptbuf)), rx_aux);
 				rx_len += rx_aux; 
 			}
@@ -849,7 +844,7 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 					(N_DMA_RX_BUF -1); 
 			if (status & DST_EOM)break;
 			
-			ptdescr = (pcsca_bd_t __iomem *) (card->hw.rambase + 
+			ptdescr = (pcsca_bd_t *) (card->hw.rambase + 
 					cpc_readl(&ptdescr->next)); 
 		}
 		/* update pointer */ 
@@ -867,8 +862,8 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
 				cpc_tty_trace(pc300dev, new->data,rx_len, 'R'); 
 			} 
 			new->size = rx_len;
-			new->next = NULL;
-			if (cpc_tty->buf_rx.first == NULL) {
+			new->next = 0;
+			if (cpc_tty->buf_rx.first == 0) {
 				cpc_tty->buf_rx.first = new;
 				cpc_tty->buf_rx.last = new;
 			} else {
@@ -888,19 +883,24 @@ void cpc_tty_receive(pc300dev_t *pc300dev)
  * o if need call line discipline wakeup
  * o call wake_up_interruptible
  */
-static void cpc_tty_tx_work(struct work_struct *work)
+static void cpc_tty_tx_work(void *data)
 {
-	st_cpc_tty_area *cpc_tty =
-		container_of(work, st_cpc_tty_area, tty_tx_work);
+	st_cpc_tty_area *cpc_tty = (st_cpc_tty_area *) data; 
 	struct tty_struct *tty; 
 
 	CPC_TTY_DBG("%s: cpc_tty_tx_work init\n",cpc_tty->name);
 	
-	if ((tty = cpc_tty->tty) == NULL) { 
+	if ((tty = cpc_tty->tty) == 0) { 
 		CPC_TTY_DBG("%s: the interface is not opened\n",cpc_tty->name);
 		return; 
 	}
-	tty_wakeup(tty);
+
+	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) && tty->ldisc.write_wakeup){
+		CPC_TTY_DBG("%s:call line disc. wakeup\n",cpc_tty->name);
+		tty->ldisc.write_wakeup (tty); 
+	}
+
+	wake_up_interruptible(&tty->write_wait); 
 }
 
 /*
@@ -916,9 +916,9 @@ static int cpc_tty_send_to_card(pc300dev_t *dev,void* buf, int len)
 	pc300ch_t *chan = (pc300ch_t *)dev->chan; 
 	pc300_t *card = (pc300_t *)chan->card; 
 	int ch = chan->channel; 
-	struct net_device_stats *stats = &dev->dev->stats;
+	struct net_device_stats *stats = &dev->hdlc->stats; 
 	unsigned long flags; 
-	volatile pcsca_bd_t __iomem *ptdescr; 
+	volatile pcsca_bd_t * ptdescr; 
 	int i, nchar;
 	int tosend = len;
 	int nbuf = ((len - 1)/BD_DEF_LEN) + 1;
@@ -935,11 +935,11 @@ static int cpc_tty_send_to_card(pc300dev_t *dev,void* buf, int len)
 	CPC_TTY_DBG("%s: call dma_buf_write\n",
 			(st_cpc_tty_area *)dev->cpc_tty->name);	
 	for (i = 0 ; i < nbuf ; i++) {
-		ptdescr = (pcsca_bd_t __iomem *)(card->hw.rambase + 
+		ptdescr = (pcsca_bd_t *)(card->hw.rambase + 
 			TX_BD_ADDR(ch, card->chan[ch].tx_next_bd));
 		nchar = (BD_DEF_LEN > tosend) ? tosend : BD_DEF_LEN;
 		if (cpc_readb(&ptdescr->status) & DST_OSB) {
-			memcpy_toio((void __iomem *)(card->hw.rambase + 
+			memcpy_toio((void *)(card->hw.rambase + 
 				cpc_readl(&ptdescr->ptbuf)), 
 				&pdata[len - tosend], 
 				nchar);
@@ -1000,24 +1000,25 @@ static void cpc_tty_trace(pc300dev_t *dev, char* buf, int len, char rxtx)
 
 	if ((skb = dev_alloc_skb(10 + len)) == NULL) { 
 		/* out of memory */ 
-		CPC_TTY_DBG("%s: tty_trace - out of memory\n", dev->dev->name);
+		CPC_TTY_DBG("%s: tty_trace - out of memory\n",
+			((struct net_device *)(dev->hdlc))->name);
 		return; 
 	}
 
 	skb_put (skb, 10 + len); 
-	skb->dev = dev->dev; 
+	skb->dev = (struct net_device *) dev->hdlc; 
 	skb->protocol = htons(ETH_P_CUST); 
-	skb_reset_mac_header(skb);
+	skb->mac.raw = skb->data; 
 	skb->pkt_type = PACKET_HOST; 
 	skb->len = 10 + len; 
 
-	skb_copy_to_linear_data(skb, dev->dev->name, 5);
+	memcpy(skb->data,((struct net_device *)(dev->hdlc))->name,5);
 	skb->data[5] = '['; 
 	skb->data[6] = rxtx; 
 	skb->data[7] = ']'; 
 	skb->data[8] = ':'; 
 	skb->data[9] = ' '; 
-	skb_copy_to_linear_data_offset(skb, 10, buf, len);
+	memcpy(&skb->data[10], buf, len); 
 	netif_rx(skb); 
 } 	
 
@@ -1032,15 +1033,16 @@ void cpc_tty_unregister_service(pc300dev_t *pc300dev)
 	ulong flags;
 	int res;
 
-	if ((cpc_tty= (st_cpc_tty_area *) pc300dev->cpc_tty) == NULL) {
-		CPC_TTY_DBG("%s: interface is not TTY\n", pc300dev->dev->name);
+	if ((cpc_tty= (st_cpc_tty_area *) pc300dev->cpc_tty) == 0) { 
+		CPC_TTY_DBG("%s: interface is not TTY\n",
+			((struct net_device *)(pc300dev->hdlc))->name);
 		return; 
 	}
 	CPC_TTY_DBG("%s: cpc_tty_unregister_service", cpc_tty->name);
 
 	if (cpc_tty->pc300dev != pc300dev) { 
 		CPC_TTY_DBG("%s: invalid tty ptr=%s\n", 
-		pc300dev->dev->name, cpc_tty->name);
+		((struct net_device *)(pc300dev->hdlc))->name, cpc_tty->name);
 		return; 
 	}
 

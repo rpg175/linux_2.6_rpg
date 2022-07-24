@@ -16,6 +16,17 @@
 #include "act2000_isa.h"
 #include "capi.h"
 
+static act2000_card *irq2card_map[16];
+
+static void
+act2000_isa_delay(long t)
+{
+        sti();
+        set_current_state(TASK_INTERRUPTIBLE);
+        schedule_timeout(t);
+        sti();
+}
+
 /*
  * Reset Controller, then try to read the Card's signature.
  + Return:
@@ -53,19 +64,22 @@ act2000_isa_detect(unsigned short portbase)
 {
         int ret = 0;
 
-	if (request_region(portbase, ACT2000_PORTLEN, "act2000isa")) {
+        if (!check_region(portbase, ISA_REGION))
                 ret = act2000_isa_reset(portbase);
-		release_region(portbase, ISA_REGION);
-	}
         return ret;
 }
 
 static irqreturn_t
-act2000_isa_interrupt(int dummy, void *dev_id)
+act2000_isa_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-        act2000_card *card = dev_id;
+        act2000_card *card = irq2card_map[irq];
         u_char istatus;
 
+        if (!card) {
+                printk(KERN_WARNING
+                       "act2000: Spurious interrupt!\n");
+                return IRQ_NONE;
+        }
         istatus = (inb(ISA_PORT_ISR) & 0x07);
         if (istatus & ISA_ISR_OUT) {
                 /* RX fifo has data */
@@ -80,7 +94,7 @@ act2000_isa_interrupt(int dummy, void *dev_id)
                 printk(KERN_WARNING "act2000: errIRQ\n");
         }
 	if (istatus)
-		printk(KERN_DEBUG "act2000: ?IRQ %d %02x\n", card->irq, istatus);
+		printk(KERN_DEBUG "act2000: ?IRQ %d %02x\n", irq, istatus);
 	return IRQ_HANDLED;
 }
 
@@ -126,25 +140,23 @@ act2000_isa_enable_irq(act2000_card * card)
 
 /*
  * Install interrupt handler, enable irq on card.
- * If irq is -1, choose next free irq, else irq is given explicitly.
+ * If irq is -1, choose next free irq, else irq is given explicitely.
  */
 int
 act2000_isa_config_irq(act2000_card * card, short irq)
 {
-	int old_irq;
-
         if (card->flags & ACT2000_FLAGS_IVALID) {
-                free_irq(card->irq, card);
+                free_irq(card->irq, NULL);
+                irq2card_map[card->irq] = NULL;
         }
         card->flags &= ~ACT2000_FLAGS_IVALID;
         outb(ISA_COR_IRQOFF, ISA_PORT_COR);
         if (!irq)
                 return 0;
 
-	old_irq = card->irq;
-	card->irq = irq;
-	if (request_irq(irq, &act2000_isa_interrupt, 0, card->regname, card)) {
-		card->irq = old_irq;
+	if (!request_irq(irq, &act2000_isa_interrupt, 0, card->regname, NULL)) {
+		card->irq = irq;
+		irq2card_map[card->irq] = card;
 		card->flags |= ACT2000_FLAGS_IVALID;
                 printk(KERN_WARNING
                        "act2000: Could not request irq %d\n",irq);
@@ -165,13 +177,14 @@ act2000_isa_config_port(act2000_card * card, unsigned short portbase)
                 release_region(card->port, ISA_REGION);
                 card->flags &= ~ACT2000_FLAGS_PVALID;
         }
-	if (request_region(portbase, ACT2000_PORTLEN, card->regname) == NULL)
-		return -EBUSY;
-	else {
+        if (!check_region(portbase, ISA_REGION)) {
+                if (request_region(portbase, ACT2000_PORTLEN, card->regname) == NULL)
+			return -EIO;
                 card->port = portbase;
                 card->flags |= ACT2000_FLAGS_PVALID;
                 return 0;
         }
+        return -EBUSY;
 }
 
 /*
@@ -182,15 +195,17 @@ act2000_isa_release(act2000_card * card)
 {
         unsigned long flags;
 
-        spin_lock_irqsave(&card->lock, flags);
-        if (card->flags & ACT2000_FLAGS_IVALID)
-                free_irq(card->irq, card);
-
+        save_flags(flags);
+        cli();
+        if (card->flags & ACT2000_FLAGS_IVALID) {
+                free_irq(card->irq, NULL);
+                irq2card_map[card->irq] = NULL;
+        }
         card->flags &= ~ACT2000_FLAGS_IVALID;
         if (card->flags & ACT2000_FLAGS_PVALID)
                 release_region(card->port, ISA_REGION);
         card->flags &= ~ACT2000_FLAGS_PVALID;
-        spin_unlock_irqrestore(&card->lock, flags);
+        restore_flags(flags);
 }
 
 static int
@@ -257,9 +272,9 @@ act2000_isa_receive(act2000_card *card)
 					printk(KERN_WARNING
 					       "act2000_isa_receive: Invalid CAPI msg\n");
 					{
-						int i; __u8 *p; __u8 *t; __u8 tmp[30];
-						for (i = 0, p = (__u8 *)&card->idat.isa.rcvhdr, t = tmp; i < 8; i++)
-							t += sprintf(t, "%02x ", *(p++));
+						int i; __u8 *p; __u8 *c; __u8 tmp[30];
+						for (i = 0, p = (__u8 *)&card->idat.isa.rcvhdr, c = tmp; i < 8; i++)
+							c += sprintf(c, "%02x ", *(p++));
 						printk(KERN_WARNING "act2000_isa_receive: %s\n", tmp);
 					}
 				}
@@ -301,7 +316,8 @@ act2000_isa_send(act2000_card * card)
         if (test_and_set_bit(ACT2000_LOCK_TX, (void *) &card->ilock) != 0)
 		return;
 	while (1) {
-		spin_lock_irqsave(&card->lock, flags);
+		save_flags(flags);
+		cli();
 		if (!(card->sbuf)) {
 			if ((card->sbuf = skb_dequeue(&card->sndq))) {
 				card->ack_msg = card->sbuf->data;
@@ -314,7 +330,7 @@ act2000_isa_send(act2000_card * card)
 				}
 			}
 		}
-		spin_unlock_irqrestore(&card->lock, flags);
+		restore_flags(flags);
 		if (!(card->sbuf)) {
 			/* No more data to send */
 			test_and_clear_bit(ACT2000_LOCK_TX, (void *) &card->ilock);
@@ -392,27 +408,28 @@ act2000_isa_getid(act2000_card * card)
  * Download microcode into card, check Firmware signature.
  */
 int
-act2000_isa_download(act2000_card * card, act2000_ddef __user * cb)
+act2000_isa_download(act2000_card * card, act2000_ddef * cb)
 {
         unsigned int length;
+        int ret;
         int l;
         int c;
         long timeout;
         u_char *b;
-        u_char __user *p;
+        u_char *p;
         u_char *buf;
         act2000_ddef cblock;
 
         if (!act2000_isa_reset(card->port))
                 return -ENXIO;
-        msleep_interruptible(500);
-        if (copy_from_user(&cblock, cb, sizeof(cblock)))
+        act2000_isa_delay(HZ / 2);
+        if(copy_from_user(&cblock, (char *) cb, sizeof(cblock)))
         	return -EFAULT;
         length = cblock.length;
         p = cblock.buffer;
-        if (!access_ok(VERIFY_READ, p, length))
-                return -EFAULT;
-        buf = kmalloc(1024, GFP_KERNEL);
+        if ((ret = verify_area(VERIFY_READ, (void *) p, length)))
+                return ret;
+        buf = (u_char *) kmalloc(1024, GFP_KERNEL);
         if (!buf)
                 return -ENOMEM;
         timeout = 0;
@@ -420,10 +437,7 @@ act2000_isa_download(act2000_card * card, act2000_ddef __user * cb)
                 l = (length > 1024) ? 1024 : length;
                 c = 0;
                 b = buf;
-                if (copy_from_user(buf, p, l)) {
-                        kfree(buf);
-                        return -EFAULT;
-                }
+                copy_from_user(buf, p, l);
                 while (c < l) {
                         if (act2000_isa_writeb(card, *b++)) {
                                 printk(KERN_WARNING
@@ -438,6 +452,6 @@ act2000_isa_download(act2000_card * card, act2000_ddef __user * cb)
                 p += l;
         }
         kfree(buf);
-        msleep_interruptible(500);
+        act2000_isa_delay(HZ / 2);
         return (act2000_isa_getid(card));
 }

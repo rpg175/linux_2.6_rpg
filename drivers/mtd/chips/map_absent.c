@@ -1,10 +1,11 @@
 /*
  * Common code to handle absent "placeholder" devices
  * Copyright 2001 Resilience Corporation <ebrower@resilience.com>
+ * $Id: map_absent.c,v 1.4 2003/05/28 12:51:49 dwmw2 Exp $
  *
  * This map driver is used to allocate "placeholder" MTD
- * devices on systems that have socketed/removable media.
- * Use of this driver as a fallback preserves the expected
+ * devices on systems that have socketed/removable media. 
+ * Use of this driver as a fallback preserves the expected 
  * registration of MTD device nodes regardless of probe outcome.
  * A usage example is as follows:
  *
@@ -25,6 +26,7 @@
 #include <linux/init.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
+#include <linux/mtd/compatmac.h>
 
 static int map_absent_read (struct mtd_info *, loff_t, size_t, size_t *, u_char *);
 static int map_absent_write (struct mtd_info *, loff_t, size_t, size_t *, const u_char *);
@@ -45,10 +47,12 @@ static struct mtd_info *map_absent_probe(struct map_info *map)
 {
 	struct mtd_info *mtd;
 
-	mtd = kzalloc(sizeof(*mtd), GFP_KERNEL);
+	mtd = kmalloc(sizeof(*mtd), GFP_KERNEL);
 	if (!mtd) {
 		return NULL;
 	}
+
+	memset(mtd, 0, sizeof(*mtd));
 
 	map->fldrv 	= &map_absent_chipdrv;
 	mtd->priv 	= map;
@@ -60,8 +64,7 @@ static struct mtd_info *map_absent_probe(struct map_info *map)
 	mtd->write 	= map_absent_write;
 	mtd->sync 	= map_absent_sync;
 	mtd->flags 	= 0;
-	mtd->erasesize  = PAGE_SIZE;
-	mtd->writesize  = 1;
+	mtd->erasesize = PAGE_SIZE;
 
 	__module_get(THIS_MODULE);
 	return mtd;
@@ -77,7 +80,7 @@ static int map_absent_read(struct mtd_info *mtd, loff_t from, size_t len, size_t
 static int map_absent_write(struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen, const u_char *buf)
 {
 	*retlen = 0;
-	return -ENODEV;
+	return -ENODEV; 
 }
 
 static int map_absent_erase(struct mtd_info *mtd, struct erase_info *instr)
@@ -95,7 +98,7 @@ static void map_absent_destroy(struct mtd_info *mtd)
 	/* nop */
 }
 
-static int __init map_absent_init(void)
+int __init map_absent_init(void)
 {
 	register_mtd_chip_driver(&map_absent_chipdrv);
 	return 0;

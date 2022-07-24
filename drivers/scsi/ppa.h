@@ -2,7 +2,7 @@
  * the Iomega ZIP drive
  * 
  * (c) 1996     Grant R. Guenther  grant@torque.net
- *              David Campbell
+ *              David Campbell     campbell@torque.net
  *
  *      All comments to David.
  */
@@ -73,6 +73,8 @@
  */
 /* ------ END OF USER CONFIGURABLE PARAMETERS ----- */
 
+#ifdef PPA_CODE
+#include  <linux/config.h>
 #include  <linux/stddef.h>
 #include  <linux/module.h>
 #include  <linux/kernel.h>
@@ -85,7 +87,7 @@
 #include  <linux/interrupt.h>
 
 #include  <asm/io.h>
-#include  <scsi/scsi_host.h>
+#include  "hosts.h"
 /* batteries not included :-) */
 
 /*
@@ -113,7 +115,11 @@ static char *PPA_MODE_STRING[] =
 #endif
     "Unknown"};
 
+/* This is a global option */
+int ppa_sg = SG_ALL;		/* enable/disable scatter-gather. */
+
 /* other options */
+#define PPA_CAN_QUEUE   1	/* use "queueing" interface */
 #define PPA_BURST_SIZE	512	/* data burst size */
 #define PPA_SELECT_TMO  5000	/* how long to wait for target ? */
 #define PPA_SPIN_TMO    50000	/* ppa_wait loop limiter */
@@ -145,6 +151,24 @@ static char *PPA_MODE_STRING[] =
 #define w_ctr(x,y)      outb(y, (x)+2)
 #endif
 
-static int ppa_engine(ppa_struct *, struct scsi_cmnd *);
+static int ppa_engine(ppa_struct *, Scsi_Cmnd *);
+static int ppa_in(int, char *, int);
+static int ppa_init(int);
+static void ppa_interrupt(void *);
+static int ppa_out(int, char *, int);
+
+#else
+#define ppa_release 0
+#endif
+
+int ppa_detect(Scsi_Host_Template *);
+const char *ppa_info(struct Scsi_Host *);
+int ppa_command(Scsi_Cmnd *);
+int ppa_queuecommand(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
+int ppa_abort(Scsi_Cmnd *);
+int ppa_reset(Scsi_Cmnd *);
+int ppa_proc_info(struct Scsi_Host *host, char *, char **, off_t, int, int);
+int ppa_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int *);
 
 #endif				/* _PPA_H */

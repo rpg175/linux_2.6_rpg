@@ -4,24 +4,28 @@
  * Code common to all TITAN core logic chips.
  */
 
-#define __EXTERN_INLINE inline
-#include <asm/io.h>
-#include <asm/core_titan.h>
-#undef __EXTERN_INLINE
-
+#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/vmalloc.h>
-#include <linux/bootmem.h>
 
+#include <asm/hwrpb.h>
 #include <asm/ptrace.h>
+#include <asm/system.h>
 #include <asm/smp.h>
 #include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
-#include <asm/vga.h>
+
+#define __EXTERN_INLINE inline
+#include <asm/io.h>
+#include <asm/core_titan.h>
+#undef __EXTERN_INLINE
+
+#include <linux/bootmem.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -34,11 +38,6 @@ struct
 	unsigned long wsm[4];
 	unsigned long tba[4];
 } saved_config[4] __attribute__((common));
-
-/*
- * Is PChip 1 present? No need to query it more than once.
- */
-static int titan_pchip1_present;
 
 /*
  * BIOS32-style PCI interface:
@@ -264,9 +263,9 @@ titan_init_one_pachip_port(titan_pachip_port *port, int index)
 	hose->sparse_mem_base = 0;
 	hose->sparse_io_base = 0;
 	hose->dense_mem_base
-	  = (TITAN_MEM(index) & 0xffffffffffUL) | 0x80000000000UL;
+	  = (TITAN_MEM(index) & 0xffffffffff) | 0x80000000000;
 	hose->dense_io_base
-	  = (TITAN_IO(index) & 0xffffffffffUL) | 0x80000000000UL;
+	  = (TITAN_IO(index) & 0xffffffffff) | 0x80000000000;
 
 	hose->config_space_base = TITAN_CONF(index);
 	hose->index = index;
@@ -350,43 +349,68 @@ titan_init_one_pachip_port(titan_pachip_port *port, int index)
 static void __init
 titan_init_pachips(titan_pachip *pachip0, titan_pachip *pachip1)
 {
-	titan_pchip1_present = TITAN_cchip->csc.csr & 1L<<14;
+	int pchip1_present = TITAN_cchip->csc.csr & 1L<<14;
 
 	/* Init the ports in hose order... */
 	titan_init_one_pachip_port(&pachip0->g_port, 0);	/* hose 0 */
-	if (titan_pchip1_present)
+	if (pchip1_present)
 		titan_init_one_pachip_port(&pachip1->g_port, 1);/* hose 1 */
 	titan_init_one_pachip_port(&pachip0->a_port, 2);	/* hose 2 */
-	if (titan_pchip1_present)
+	if (pchip1_present)
 		titan_init_one_pachip_port(&pachip1->a_port, 3);/* hose 3 */
+}
+
+static void __init
+titan_init_vga_hose(void)
+{
+#ifdef CONFIG_VGA_HOSE
+	u64 *pu64 = (u64 *)((u64)hwrpb + hwrpb->ctbt_offset);
+
+	if (pu64[7] == 3) {	/* TERM_TYPE == graphics */
+		struct pci_controller *hose;
+		int h = (pu64[30] >> 24) & 0xff;	/* console hose # */
+
+		/*
+		 * Our hose numbering matches the console's, so just find
+		 * the right one...
+		 */
+		for (hose = hose_head; hose; hose = hose->next) {
+			if (hose->index == h) break;
+		}
+
+		if (hose) {
+			printk("Console graphics on hose %d\n", hose->index);
+			pci_vga_hose = hose;
+		}
+	}
+#endif /* CONFIG_VGA_HOSE */
 }
 
 void __init
 titan_init_arch(void)
 {
 #if 0
-	printk("%s: titan_init_arch()\n", __func__);
-	printk("%s: CChip registers:\n", __func__);
-	printk("%s: CSR_CSC 0x%lx\n", __func__, TITAN_cchip->csc.csr);
-	printk("%s: CSR_MTR 0x%lx\n", __func__, TITAN_cchip->mtr.csr);
-	printk("%s: CSR_MISC 0x%lx\n", __func__, TITAN_cchip->misc.csr);
-	printk("%s: CSR_DIM0 0x%lx\n", __func__, TITAN_cchip->dim0.csr);
-	printk("%s: CSR_DIM1 0x%lx\n", __func__, TITAN_cchip->dim1.csr);
-	printk("%s: CSR_DIR0 0x%lx\n", __func__, TITAN_cchip->dir0.csr);
-	printk("%s: CSR_DIR1 0x%lx\n", __func__, TITAN_cchip->dir1.csr);
-	printk("%s: CSR_DRIR 0x%lx\n", __func__, TITAN_cchip->drir.csr);
+	printk("%s: titan_init_arch()\n", __FUNCTION__);
+	printk("%s: CChip registers:\n", __FUNCTION__);
+	printk("%s: CSR_CSC 0x%lx\n", __FUNCTION__, TITAN_cchip->csc.csr);
+	printk("%s: CSR_MTR 0x%lx\n", __FUNCTION__, TITAN_cchip->mtr.csr);
+	printk("%s: CSR_MISC 0x%lx\n", __FUNCTION__, TITAN_cchip->misc.csr);
+	printk("%s: CSR_DIM0 0x%lx\n", __FUNCTION__, TITAN_cchip->dim0.csr);
+	printk("%s: CSR_DIM1 0x%lx\n", __FUNCTION__, TITAN_cchip->dim1.csr);
+	printk("%s: CSR_DIR0 0x%lx\n", __FUNCTION__, TITAN_cchip->dir0.csr);
+	printk("%s: CSR_DIR1 0x%lx\n", __FUNCTION__, TITAN_cchip->dir1.csr);
+	printk("%s: CSR_DRIR 0x%lx\n", __FUNCTION__, TITAN_cchip->drir.csr);
 
-	printk("%s: DChip registers:\n", __func__);
-	printk("%s: CSR_DSC 0x%lx\n", __func__, TITAN_dchip->dsc.csr);
-	printk("%s: CSR_STR 0x%lx\n", __func__, TITAN_dchip->str.csr);
-	printk("%s: CSR_DREV 0x%lx\n", __func__, TITAN_dchip->drev.csr);
+	printk("%s: DChip registers:\n", __FUNCTION__);
+	printk("%s: CSR_DSC 0x%lx\n", __FUNCTION__, TITAN_dchip->dsc.csr);
+	printk("%s: CSR_STR 0x%lx\n", __FUNCTION__, TITAN_dchip->str.csr);
+	printk("%s: CSR_DREV 0x%lx\n", __FUNCTION__, TITAN_dchip->drev.csr);
 #endif
 
 	boot_cpuid = __hard_smp_processor_id();
 
 	/* With multiple PCI busses, we play with I/O as physical addrs.  */
 	ioport_resource.end = ~0UL;
-	iomem_resource.end = ~0UL;
 
 	/* PCI DMA Direct Mapping is 1GB at 2GB.  */
 	__direct_map_base = 0x80000000;
@@ -396,7 +420,7 @@ titan_init_arch(void)
 	titan_init_pachips(TITAN_pachip0, TITAN_pachip1);
 
 	/* Check for graphic console location (if any).  */
-	find_console_vga_hose();
+	titan_init_vga_hose();
 }
 
 static void
@@ -422,7 +446,9 @@ titan_kill_one_pachip_port(titan_pachip_port *port, int index)
 static void
 titan_kill_pachips(titan_pachip *pachip0, titan_pachip *pachip1)
 {
-	if (titan_pchip1_present) {
+	int pchip1_present = TITAN_cchip->csc.csr & 1L<<14;
+
+	if (pchip1_present) {
 		titan_kill_one_pachip_port(&pachip1->g_port, 1);
 		titan_kill_one_pachip_port(&pachip1->a_port, 3);
 	}
@@ -440,16 +466,7 @@ titan_kill_arch(int mode)
 /*
  * IO map support.
  */
-
-void __iomem *
-titan_ioportmap(unsigned long addr)
-{
-	FIXUP_IOADDR_VGA(addr);
-	return (void __iomem *)(addr + TITAN_IO_BIAS);
-}
-
-
-void __iomem *
+unsigned long
 titan_ioremap(unsigned long addr, unsigned long size)
 {
 	int h = (addr & TITAN_HOSE_MASK) >> TITAN_HOSE_SHIFT;
@@ -462,30 +479,28 @@ titan_ioremap(unsigned long addr, unsigned long size)
 	unsigned long pfn;
 
 	/*
-	 * Adjust the address and hose, if necessary.
+	 * Adjust the addr.
 	 */ 
-	if (pci_vga_hose && __is_mem_vga(addr)) {
+#ifdef CONFIG_VGA_HOSE
+	if (pci_vga_hose && __titan_is_mem_vga(addr)) {
 		h = pci_vga_hose->index;
 		addr += pci_vga_hose->mem_space->start;
 	}
+#endif
 
 	/*
 	 * Find the hose.
 	 */
 	for (hose = hose_head; hose; hose = hose->next)
-		if (hose->index == h)
-			break;
-	if (!hose)
-		return NULL;
+		if (hose->index == h) break;
+	if (!hose) return (unsigned long)NULL;
 
 	/*
 	 * Is it direct-mapped?
 	 */
 	if ((baddr >= __direct_map_base) && 
-	    ((baddr + size - 1) < __direct_map_base + __direct_map_size)) {
-		vaddr = addr - __direct_map_base + TITAN_MEM_BIAS;
-		return (void __iomem *) vaddr;
-	}
+	    ((baddr + size - 1) < __direct_map_base + __direct_map_size)) 
+		return addr - __direct_map_base + TITAN_MEM_BIAS;
 
 	/* 
 	 * Check the scatter-gather arena.
@@ -506,11 +521,7 @@ titan_ioremap(unsigned long addr, unsigned long size)
 		 * Map it
 		 */
 		area = get_vm_area(size, VM_IOREMAP);
-		if (!area) {
-			printk("ioremap failed... no vm_area...\n");
-			return NULL;
-		}
-
+		if (!area) return (unsigned long)NULL;
 		ptes = hose->sg_pci->ptes;
 		for (vaddr = (unsigned long)area->addr; 
 		    baddr <= last; 
@@ -519,53 +530,44 @@ titan_ioremap(unsigned long addr, unsigned long size)
 			if (!(pfn & 1)) {
 				printk("ioremap failed... pte not valid...\n");
 				vfree(area->addr);
-				return NULL;
+				return (unsigned long)NULL;
 			}
 			pfn >>= 1;	/* make it a true pfn */
 			
 			if (__alpha_remap_area_pages(vaddr,
 						     pfn << PAGE_SHIFT, 
 						     PAGE_SIZE, 0)) {
-				printk("FAILED to remap_area_pages...\n");
+				printk("FAILED to map...\n");
 				vfree(area->addr);
-				return NULL;
+				return (unsigned long)NULL;
 			}
 		}
 
 		flush_tlb_all();
 
 		vaddr = (unsigned long)area->addr + (addr & ~PAGE_MASK);
-		return (void __iomem *) vaddr;
+		return vaddr;
 	}
 
-	/* Assume a legacy (read: VGA) address, and return appropriately. */
-	return (void __iomem *)(addr + TITAN_MEM_BIAS);
+	/*
+	 * Not found - assume legacy ioremap.
+	 */
+	return addr + TITAN_MEM_BIAS;
+
 }
 
 void
-titan_iounmap(volatile void __iomem *xaddr)
+titan_iounmap(unsigned long addr)
 {
-	unsigned long addr = (unsigned long) xaddr;
-	if (addr >= VMALLOC_START)
+	if (((long)addr >> 41) == -2)
+		return;	/* kseg map, nothing to do */
+	if (addr)
 		vfree((void *)(PAGE_MASK & addr)); 
 }
 
-int
-titan_is_mmio(const volatile void __iomem *xaddr)
-{
-	unsigned long addr = (unsigned long) xaddr;
-
-	if (addr >= VMALLOC_START)
-		return 1;
-	else
-		return (addr & 0x100000000UL) == 0;
-}
-
 #ifndef CONFIG_ALPHA_GENERIC
-EXPORT_SYMBOL(titan_ioportmap);
 EXPORT_SYMBOL(titan_ioremap);
 EXPORT_SYMBOL(titan_iounmap);
-EXPORT_SYMBOL(titan_is_mmio);
 #endif
 
 /*
@@ -680,7 +682,7 @@ titan_agp_bind_memory(alpha_agp_info *agp, off_t pg_start, struct agp_memory *me
 {
 	struct titan_agp_aperture *aper = agp->aperture.sysdata;
 	return iommu_bind(aper->arena, aper->pg_start + pg_start, 
-			  mem->page_count, mem->pages);
+			  mem->page_count, mem->memory);
 }
 
 static int 
@@ -700,13 +702,13 @@ titan_agp_translate(alpha_agp_info *agp, dma_addr_t addr)
 
 	if (addr < agp->aperture.bus_base ||
 	    addr >= agp->aperture.bus_base + agp->aperture.size) {
-		printk("%s: addr out of range\n", __func__);
+		printk("%s: addr out of range\n", __FUNCTION__);
 		return -EINVAL;
 	}
 
 	pte = aper->arena->ptes[baddr >> PAGE_SHIFT];
 	if (!(pte & 1)) {
-		printk("%s: pte not valid\n", __func__);
+		printk("%s: pte not valid\n", __FUNCTION__);
 		return -EINVAL;
 	}
 
@@ -739,7 +741,6 @@ titan_agp_info(void)
 	if (titan_query_agp(port))
 		hosenum = 2;
 	if (hosenum < 0 && 
-	    titan_pchip1_present &&
 	    titan_query_agp(port = &TITAN_pachip1->a_port)) 
 		hosenum = 3;
 	
@@ -757,8 +758,6 @@ titan_agp_info(void)
 	 * Allocate the info structure.
 	 */
 	agp = kmalloc(sizeof(*agp), GFP_KERNEL);
-	if (!agp)
-		return NULL;
 
 	/*
 	 * Fill it in.

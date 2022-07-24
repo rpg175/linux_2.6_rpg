@@ -27,6 +27,8 @@
  * SUCH DAMAGE.
  */
 
+#ident "$Id: vxfs_lookup.c,v 1.21 2002/01/02 22:00:13 hch Exp hch $"
+
 /*
  * Veritas filesystem driver - lookup and other directory related code.
  */
@@ -36,6 +38,7 @@
 #include <linux/highmem.h>
 #include <linux/kernel.h>
 #include <linux/pagemap.h>
+#include <linux/smp_lock.h>
 
 #include "vxfs.h"
 #include "vxfs_dir.h"
@@ -51,24 +54,22 @@
 static struct dentry *	vxfs_lookup(struct inode *, struct dentry *, struct nameidata *);
 static int		vxfs_readdir(struct file *, void *, filldir_t);
 
-const struct inode_operations vxfs_dir_inode_ops = {
+struct inode_operations vxfs_dir_inode_ops = {
 	.lookup =		vxfs_lookup,
 };
 
-const struct file_operations vxfs_dir_operations = {
-	.llseek =		generic_file_llseek,
-	.read =			generic_read_dir,
+struct file_operations vxfs_dir_operations = {
 	.readdir =		vxfs_readdir,
 };
 
  
-static inline u_long
+static __inline__ u_long
 dir_pages(struct inode *inode)
 {
 	return (inode->i_size + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 }
  
-static inline u_long
+static __inline__ u_long
 dir_blocks(struct inode *ip)
 {
 	u_long			bsize = ip->i_sb->s_blocksize;
@@ -80,7 +81,7 @@ dir_blocks(struct inode *ip)
  *
  * len <= VXFS_NAMELEN and de != NULL are guaranteed by caller.
  */
-static inline int
+static __inline__ int
 vxfs_match(int len, const char * const name, struct vxfs_direct *de)
 {
 	if (len != de->d_namelen)
@@ -90,7 +91,7 @@ vxfs_match(int len, const char * const name, struct vxfs_direct *de)
 	return !memcmp(name, de->d_name, len);
 }
 
-static inline struct vxfs_direct *
+static __inline__ struct vxfs_direct *
 vxfs_next_entry(struct vxfs_direct *de)
 {
 	return ((struct vxfs_direct *)((char*)de + de->d_reclen));
@@ -162,7 +163,7 @@ vxfs_find_entry(struct inode *ip, struct dentry *dp, struct page **ppp)
 /**
  * vxfs_inode_by_name - find inode number for dentry
  * @dip:	directory to search in
- * @dp:		dentry we search for
+ * @dp:		dentry we seach for
  *
  * Description:
  *   vxfs_inode_by_name finds out the inode number of
@@ -211,12 +212,16 @@ vxfs_lookup(struct inode *dip, struct dentry *dp, struct nameidata *nd)
 	if (dp->d_name.len > VXFS_NAMELEN)
 		return ERR_PTR(-ENAMETOOLONG);
 				 
+	lock_kernel();
 	ino = vxfs_inode_by_name(dip, dp);
 	if (ino) {
-		ip = vxfs_iget(dip->i_sb, ino);
-		if (IS_ERR(ip))
-			return ERR_CAST(ip);
+		ip = iget(dip->i_sb, ino);
+		if (!ip) {
+			unlock_kernel();
+			return ERR_PTR(-EACCES);
+		}
 	}
+	unlock_kernel();
 	d_add(dp, ip);
 	return NULL;
 }
@@ -237,7 +242,7 @@ vxfs_lookup(struct inode *dip, struct dentry *dp, struct nameidata *nd)
 static int
 vxfs_readdir(struct file *fp, void *retp, filldir_t filler)
 {
-	struct inode		*ip = fp->f_path.dentry->d_inode;
+	struct inode		*ip = fp->f_dentry->d_inode;
 	struct super_block	*sbp = ip->i_sb;
 	u_long			bsize = sbp->s_blocksize;
 	u_long			page, npages, block, pblocks, nblocks, offset;
@@ -258,8 +263,10 @@ vxfs_readdir(struct file *fp, void *retp, filldir_t filler)
 
 	pos = fp->f_pos - 2;
 	
-	if (pos > VXFS_DIRROUND(ip->i_size))
+	if (pos > VXFS_DIRROUND(ip->i_size)) {
+		unlock_kernel();
 		return 0;
+	}
 
 	npages = dir_pages(ip);
 	nblocks = dir_blocks(ip);
@@ -318,5 +325,6 @@ vxfs_readdir(struct file *fp, void *retp, filldir_t filler)
 done:
 	fp->f_pos = ((page << PAGE_CACHE_SHIFT) | offset) + 2;
 out:
+	unlock_kernel();
 	return 0;
 }

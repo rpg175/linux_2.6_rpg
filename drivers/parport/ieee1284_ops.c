@@ -14,7 +14,7 @@
  */
 
 
-#include <linux/module.h>
+#include <linux/config.h>
 #include <linux/parport.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
@@ -59,7 +59,7 @@ size_t parport_ieee1284_write_compat (struct parport *port,
 	parport_data_forward (port);
 	while (count < len) {
 		unsigned long expire = jiffies + dev->timeout;
-		long wait = msecs_to_jiffies(10);
+		long wait = (HZ + 99) / 100;
 		unsigned char mask = (PARPORT_STATUS_ERROR
 				      | PARPORT_STATUS_BUSY);
 		unsigned char val = (PARPORT_STATUS_ERROR
@@ -96,7 +96,8 @@ size_t parport_ieee1284_write_compat (struct parport *port,
                            our interrupt handler called. */
 			if (count && no_irq) {
 				parport_release (dev);
-				schedule_timeout_interruptible(wait);
+				__set_current_state (TASK_INTERRUPTIBLE);
+				schedule_timeout (wait);
 				parport_claim_or_block (dev);
 			}
 			else
@@ -164,7 +165,17 @@ size_t parport_ieee1284_read_nibble (struct parport *port,
 		/* Does the error line indicate end of data? */
 		if (((i & 1) == 0) &&
 		    (parport_read_status(port) & PARPORT_STATUS_ERROR)) {
-			goto end_of_data;
+			port->physport->ieee1284.phase = IEEE1284_PH_HBUSY_DNA;
+			DPRINTK (KERN_DEBUG
+				"%s: No more nibble data (%d bytes)\n",
+				port->name, i/2);
+
+			/* Go to reverse idle phase. */
+			parport_frob_control (port,
+					      PARPORT_CONTROL_AUTOFD,
+					      PARPORT_CONTROL_AUTOFD);
+			port->physport->ieee1284.phase = IEEE1284_PH_REV_IDLE;
+			break;
 		}
 
 		/* Event 7: Set nAutoFd low. */
@@ -214,25 +225,18 @@ size_t parport_ieee1284_read_nibble (struct parport *port,
 			byte = nibble;
 	}
 
+	i /= 2; /* i is now in bytes */
+
 	if (i == len) {
 		/* Read the last nibble without checking data avail. */
-		if (parport_read_status (port) & PARPORT_STATUS_ERROR) {
-		end_of_data:
-			DPRINTK (KERN_DEBUG
-				"%s: No more nibble data (%d bytes)\n",
-				port->name, i/2);
-
-			/* Go to reverse idle phase. */
-			parport_frob_control (port,
-					      PARPORT_CONTROL_AUTOFD,
-					      PARPORT_CONTROL_AUTOFD);
-			port->physport->ieee1284.phase = IEEE1284_PH_REV_IDLE;
-		}
+		port = port->physport;
+		if (parport_read_status (port) & PARPORT_STATUS_ERROR)
+			port->ieee1284.phase = IEEE1284_PH_HBUSY_DNA;
 		else
-			port->physport->ieee1284.phase = IEEE1284_PH_HBUSY_DAVAIL;
+			port->ieee1284.phase = IEEE1284_PH_HBUSY_DAVAIL;
 	}
 
-	return i/2;
+	return i;
 #endif /* IEEE1284 support */
 }
 
@@ -252,7 +256,17 @@ size_t parport_ieee1284_read_byte (struct parport *port,
 
 		/* Data available? */
 		if (parport_read_status (port) & PARPORT_STATUS_ERROR) {
-			goto end_of_data;
+			port->physport->ieee1284.phase = IEEE1284_PH_HBUSY_DNA;
+			DPRINTK (KERN_DEBUG
+				 "%s: No more byte data (%Zd bytes)\n",
+				 port->name, count);
+
+			/* Go to reverse idle phase. */
+			parport_frob_control (port,
+					      PARPORT_CONTROL_AUTOFD,
+					      PARPORT_CONTROL_AUTOFD);
+			port->physport->ieee1284.phase = IEEE1284_PH_REV_IDLE;
+			break;
 		}
 
 		/* Event 14: Place data bus in high impedance state. */
@@ -304,20 +318,11 @@ size_t parport_ieee1284_read_byte (struct parport *port,
 
 	if (count == len) {
 		/* Read the last byte without checking data avail. */
-		if (parport_read_status (port) & PARPORT_STATUS_ERROR) {
-		end_of_data:
-			DPRINTK (KERN_DEBUG
-				 "%s: No more byte data (%Zd bytes)\n",
-				 port->name, count);
-
-			/* Go to reverse idle phase. */
-			parport_frob_control (port,
-					      PARPORT_CONTROL_AUTOFD,
-					      PARPORT_CONTROL_AUTOFD);
-			port->physport->ieee1284.phase = IEEE1284_PH_REV_IDLE;
-		}
+		port = port->physport;
+		if (parport_read_status (port) & PARPORT_STATUS_ERROR)
+			port->ieee1284.phase = IEEE1284_PH_HBUSY_DNA;
 		else
-			port->physport->ieee1284.phase = IEEE1284_PH_HBUSY_DAVAIL;
+			port->ieee1284.phase = IEEE1284_PH_HBUSY_DAVAIL;
 	}
 
 	return count;
@@ -536,12 +541,13 @@ size_t parport_ieee1284_ecp_read_data (struct parport *port,
 			/* Yield the port for a while. */
 			if (count && dev->port->irq != PARPORT_IRQ_NONE) {
 				parport_release (dev);
-				schedule_timeout_interruptible(msecs_to_jiffies(40));
+				__set_current_state (TASK_INTERRUPTIBLE);
+				schedule_timeout ((HZ + 24) / 25);
 				parport_claim_or_block (dev);
 			}
 			else
 				/* We must have the device claimed here. */
-				parport_wait_event (port, msecs_to_jiffies(40));
+				parport_wait_event (port, (HZ + 24) / 25);
 
 			/* Is there a signal pending? */
 			if (signal_pending (current))
@@ -888,7 +894,7 @@ size_t parport_ieee1284_epp_read_addr (struct parport *port,
 
 		/* Event 59: set nSelectIn (nAStrb) high */
 		parport_frob_control (port, PARPORT_CONTROL_SELECT,
-				      0);
+				      PARPORT_CONTROL_SELECT);
 
 		/* Event 60: wait for Busy to go low */
 		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY, 
@@ -902,13 +908,4 @@ size_t parport_ieee1284_epp_read_addr (struct parport *port,
 	return ret;
 }
 
-EXPORT_SYMBOL(parport_ieee1284_ecp_write_data);
-EXPORT_SYMBOL(parport_ieee1284_ecp_read_data);
-EXPORT_SYMBOL(parport_ieee1284_ecp_write_addr);
-EXPORT_SYMBOL(parport_ieee1284_write_compat);
-EXPORT_SYMBOL(parport_ieee1284_read_nibble);
-EXPORT_SYMBOL(parport_ieee1284_read_byte);
-EXPORT_SYMBOL(parport_ieee1284_epp_write_data);
-EXPORT_SYMBOL(parport_ieee1284_epp_read_data);
-EXPORT_SYMBOL(parport_ieee1284_epp_write_addr);
-EXPORT_SYMBOL(parport_ieee1284_epp_read_addr);
+

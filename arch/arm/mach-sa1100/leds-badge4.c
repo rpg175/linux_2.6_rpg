@@ -10,9 +10,10 @@
  *
  */
 
+#include <linux/config.h>
 #include <linux/init.h>
 
-#include <mach/hardware.h>
+#include <asm/hardware.h>
 #include <asm/leds.h>
 #include <asm/system.h>
 

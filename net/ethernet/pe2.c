@@ -3,7 +3,6 @@
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 
 #include <net/datalink.h>
 
@@ -13,7 +12,9 @@ static int pEII_request(struct datalink_proto *dl,
 	struct net_device *dev = skb->dev;
 
 	skb->protocol = htons(ETH_P_IPX);
-	dev_hard_header(skb, dev, ETH_P_IPX, dest_node, NULL, skb->len);
+	if (dev->hard_header)
+		dev->hard_header(skb, dev, ETH_P_IPX,
+				 dest_node, NULL, skb->len);
 	return dev_queue_xmit(skb);
 }
 
@@ -28,10 +29,12 @@ struct datalink_proto *make_EII_client(void)
 
 	return proto;
 }
-EXPORT_SYMBOL(make_EII_client);
 
 void destroy_EII_client(struct datalink_proto *dl)
 {
-	kfree(dl);
+	if (dl)
+		kfree(dl);
 }
+
 EXPORT_SYMBOL(destroy_EII_client);
+EXPORT_SYMBOL(make_EII_client);

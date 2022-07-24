@@ -1,11 +1,10 @@
 
-#include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/isdn/capilli.h>
 
 #define DBG(format, arg...) do { \
-printk(KERN_DEBUG "%s: " format "\n" , __func__ , ## arg); \
+printk(KERN_DEBUG "%s: " format "\n" , __FUNCTION__ , ## arg); \
 } while (0)
 
 struct capilib_msgidqueue {
@@ -31,8 +30,8 @@ struct capilib_ncci {
 static inline void mq_init(struct capilib_ncci * np)
 {
 	u_int i;
-	np->msgidqueue = NULL;
-	np->msgidlast = NULL;
+	np->msgidqueue = 0;
+	np->msgidlast = 0;
 	np->nmsg = 0;
 	memset(np->msgidpool, 0, sizeof(np->msgidpool));
 	np->msgidfree = &np->msgidpool[0];
@@ -45,11 +44,11 @@ static inline void mq_init(struct capilib_ncci * np)
 static inline int mq_enqueue(struct capilib_ncci * np, u16 msgid)
 {
 	struct capilib_msgidqueue *mq;
-	if ((mq = np->msgidfree) == NULL)
+	if ((mq = np->msgidfree) == 0)
 		return 0;
 	np->msgidfree = mq->next;
 	mq->msgid = msgid;
-	mq->next = NULL;
+	mq->next = 0;
 	if (np->msgidlast)
 		np->msgidlast->next = mq;
 	np->msgidlast = mq;
@@ -67,7 +66,7 @@ static inline int mq_dequeue(struct capilib_ncci * np, u16 msgid)
 			struct capilib_msgidqueue *mq = *pp;
 			*pp = mq->next;
 			if (mq == np->msgidlast)
-				np->msgidlast = NULL;
+				np->msgidlast = 0;
 			mq->next = np->msgidfree;
 			np->msgidfree = mq;
 			np->nmsg--;

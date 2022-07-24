@@ -20,6 +20,7 @@
 * Dec 13, 1996	Gene Kozin	Initial version (based on Sangoma's WANPIPE)
 *****************************************************************************/
 
+#include <linux/config.h>
 #include <linux/init.h>		/* __initfunc et al. */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
@@ -27,9 +28,8 @@
 #include <linux/module.h>
 #include <linux/wanrouter.h>	/* WAN router API definitions */
 #include <linux/seq_file.h>
-#include <linux/mutex.h>
+#include <linux/smp_lock.h>
 
-#include <net/net_namespace.h>
 #include <asm/io.h>
 
 #define PROC_STATS_FORMAT "%30s: %12lu\n"
@@ -38,10 +38,10 @@
 
 #define PROT_DECODE(prot) ((prot == WANCONFIG_FR) ? " FR" :\
 			      (prot == WANCONFIG_X25) ? " X25" : \
-				 (prot == WANCONFIG_PPP) ? " PPP" : \
+			         (prot == WANCONFIG_PPP) ? " PPP" : \
 				    (prot == WANCONFIG_CHDLC) ? " CHDLC": \
 				       (prot == WANCONFIG_MPPP) ? " MPPP" : \
-					   " Unknown" )
+				           " Unknown" )
 
 /****** Function Prototypes *************************************************/
 
@@ -51,7 +51,7 @@
 
 /*
  *	Structures for interfacing with the /proc filesystem.
- *	Router creates its own directory /proc/net/router with the following
+ *	Router creates its own directory /proc/net/router with the folowing
  *	entries:
  *	config		device configuration
  *	status		global device statistics
@@ -66,7 +66,6 @@
  *	/proc/net/router
  */
 
-static DEFINE_MUTEX(config_mutex);
 static struct proc_dir_entry *proc_router;
 
 /* Strings */
@@ -81,12 +80,11 @@ static struct proc_dir_entry *proc_router;
  *	Iterator
  */
 static void *r_start(struct seq_file *m, loff_t *pos)
-	__acquires(kernel_lock)
 {
 	struct wan_device *wandev;
 	loff_t l = *pos;
 
-	mutex_lock(&config_mutex);
+	lock_kernel();
 	if (!l--)
 		return SEQ_START_TOKEN;
 	for (wandev = wanrouter_router_devlist; l-- && wandev;
@@ -103,9 +101,8 @@ static void *r_next(struct seq_file *m, void *v, loff_t *pos)
 }
 
 static void r_stop(struct seq_file *m, void *v)
-	__releases(kernel_lock)
 {
-	mutex_unlock(&config_mutex);
+	unlock_kernel();
 }
 
 static int config_show(struct seq_file *m, void *v)
@@ -168,14 +165,14 @@ static int status_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static const struct seq_operations config_op = {
+static struct seq_operations config_op = {
 	.start	= r_start,
 	.next	= r_next,
 	.stop	= r_stop,
 	.show	= config_show,
 };
 
-static const struct seq_operations status_op = {
+static struct seq_operations status_op = {
 	.start	= r_start,
 	.next	= r_next,
 	.stop	= r_stop,
@@ -192,7 +189,7 @@ static int status_open(struct inode *inode, struct file *file)
 	return seq_open(file, &status_op);
 }
 
-static const struct file_operations config_fops = {
+static struct file_operations config_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = config_open,
 	.read	 = seq_read,
@@ -200,7 +197,7 @@ static const struct file_operations config_fops = {
 	.release = seq_release,
 };
 
-static const struct file_operations status_fops = {
+static struct file_operations status_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = status_open,
 	.read	 = seq_read,
@@ -210,7 +207,7 @@ static const struct file_operations status_fops = {
 
 static int wandev_show(struct seq_file *m, void *v)
 {
-	struct wan_device *wandev = m->private;
+	struct wan_device *wandev = v;
 
 	if (wandev->magic != ROUTER_MAGIC)
 		return 0;
@@ -275,13 +272,13 @@ static int wandev_open(struct inode *inode, struct file *file)
 	return single_open(file, wandev_show, PDE(inode)->data);
 }
 
-static const struct file_operations wandev_fops = {
+static struct file_operations wandev_fops = {
 	.owner	 = THIS_MODULE,
 	.open	 = wandev_open,
 	.read	 = seq_read,
 	.llseek	 = seq_lseek,
 	.release = single_release,
-	.unlocked_ioctl  = wanrouter_ioctl,
+	.ioctl	 = wanrouter_ioctl,
 };
 
 /*
@@ -291,21 +288,23 @@ static const struct file_operations wandev_fops = {
 int __init wanrouter_proc_init(void)
 {
 	struct proc_dir_entry *p;
-	proc_router = proc_mkdir(ROUTER_NAME, init_net.proc_net);
+	proc_router = proc_mkdir(ROUTER_NAME, proc_net);
 	if (!proc_router)
 		goto fail;
 
-	p = proc_create("config", S_IRUGO, proc_router, &config_fops);
+	p = create_proc_entry("config", S_IRUGO, proc_router);
 	if (!p)
 		goto fail_config;
-	p = proc_create("status", S_IRUGO, proc_router, &status_fops);
+	p->proc_fops = &config_fops;
+	p = create_proc_entry("status", S_IRUGO, proc_router);
 	if (!p)
 		goto fail_stat;
+	p->proc_fops = &status_fops;
 	return 0;
 fail_stat:
 	remove_proc_entry("config", proc_router);
 fail_config:
-	remove_proc_entry(ROUTER_NAME, init_net.proc_net);
+	remove_proc_entry(ROUTER_NAME, proc_net);
 fail:
 	return -ENOMEM;
 }
@@ -318,7 +317,7 @@ void wanrouter_proc_cleanup(void)
 {
 	remove_proc_entry("config", proc_router);
 	remove_proc_entry("status", proc_router);
-	remove_proc_entry(ROUTER_NAME, init_net.proc_net);
+	remove_proc_entry(ROUTER_NAME, proc_net);
 }
 
 /*
@@ -330,10 +329,10 @@ int wanrouter_proc_add(struct wan_device* wandev)
 	if (wandev->magic != ROUTER_MAGIC)
 		return -EINVAL;
 
-	wandev->dent = proc_create(wandev->name, S_IRUGO,
-				   proc_router, &wandev_fops);
+	wandev->dent = create_proc_entry(wandev->name, S_IRUGO, proc_router);
 	if (!wandev->dent)
 		return -ENOMEM;
+	wandev->dent->proc_fops	= &wandev_fops;
 	wandev->dent->data	= wandev;
 	return 0;
 }

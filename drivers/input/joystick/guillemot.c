@@ -1,4 +1,6 @@
 /*
+ * $Id: guillemot.c,v 1.10 2002/01/22 20:28:12 vojtech Exp $
+ *
  *  Copyright (c) 2001 Vojtech Pavlik
  */
 
@@ -33,19 +35,17 @@
 #include <linux/init.h>
 #include <linux/gameport.h>
 #include <linux/input.h>
-#include <linux/jiffies.h>
-
-#define DRIVER_DESC	"Guillemot Digital joystick driver"
 
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
-MODULE_DESCRIPTION(DRIVER_DESC);
+MODULE_DESCRIPTION("Guillemot Digital joystick driver");
 MODULE_LICENSE("GPL");
 
 #define GUILLEMOT_MAX_START	600	/* 600 us */
 #define GUILLEMOT_MAX_STROBE	60	/* 60 us */
 #define GUILLEMOT_MAX_LENGTH	17	/* 17 bytes */
+#define GUILLEMOT_REFRESH_TIME	HZ/50	/* 20 ms */
 
-static short guillemot_abs_pad[] =
+static short guillemot_abs_pad[] = 
 	{ ABS_X, ABS_Y, ABS_THROTTLE, ABS_RUDDER, -1 };
 
 static short guillemot_btn_pad[] =
@@ -66,7 +66,9 @@ struct guillemot_type {
 
 struct guillemot {
 	struct gameport *gameport;
-	struct input_dev *dev;
+	struct input_dev dev;
+	struct timer_list timer;
+	int used;
 	int bads;
 	int reads;
 	struct guillemot_type *type;
@@ -116,13 +118,13 @@ static int guillemot_read_packet(struct gameport *gameport, u8 *data)
 }
 
 /*
- * guillemot_poll() reads and analyzes Guillemot joystick data.
+ * guillemot_timer() reads and analyzes Guillemot joystick data.
  */
 
-static void guillemot_poll(struct gameport *gameport)
+static void guillemot_timer(unsigned long private)
 {
-	struct guillemot *guillemot = gameport_get_drvdata(gameport);
-	struct input_dev *dev = guillemot->dev;
+	struct guillemot *guillemot = (struct guillemot *) private;
+	struct input_dev *dev = &guillemot->dev;
 	u8 data[GUILLEMOT_MAX_LENGTH];
 	int i;
 
@@ -146,6 +148,8 @@ static void guillemot_poll(struct gameport *gameport)
 	}
 
 	input_sync(dev);
+
+	mod_timer(&guillemot->timer, jiffies + GUILLEMOT_REFRESH_TIME);
 }
 
 /*
@@ -154,9 +158,9 @@ static void guillemot_poll(struct gameport *gameport)
 
 static int guillemot_open(struct input_dev *dev)
 {
-	struct guillemot *guillemot = input_get_drvdata(dev);
-
-	gameport_start_polling(guillemot->gameport);
+	struct guillemot *guillemot = dev->private;
+	if (!guillemot->used++)
+		mod_timer(&guillemot->timer, jiffies + GUILLEMOT_REFRESH_TIME);	
 	return 0;
 }
 
@@ -166,45 +170,39 @@ static int guillemot_open(struct input_dev *dev)
 
 static void guillemot_close(struct input_dev *dev)
 {
-	struct guillemot *guillemot = input_get_drvdata(dev);
-
-	gameport_stop_polling(guillemot->gameport);
+	struct guillemot *guillemot = dev->private;
+	if (!--guillemot->used)
+		del_timer(&guillemot->timer);
 }
 
 /*
  * guillemot_connect() probes for Guillemot joysticks.
  */
 
-static int guillemot_connect(struct gameport *gameport, struct gameport_driver *drv)
+static void guillemot_connect(struct gameport *gameport, struct gameport_dev *dev)
 {
 	struct guillemot *guillemot;
-	struct input_dev *input_dev;
 	u8 data[GUILLEMOT_MAX_LENGTH];
 	int i, t;
-	int err;
 
-	guillemot = kzalloc(sizeof(struct guillemot), GFP_KERNEL);
-	input_dev = input_allocate_device();
-	if (!guillemot || !input_dev) {
-		err = -ENOMEM;
-		goto fail1;
-	}
+	if (!(guillemot = kmalloc(sizeof(struct guillemot), GFP_KERNEL)))
+		return;
+	memset(guillemot, 0, sizeof(struct guillemot));
+
+	gameport->private = guillemot;
 
 	guillemot->gameport = gameport;
-	guillemot->dev = input_dev;
+	init_timer(&guillemot->timer);
+	guillemot->timer.data = (long) guillemot;
+	guillemot->timer.function = guillemot_timer;
 
-	gameport_set_drvdata(gameport, guillemot);
-
-	err = gameport_open(gameport, drv, GAMEPORT_MODE_RAW);
-	if (err)
+	if (gameport_open(gameport, dev, GAMEPORT_MODE_RAW))
 		goto fail1;
 
 	i = guillemot_read_packet(gameport, data);
 
-	if (i != GUILLEMOT_MAX_LENGTH * 8 || data[0] != 0x55 || data[16] != 0xaa) {
-		err = -ENODEV;
+	if (i != GUILLEMOT_MAX_LENGTH * 8 || data[0] != 0x55 || data[16] != 0xaa)
 		goto fail2;
-	}
 
 	for (i = 0; guillemot_type[i].name; i++)
 		if (guillemot_type[i].id == data[11])
@@ -213,82 +211,75 @@ static int guillemot_connect(struct gameport *gameport, struct gameport_driver *
 	if (!guillemot_type[i].name) {
 		printk(KERN_WARNING "guillemot.c: Unknown joystick on %s. [ %02x%02x:%04x, ver %d.%02d ]\n",
 			gameport->phys, data[12], data[13], data[11], data[14], data[15]);
-		err = -ENODEV;
-		goto fail2;
+		goto fail2;	
 	}
 
-	gameport_set_poll_handler(gameport, guillemot_poll);
-	gameport_set_poll_interval(gameport, 20);
+	sprintf(guillemot->phys, "%s/input0", gameport->phys);
 
-	snprintf(guillemot->phys, sizeof(guillemot->phys), "%s/input0", gameport->phys);
 	guillemot->type = guillemot_type + i;
 
-	input_dev->name = guillemot_type[i].name;
-	input_dev->phys = guillemot->phys;
-	input_dev->id.bustype = BUS_GAMEPORT;
-	input_dev->id.vendor = GAMEPORT_ID_VENDOR_GUILLEMOT;
-	input_dev->id.product = guillemot_type[i].id;
-	input_dev->id.version = (int)data[14] << 8 | data[15];
-	input_dev->dev.parent = &gameport->dev;
+	guillemot->dev.private = guillemot;
+	guillemot->dev.open = guillemot_open;
+	guillemot->dev.close = guillemot_close;
 
-	input_set_drvdata(input_dev, guillemot);
+	guillemot->dev.name = guillemot_type[i].name;
+	guillemot->dev.phys = guillemot->phys;
+	guillemot->dev.id.bustype = BUS_GAMEPORT;
+	guillemot->dev.id.vendor = GAMEPORT_ID_VENDOR_GUILLEMOT;
+	guillemot->dev.id.product = guillemot_type[i].id;
+	guillemot->dev.id.version = (int)data[14] << 8 | data[15];
 
-	input_dev->open = guillemot_open;
-	input_dev->close = guillemot_close;
+	guillemot->dev.evbit[0] = BIT(EV_KEY) | BIT(EV_ABS);
 
-	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
-
-	for (i = 0; (t = guillemot->type->abs[i]) >= 0; i++)
-		input_set_abs_params(input_dev, t, 0, 255, 0, 0);
-
-	if (guillemot->type->hat) {
-		input_set_abs_params(input_dev, ABS_HAT0X, -1, 1, 0, 0);
-		input_set_abs_params(input_dev, ABS_HAT0Y, -1, 1, 0, 0);
+	for (i = 0; (t = guillemot->type->abs[i]) >= 0; i++) {
+		set_bit(t, guillemot->dev.absbit);
+		guillemot->dev.absmin[t] = 0;
+		guillemot->dev.absmax[t] = 255;
 	}
 
+	if (guillemot->type->hat) 
+		for (i = 0; i < 2; i++) {
+			t = ABS_HAT0X + i;
+			set_bit(t, guillemot->dev.absbit);
+			guillemot->dev.absmin[t] = -1;
+			guillemot->dev.absmax[t] = 1;
+		}
+
 	for (i = 0; (t = guillemot->type->btn[i]) >= 0; i++)
-		set_bit(t, input_dev->keybit);
+		set_bit(t, guillemot->dev.keybit);
 
-	err = input_register_device(guillemot->dev);
-	if (err)
-		goto fail2;
+	input_register_device(&guillemot->dev);
+	printk(KERN_INFO "input: %s ver %d.%02d on %s\n",
+		guillemot->type->name, data[14], data[15], gameport->phys);
 
-	return 0;
-
+	return;
 fail2:	gameport_close(gameport);
-fail1:  gameport_set_drvdata(gameport, NULL);
-	input_free_device(input_dev);
-	kfree(guillemot);
-	return err;
+fail1:  kfree(guillemot);
 }
 
 static void guillemot_disconnect(struct gameport *gameport)
 {
-	struct guillemot *guillemot = gameport_get_drvdata(gameport);
-
+	struct guillemot *guillemot = gameport->private;
 	printk(KERN_INFO "guillemot.c: Failed %d reads out of %d on %s\n", guillemot->reads, guillemot->bads, guillemot->phys);
-	input_unregister_device(guillemot->dev);
+	input_unregister_device(&guillemot->dev);
 	gameport_close(gameport);
 	kfree(guillemot);
 }
 
-static struct gameport_driver guillemot_drv = {
-	.driver		= {
-		.name	= "guillemot",
-	},
-	.description	= DRIVER_DESC,
-	.connect	= guillemot_connect,
-	.disconnect	= guillemot_disconnect,
+static struct gameport_dev guillemot_dev = {
+	.connect =	guillemot_connect,
+	.disconnect =	guillemot_disconnect,
 };
 
-static int __init guillemot_init(void)
+int __init guillemot_init(void)
 {
-	return gameport_register_driver(&guillemot_drv);
+	gameport_register_device(&guillemot_dev);
+	return 0;
 }
 
-static void __exit guillemot_exit(void)
+void __exit guillemot_exit(void)
 {
-	gameport_unregister_driver(&guillemot_drv);
+	gameport_unregister_device(&guillemot_dev);
 }
 
 module_init(guillemot_init);

@@ -1,6 +1,5 @@
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include "abort-macro.S"
 /*
  * Function: v5tj_early_abort
  *
@@ -24,10 +23,12 @@ ENTRY(v5tj_early_abort)
 	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
 	bic	r1, r1, #1 << 11 | 1 << 10	@ clear bits 11 and 10 of FSR
 	tst	r3, #PSR_J_BIT			@ Java?
+	orrne	r1, r1, #1 << 11		@ always assume write
 	movne	pc, lr
-	do_thumb_abort
+	tst	r3, #PSR_T_BIT			@ Thumb?
+	ldrneh	r3, [r2]			@ read aborted thumb instruction
 	ldreq	r3, [r2]			@ read aborted ARM instruction
-	do_ldrd_abort
+	movne	r3, r3, lsl #(21 - 12)		@ move thumb bit 11 to ARM bit 20
 	tst	r3, #1 << 20			@ L = 0 -> write
 	orreq	r1, r1, #1 << 11		@ yes.
 	mov	pc, lr

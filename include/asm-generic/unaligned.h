@@ -1,30 +1,20 @@
-#ifndef __ASM_GENERIC_UNALIGNED_H
-#define __ASM_GENERIC_UNALIGNED_H
+#ifndef _ASM_GENERIC_UNALIGNED_H_
+#define _ASM_GENERIC_UNALIGNED_H_
 
 /*
- * This is the most generic implementation of unaligned accesses
- * and should work almost anywhere.
- *
- * If an architecture can handle unaligned accesses in hardware,
- * it may want to use the linux/unaligned/access_ok.h implementation
- * instead.
+ * For the benefit of those who are trying to port Linux to another
+ * architecture, here are some C-language equivalents. 
  */
-#include <asm/byteorder.h>
 
-#if defined(__LITTLE_ENDIAN)
-# include <linux/unaligned/le_struct.h>
-# include <linux/unaligned/be_byteshift.h>
-# include <linux/unaligned/generic.h>
-# define get_unaligned	__get_unaligned_le
-# define put_unaligned	__put_unaligned_le
-#elif defined(__BIG_ENDIAN)
-# include <linux/unaligned/be_struct.h>
-# include <linux/unaligned/le_byteshift.h>
-# include <linux/unaligned/generic.h>
-# define get_unaligned	__get_unaligned_be
-# define put_unaligned	__put_unaligned_be
-#else
-# error need to define endianess
-#endif
+#include <asm/string.h>
 
-#endif /* __ASM_GENERIC_UNALIGNED_H */
+
+#define get_unaligned(ptr) \
+  ({ __typeof__(*(ptr)) __tmp; memcpy(&__tmp, (ptr), sizeof(*(ptr))); __tmp; })
+
+#define put_unaligned(val, ptr)				\
+  ({ __typeof__(*(ptr)) __tmp = (val);			\
+     memcpy((ptr), &__tmp, sizeof(*(ptr)));		\
+     (void)0; })
+
+#endif /* _ASM_GENERIC_UNALIGNED_H */

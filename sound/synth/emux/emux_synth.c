@@ -36,42 +36,38 @@
 #define LIMITVALUE(x, a, b) do { if ((x) < (a)) (x) = (a); else if ((x) > (b)) (x) = (b); } while (0)
 #define LIMITMAX(x, a) do {if ((x) > (a)) (x) = (a); } while (0)
 
-static int get_zone(struct snd_emux *emu, struct snd_emux_port *port,
-		    int *notep, int vel, struct snd_midi_channel *chan,
-		    struct snd_sf_zone **table);
-static int get_bank(struct snd_emux_port *port, struct snd_midi_channel *chan);
-static void terminate_note1(struct snd_emux *emu, int note,
-			    struct snd_midi_channel *chan, int free);
-static void exclusive_note_off(struct snd_emux *emu, struct snd_emux_port *port,
-			       int exclass);
-static void terminate_voice(struct snd_emux *emu, struct snd_emux_voice *vp, int free);
-static void update_voice(struct snd_emux *emu, struct snd_emux_voice *vp, int update);
-static void setup_voice(struct snd_emux_voice *vp);
-static int calc_pan(struct snd_emux_voice *vp);
-static int calc_volume(struct snd_emux_voice *vp);
-static int calc_pitch(struct snd_emux_voice *vp);
+static int get_zone(snd_emux_t *emu, snd_emux_port_t *port, int *notep, int vel, snd_midi_channel_t *chan, snd_sf_zone_t **table);
+static int get_bank(snd_emux_port_t *port, snd_midi_channel_t *chan);
+static void terminate_note1(snd_emux_t *emu, int note, snd_midi_channel_t *chan, int free);
+static void exclusive_note_off(snd_emux_t *emu, snd_emux_port_t *port, int exclass);
+static void terminate_voice(snd_emux_t *emu, snd_emux_voice_t *vp, int free);
+static void update_voice(snd_emux_t *emu, snd_emux_voice_t *vp, int update);
+static void setup_voice(snd_emux_voice_t *vp);
+static int calc_pan(snd_emux_voice_t *vp);
+static int calc_volume(snd_emux_voice_t *vp);
+static int calc_pitch(snd_emux_voice_t *vp);
 
 
 /*
  * Start a note.
  */
 void
-snd_emux_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
+snd_emux_note_on(void *p, int note, int vel, snd_midi_channel_t *chan)
 {
-	struct snd_emux *emu;
+	snd_emux_t *emu;
 	int i, key, nvoices;
-	struct snd_emux_voice *vp;
-	struct snd_sf_zone *table[SNDRV_EMUX_MAX_MULTI_VOICES];
+	snd_emux_voice_t *vp;
+	snd_sf_zone_t *table[SNDRV_EMUX_MAX_MULTI_VOICES];
 	unsigned long flags;
-	struct snd_emux_port *port;
+	snd_emux_port_t *port;
 
-	port = p;
-	if (snd_BUG_ON(!port || !chan))
-		return;
+	port = snd_magic_cast(snd_emux_port_t, p, return);
+	snd_assert(port != NULL && chan != NULL, return);
 
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.get_voice || !emu->ops.trigger))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.get_voice != NULL, return);
+	snd_assert(emu->ops.trigger != NULL, return);
 
 	key = note; /* remember the original note */
 	nvoices = get_zone(emu, port, &note, vel, chan, table);
@@ -80,7 +76,7 @@ snd_emux_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 
 	/* exclusive note off */
 	for (i = 0; i < nvoices; i++) {
-		struct snd_sf_zone *zp = table[i];
+		snd_sf_zone_t *zp = table[i];
 		if (zp && zp->v.exclusiveClass)
 			exclusive_note_off(emu, port, zp->v.exclusiveClass);
 	}
@@ -102,6 +98,7 @@ snd_emux_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 		vp = emu->ops.get_voice(emu, port);
 		if (vp == NULL || vp->ch < 0)
 			continue;
+		snd_assert(vp->emu != NULL && vp->hw != NULL, return);
 		if (STATE_IS_PLAYING(vp->state))
 			emu->ops.terminate(vp);
 
@@ -142,7 +139,7 @@ snd_emux_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
 #ifdef SNDRV_EMUX_USE_RAW_EFFECT
 	if (port->port_mode == SNDRV_EMUX_PORT_MODE_OSS_SYNTH) {
 		/* clear voice position for the next note on this channel */
-		struct snd_emux_effect_table *fx = chan->private;
+		snd_emux_effect_table_t *fx = chan->private;
 		if (fx) {
 			fx->flag[EMUX_FX_SAMPLE_START] = 0;
 			fx->flag[EMUX_FX_COARSE_SAMPLE_START] = 0;
@@ -155,27 +152,27 @@ snd_emux_note_on(void *p, int note, int vel, struct snd_midi_channel *chan)
  * Release a note in response to a midi note off.
  */
 void
-snd_emux_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
+snd_emux_note_off(void *p, int note, int vel, snd_midi_channel_t *chan)
 {
 	int ch;
-	struct snd_emux *emu;
-	struct snd_emux_voice *vp;
+	snd_emux_t *emu;
+	snd_emux_voice_t *vp;
 	unsigned long flags;
-	struct snd_emux_port *port;
+	snd_emux_port_t *port;
 
-	port = p;
-	if (snd_BUG_ON(!port || !chan))
-		return;
+	port = snd_magic_cast(snd_emux_port_t, p, return);
+	snd_assert(port != NULL && chan != NULL, return);
 
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.release))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.release != NULL, return);
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (ch = 0; ch < emu->max_voices; ch++) {
 		vp = &emu->voices[ch];
 		if (STATE_IS_PLAYING(vp->state) &&
 		    vp->chan == chan && vp->key == note) {
+			vp->time = emu->use_time++;
 			vp->state = SNDRV_EMUX_ST_RELEASED;
 			if (vp->ontime == jiffies) {
 				/* if note-off is sent too shortly after
@@ -204,12 +201,11 @@ snd_emux_note_off(void *p, int note, int vel, struct snd_midi_channel *chan)
  */
 void snd_emux_timer_callback(unsigned long data)
 {
-	struct snd_emux *emu = (struct snd_emux *) data;
-	struct snd_emux_voice *vp;
-	unsigned long flags;
+	snd_emux_t *emu = snd_magic_cast(snd_emux_t, (void*)data, return);
+	snd_emux_voice_t *vp;
 	int ch, do_again = 0;
 
-	spin_lock_irqsave(&emu->voice_lock, flags);
+	spin_lock(&emu->voice_lock);
 	for (ch = 0; ch < emu->max_voices; ch++) {
 		vp = &emu->voices[ch];
 		if (vp->state == SNDRV_EMUX_ST_PENDING) {
@@ -227,28 +223,27 @@ void snd_emux_timer_callback(unsigned long data)
 		emu->timer_active = 1;
 	} else
 		emu->timer_active = 0;
-	spin_unlock_irqrestore(&emu->voice_lock, flags);
+	spin_unlock(&emu->voice_lock);
 }
 
 /*
  * key pressure change
  */
 void
-snd_emux_key_press(void *p, int note, int vel, struct snd_midi_channel *chan)
+snd_emux_key_press(void *p, int note, int vel, snd_midi_channel_t *chan)
 {
 	int ch;
-	struct snd_emux *emu;
-	struct snd_emux_voice *vp;
+	snd_emux_t *emu;
+	snd_emux_voice_t *vp;
 	unsigned long flags;
-	struct snd_emux_port *port;
+	snd_emux_port_t *port;
 
-	port = p;
-	if (snd_BUG_ON(!port || !chan))
-		return;
+	port = snd_magic_cast(snd_emux_port_t, p, return);
+	snd_assert(port != NULL && chan != NULL, return);
 
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.update))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.update != NULL, return);
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (ch = 0; ch < emu->max_voices; ch++) {
@@ -267,10 +262,10 @@ snd_emux_key_press(void *p, int note, int vel, struct snd_midi_channel *chan)
  * Modulate the voices which belong to the channel
  */
 void
-snd_emux_update_channel(struct snd_emux_port *port, struct snd_midi_channel *chan, int update)
+snd_emux_update_channel(snd_emux_port_t *port, snd_midi_channel_t *chan, int update)
 {
-	struct snd_emux *emu;
-	struct snd_emux_voice *vp;
+	snd_emux_t *emu;
+	snd_emux_voice_t *vp;
 	int i;
 	unsigned long flags;
 
@@ -278,8 +273,8 @@ snd_emux_update_channel(struct snd_emux_port *port, struct snd_midi_channel *cha
 		return;
 
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.update))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.update != NULL, return);
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (i = 0; i < emu->max_voices; i++) {
@@ -294,10 +289,10 @@ snd_emux_update_channel(struct snd_emux_port *port, struct snd_midi_channel *cha
  * Modulate all the voices which belong to the port.
  */
 void
-snd_emux_update_port(struct snd_emux_port *port, int update)
+snd_emux_update_port(snd_emux_port_t *port, int update)
 {
-	struct snd_emux *emu; 
-	struct snd_emux_voice *vp;
+	snd_emux_t *emu; 
+	snd_emux_voice_t *vp;
 	int i;
 	unsigned long flags;
 
@@ -305,8 +300,8 @@ snd_emux_update_port(struct snd_emux_port *port, int update)
 		return;
 
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.update))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.update != NULL, return);
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (i = 0; i < emu->max_voices; i++) {
@@ -319,17 +314,16 @@ snd_emux_update_port(struct snd_emux_port *port, int update)
 
 
 /*
- * Deal with a controller type event.  This includes all types of
+ * Deal with a controler type event.  This includes all types of
  * control events, not just the midi controllers
  */
 void
-snd_emux_control(void *p, int type, struct snd_midi_channel *chan)
+snd_emux_control(void *p, int type, snd_midi_channel_t *chan)
 {
-	struct snd_emux_port *port;
+	snd_emux_port_t *port;
 
-	port = p;
-	if (snd_BUG_ON(!port || !chan))
-		return;
+	port = snd_magic_cast(snd_emux_port_t, p, return);
+	snd_assert(port != NULL && chan != NULL, return);
 
 	switch (type) {
 	case MIDI_CTL_MSB_MAIN_VOLUME:
@@ -344,12 +338,8 @@ snd_emux_control(void *p, int type, struct snd_midi_channel *chan)
 	case MIDI_CTL_SOFT_PEDAL:
 #ifdef SNDRV_EMUX_USE_RAW_EFFECT
 		/* FIXME: this is an emulation */
-		if (chan->control[type] >= 64)
-			snd_emux_send_effect(port, chan, EMUX_FX_CUTOFF, -160,
+		snd_emux_send_effect(port, chan, EMUX_FX_CUTOFF, -160,
 				     EMUX_FX_FLAG_ADD);
-		else
-			snd_emux_send_effect(port, chan, EMUX_FX_CUTOFF, 0,
-				     EMUX_FX_FLAG_OFF);
 #endif
 		break;
 
@@ -373,13 +363,23 @@ snd_emux_control(void *p, int type, struct snd_midi_channel *chan)
 
 
 /*
+ * for Emu10k1 - release at least 1 voice currently using
+ */
+int
+snd_emux_release_voice(snd_emux_t *emu)
+{
+	return 0;
+}
+
+
+/*
  * terminate note - if free flag is true, free the terminated voice
  */
 static void
-terminate_note1(struct snd_emux *emu, int note, struct snd_midi_channel *chan, int free)
+terminate_note1(snd_emux_t *emu, int note, snd_midi_channel_t *chan, int free)
 {
 	int  i;
-	struct snd_emux_voice *vp;
+	snd_emux_voice_t *vp;
 	unsigned long flags;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
@@ -397,18 +397,17 @@ terminate_note1(struct snd_emux *emu, int note, struct snd_midi_channel *chan, i
  * terminate note - exported for midi emulation
  */
 void
-snd_emux_terminate_note(void *p, int note, struct snd_midi_channel *chan)
+snd_emux_terminate_note(void *p, int note, snd_midi_channel_t *chan)
 {
-	struct snd_emux *emu;
-	struct snd_emux_port *port;
+	snd_emux_t *emu;
+	snd_emux_port_t *port;
 
-	port = p;
-	if (snd_BUG_ON(!port || !chan))
-		return;
+	port = snd_magic_cast(snd_emux_port_t, p, return);
+	snd_assert(port != NULL && chan != NULL, return);
 
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.terminate))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.terminate != NULL, return);
 
 	terminate_note1(emu, note, chan, 1);
 }
@@ -418,10 +417,10 @@ snd_emux_terminate_note(void *p, int note, struct snd_midi_channel *chan)
  * Terminate all the notes
  */
 void
-snd_emux_terminate_all(struct snd_emux *emu)
+snd_emux_terminate_all(snd_emux_t *emu)
 {
 	int i;
-	struct snd_emux_voice *vp;
+	snd_emux_voice_t *vp;
 	unsigned long flags;
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
@@ -442,24 +441,22 @@ snd_emux_terminate_all(struct snd_emux *emu)
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }
 
-EXPORT_SYMBOL(snd_emux_terminate_all);
 
 /*
  * Terminate all voices associated with the given port
  */
 void
-snd_emux_sounds_off_all(struct snd_emux_port *port)
+snd_emux_sounds_off_all(snd_emux_port_t *port)
 {
 	int i;
-	struct snd_emux *emu;
-	struct snd_emux_voice *vp;
+	snd_emux_t *emu;
+	snd_emux_voice_t *vp;
 	unsigned long flags;
 
-	if (snd_BUG_ON(!port))
-		return;
+	snd_assert(port != NULL, return);
 	emu = port->emu;
-	if (snd_BUG_ON(!emu || !emu->ops.terminate))
-		return;
+	snd_assert(emu != NULL, return);
+	snd_assert(emu->ops.terminate != NULL, return);
 
 	spin_lock_irqsave(&emu->voice_lock, flags);
 	for (i = 0; i < emu->max_voices; i++) {
@@ -483,9 +480,9 @@ snd_emux_sounds_off_all(struct snd_emux_port *port)
  * is mainly for drums.
  */
 static void
-exclusive_note_off(struct snd_emux *emu, struct snd_emux_port *port, int exclass)
+exclusive_note_off(snd_emux_t *emu, snd_emux_port_t *port, int exclass)
 {
-	struct snd_emux_voice *vp;
+	snd_emux_voice_t *vp;
 	int  i;
 	unsigned long flags;
 
@@ -505,7 +502,7 @@ exclusive_note_off(struct snd_emux *emu, struct snd_emux_port *port, int exclass
  * if free flag is true, call free_voice after termination
  */
 static void
-terminate_voice(struct snd_emux *emu, struct snd_emux_voice *vp, int free)
+terminate_voice(snd_emux_t *emu, snd_emux_voice_t *vp, int free)
 {
 	emu->ops.terminate(vp);
 	vp->time = emu->use_time++;
@@ -523,7 +520,7 @@ terminate_voice(struct snd_emux *emu, struct snd_emux_voice *vp, int free)
  * Modulate the voice
  */
 static void
-update_voice(struct snd_emux *emu, struct snd_emux_voice *vp, int update)
+update_voice(snd_emux_t *emu, snd_emux_voice_t *vp, int update)
 {
 	if (!STATE_IS_PLAYING(vp->state))
 		return;
@@ -558,9 +555,9 @@ static unsigned short voltarget[16] = {
  * will be needed later.
  */
 static void
-setup_voice(struct snd_emux_voice *vp)
+setup_voice(snd_emux_voice_t *vp)
 {
-	struct soundfont_voice_parm *parm;
+	soundfont_voice_parm_t *parm;
 	int pitch;
 
 	/* copy the original register values */
@@ -651,9 +648,9 @@ static unsigned char pan_volumes[256] = {
 };
 
 static int
-calc_pan(struct snd_emux_voice *vp)
+calc_pan(snd_emux_voice_t *vp)
 {
-	struct snd_midi_channel *chan = vp->chan;
+	snd_midi_channel_t *chan = vp->chan;
 	int pan;
 
 	/* pan & loop start (pan 8bit, MSB, 0:right, 0xff:left) */
@@ -752,12 +749,12 @@ static unsigned char expressiontab[128] = {
  * voice and channels parameters.
  */
 static int
-calc_volume(struct snd_emux_voice *vp)
+calc_volume(snd_emux_voice_t *vp)
 {
 	int vol;
 	int main_vol, expression_vol, master_vol;
-	struct snd_midi_channel *chan = vp->chan;
-	struct snd_emux_port *port = vp->port;
+	snd_midi_channel_t *chan = vp->chan;
+	snd_emux_port_t *port = vp->port;
 
 	expression_vol = chan->control[MIDI_CTL_MSB_EXPRESSION];
 	LIMITMAX(vp->velocity, 127);
@@ -790,7 +787,7 @@ calc_volume(struct snd_emux_voice *vp)
 
 #ifdef SNDRV_EMUX_USE_RAW_EFFECT
 	if (chan->private) {
-		struct snd_emux_effect_table *fx = chan->private;
+		snd_emux_effect_table_t *fx = chan->private;
 		vol += fx->val[EMUX_FX_ATTEN];
 	}
 #endif
@@ -823,9 +820,9 @@ calc_volume(struct snd_emux_voice *vp)
  */
 
 static int
-calc_pitch(struct snd_emux_voice *vp)
+calc_pitch(snd_emux_voice_t *vp)
 {
-	struct snd_midi_channel *chan = vp->chan;
+	snd_midi_channel_t *chan = vp->chan;
 	int offset;
 
 	/* calculate offset */
@@ -852,7 +849,7 @@ calc_pitch(struct snd_emux_voice *vp)
 #ifdef SNDRV_EMUX_USE_RAW_EFFECT
 	/* add initial pitch correction */
 	if (chan->private) {
-		struct snd_emux_effect_table *fx = chan->private;
+		snd_emux_effect_table_t *fx = chan->private;
 		if (fx->flag[EMUX_FX_INIT_PITCH])
 			offset += fx->val[EMUX_FX_INIT_PITCH];
 	}
@@ -872,7 +869,7 @@ calc_pitch(struct snd_emux_voice *vp)
  * Get the bank number assigned to the channel
  */
 static int
-get_bank(struct snd_emux_port *port, struct snd_midi_channel *chan)
+get_bank(snd_emux_port_t *port, snd_midi_channel_t *chan)
 {
 	int val;
 
@@ -901,9 +898,8 @@ get_bank(struct snd_emux_port *port, struct snd_midi_channel *chan)
  * The resultant zones are stored on table.
  */
 static int
-get_zone(struct snd_emux *emu, struct snd_emux_port *port,
-	 int *notep, int vel, struct snd_midi_channel *chan,
-	 struct snd_sf_zone **table)
+get_zone(snd_emux_t *emu, snd_emux_port_t *port,
+	 int *notep, int vel, snd_midi_channel_t *chan, snd_sf_zone_t **table)
 {
 	int preset, bank, def_preset, def_bank;
 
@@ -926,9 +922,9 @@ get_zone(struct snd_emux *emu, struct snd_emux_port *port,
 /*
  */
 void
-snd_emux_init_voices(struct snd_emux *emu)
+snd_emux_init_voices(snd_emux_t *emu)
 {
-	struct snd_emux_voice *vp;
+	snd_emux_voice_t *vp;
 	int i;
 	unsigned long flags;
 
@@ -948,7 +944,7 @@ snd_emux_init_voices(struct snd_emux *emu)
 
 /*
  */
-void snd_emux_lock_voice(struct snd_emux *emu, int voice)
+void snd_emux_lock_voice(snd_emux_t *emu, int voice)
 {
 	unsigned long flags;
 
@@ -956,17 +952,14 @@ void snd_emux_lock_voice(struct snd_emux *emu, int voice)
 	if (emu->voices[voice].state == SNDRV_EMUX_ST_OFF)
 		emu->voices[voice].state = SNDRV_EMUX_ST_LOCKED;
 	else
-		snd_printk(KERN_WARNING
-			   "invalid voice for lock %d (state = %x)\n",
+		snd_printk("invalid voice for lock %d (state = %x)\n",
 			   voice, emu->voices[voice].state);
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }
 
-EXPORT_SYMBOL(snd_emux_lock_voice);
-
 /*
  */
-void snd_emux_unlock_voice(struct snd_emux *emu, int voice)
+void snd_emux_unlock_voice(snd_emux_t *emu, int voice)
 {
 	unsigned long flags;
 
@@ -974,10 +967,7 @@ void snd_emux_unlock_voice(struct snd_emux *emu, int voice)
 	if (emu->voices[voice].state == SNDRV_EMUX_ST_LOCKED)
 		emu->voices[voice].state = SNDRV_EMUX_ST_OFF;
 	else
-		snd_printk(KERN_WARNING
-			   "invalid voice for unlock %d (state = %x)\n",
+		snd_printk("invalid voice for unlock %d (state = %x)\n",
 			   voice, emu->voices[voice].state);
 	spin_unlock_irqrestore(&emu->voice_lock, flags);
 }
-
-EXPORT_SYMBOL(snd_emux_unlock_voice);

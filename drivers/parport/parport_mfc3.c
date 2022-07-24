@@ -211,7 +211,7 @@ static void mfc3_change_mode( struct parport *p, int m)
 
 static int use_cnt = 0;
 
-static irqreturn_t mfc3_interrupt(int irq, void *dev_id)
+static irqreturn_t mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int i;
 
@@ -219,7 +219,7 @@ static irqreturn_t mfc3_interrupt(int irq, void *dev_id)
 		if (this_port[i] != NULL)
 			if (pia(this_port[i])->crb & 128) { /* Board caused interrupt */
 				dummy = pia(this_port[i])->pprb; /* clear irq bit */
-				parport_generic_irq(this_port[i]);
+				parport_generic_irq(irq, this_port[i], regs);
 			}
 	return IRQ_HANDLED;
 }
@@ -320,7 +320,7 @@ static struct parport_operations pp_mfc3_ops = {
 
 /* ----------- Initialisation code --------------------------------- */
 
-static int __init parport_mfc3_init(void)
+int __init parport_mfc3_init(void)
 {
 	struct parport *p;
 	int pias = 0;
@@ -353,14 +353,14 @@ static int __init parport_mfc3_init(void)
 
 		if (p->irq != PARPORT_IRQ_NONE) {
 			if (use_cnt++ == 0)
-				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, IRQF_SHARED, p->name, &pp_mfc3_ops))
+				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, SA_SHIRQ, p->name, &pp_mfc3_ops))
 					goto out_irq;
 		}
-		p->dev = &z->dev;
 
 		this_port[pias++] = p;
 		printk(KERN_INFO "%s: Multiface III port using irq\n", p->name);
 		/* XXX: set operating mode */
+		parport_proc_register(p);
 
 		p->private_data = (void *)piabase;
 		parport_announce_port (p);
@@ -370,7 +370,7 @@ static int __init parport_mfc3_init(void)
 		continue;
 
 	out_irq:
-		parport_put_port(p);
+		parport_unregister_port(p);
 	out_port:
 		release_mem_region(piabase, sizeof(struct pia));
 	}
@@ -378,20 +378,20 @@ static int __init parport_mfc3_init(void)
 	return pias ? 0 : -ENODEV;
 }
 
-static void __exit parport_mfc3_exit(void)
+void __exit parport_mfc3_exit(void)
 {
 	int i;
 
 	for (i = 0; i < MAX_MFC; i++) {
 		if (!this_port[i])
 			continue;
-		parport_remove_port(this_port[i]);
-		if (this_port[i]->irq != PARPORT_IRQ_NONE) {
+		if (!this_port[i]->irq != PARPORT_IRQ_NONE) {
 			if (--use_cnt == 0) 
 				free_irq(IRQ_AMIGA_PORTS, &pp_mfc3_ops);
 		}
+		parport_proc_unregister(this_port[i]);
+		parport_unregister_port(this_port[i]);
 		release_mem_region(ZTWO_PADDR(this_port[i]->private_data), sizeof(struct pia));
-		parport_put_port(this_port[i]);
 	}
 }
 
@@ -403,3 +403,4 @@ MODULE_LICENSE("GPL");
 
 module_init(parport_mfc3_init)
 module_exit(parport_mfc3_exit)
+

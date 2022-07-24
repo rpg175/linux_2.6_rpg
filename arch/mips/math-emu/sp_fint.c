@@ -3,7 +3,8 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.
+ * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
+ * http://www.algor.co.uk
  *
  * ########################################################################
  *
@@ -28,9 +29,7 @@
 
 ieee754sp ieee754sp_fint(int x)
 {
-	unsigned xm;
-	int xe;
-	int xs;
+	COMPXSP;
 
 	CLEARCX;
 

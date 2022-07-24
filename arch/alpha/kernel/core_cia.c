@@ -11,18 +11,22 @@
  * Code common to all CIA core logic chips.
  */
 
+#include <linux/kernel.h>
+#include <linux/types.h>
+#include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/init.h>
+
+#include <asm/system.h>
+#include <asm/ptrace.h>
+#include <asm/hwrpb.h>
+
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_cia.h>
 #undef __EXTERN_INLINE
 
-#include <linux/types.h>
-#include <linux/pci.h>
-#include <linux/sched.h>
-#include <linux/init.h>
 #include <linux/bootmem.h>
-
-#include <asm/ptrace.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -282,7 +286,7 @@ void
 cia_pci_tbi_try2(struct pci_controller *hose,
 		 dma_addr_t start, dma_addr_t end)
 {
-	void __iomem *bus_addr;
+	unsigned long bus_addr;
 	int ctrl;
 
 	/* Put the chip into PCI loopback mode.  */
@@ -351,7 +355,7 @@ verify_tb_operation(void)
 	struct pci_iommu_arena *arena = pci_isa_hose->sg_isa;
 	int ctrl, addr0, tag0, pte0, data0;
 	int temp, use_tbia_try2 = 0;
-	void __iomem *bus_addr;
+	unsigned long bus_addr;
 
 	/* pyxis -- tbia is broken */
 	if (pci_isa_hose->dense_io_base)
@@ -762,7 +766,7 @@ do_init_arch(int is_pyxis)
 		*(vip)CIA_IOC_PCI_W3_MASK = 0xfff00000;
 		*(vip)CIA_IOC_PCI_T3_BASE = 0 >> 2;
 
-		alpha_mv.pci_dac_offset = 0x200000000UL;
+		alpha_mv.pci_dac_offset = 0x200000000;
 		*(vip)CIA_IOC_PCI_W_DAC = alpha_mv.pci_dac_offset >> 32;
 	}
 
@@ -1192,7 +1196,8 @@ cia_decode_mchk(unsigned long la_ptr)
 }
 
 void
-cia_machine_check(unsigned long vector, unsigned long la_ptr)
+cia_machine_check(unsigned long vector, unsigned long la_ptr,
+		  struct pt_regs * regs)
 {
 	int expected;
 
@@ -1207,5 +1212,5 @@ cia_machine_check(unsigned long vector, unsigned long la_ptr)
 	expected = mcheck_expected(0);
 	if (!expected && vector == 0x660)
 		expected = cia_decode_mchk(la_ptr);
-	process_mcheck_info(vector, la_ptr, "CIA", expected);
+	process_mcheck_info(vector, la_ptr, regs, "CIA", expected);
 }

@@ -8,7 +8,6 @@
  * for more details.
  */
 
-#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -27,7 +26,7 @@ extern void print_pte_vaddr(unsigned long vaddr);
 
 extern void mmu_emu_map_pmeg (int context, int vaddr);
 
-static inline void do_page_mapin(unsigned long phys, unsigned long virt,
+static inline void do_page_mapin(unsigned long phys, unsigned long virt, 
 				 unsigned long type)
 {
 	unsigned long pte;
@@ -45,11 +44,11 @@ static inline void do_page_mapin(unsigned long phys, unsigned long virt,
 
 }
 
-static inline void do_pmeg_mapin(unsigned long phys, unsigned long virt,
+static inline void do_pmeg_mapin(unsigned long phys, unsigned long virt, 
 				 unsigned long type, int pages)
 {
 
-	if(sun3_get_segmap(virt & ~SUN3_PMEG_MASK) == SUN3_INVALID_PMEG)
+	if(sun3_get_segmap(virt & ~SUN3_PMEG_MASK) == SUN3_INVALID_PMEG) 
 		mmu_emu_map_pmeg(sun3_get_context(), virt);
 
 	while(pages) {
@@ -60,7 +59,7 @@ static inline void do_pmeg_mapin(unsigned long phys, unsigned long virt,
 	}
 }
 
-void __iomem *sun3_ioremap(unsigned long phys, unsigned long size,
+void *sun3_ioremap(unsigned long phys, unsigned long size, 
 		   unsigned long type)
 {
 	struct vm_struct *area;
@@ -80,7 +79,7 @@ void __iomem *sun3_ioremap(unsigned long phys, unsigned long size,
 		return NULL;
 
 #ifdef SUN3_KMAP_DEBUG
-	printk("ioremap: got virt %p size %lx(%lx)\n",
+	printk("ioremap: got virt %p size %lx(%lx)\n", 
 	       area->addr, size, area->size);
 #endif
 
@@ -94,42 +93,39 @@ void __iomem *sun3_ioremap(unsigned long phys, unsigned long size,
 		seg_pages = (SUN3_PMEG_SIZE - (virt & SUN3_PMEG_MASK)) / PAGE_SIZE;
 		if(seg_pages > pages)
 			seg_pages = pages;
-
+		
 		do_pmeg_mapin(phys, virt, type, seg_pages);
 
 		pages -= seg_pages;
 		phys += seg_pages * PAGE_SIZE;
 		virt += seg_pages * PAGE_SIZE;
 	}
-
-	return (void __iomem *)ret;
+		
+	return (void *)ret;
 
 }
-EXPORT_SYMBOL(sun3_ioremap);
-
-
-void __iomem *__ioremap(unsigned long phys, unsigned long size, int cache)
+ 
+ 
+void *__ioremap(unsigned long phys, unsigned long size, int cache)
 {
-
+	
 	return sun3_ioremap(phys, size, SUN3_PAGE_TYPE_IO);
-
+	
 }
-EXPORT_SYMBOL(__ioremap);
 
-void iounmap(void __iomem *addr)
+void iounmap(void *addr)
 {
-	vfree((void *)(PAGE_MASK & (unsigned long)addr));
+	vfree((void *)(PAGE_MASK & (unsigned long)addr));	
 }
-EXPORT_SYMBOL(iounmap);
 
 /* sun3_map_test(addr, val) -- Reads a byte from addr, storing to val,
  * trapping the potential read fault.  Returns 0 if the access faulted,
  * 1 on success.
- *
+ *  
  * This function is primarily used to check addresses on the VME bus.
  *
  * Mucking with the page fault handler seems a little hackish to me, but
- * SunOS, NetBSD, and Mach all implemented this check in such a manner,
+ * SunOS, NetBSD, and Mach all implemented this check in such a manner, 
  * so I figure we're allowed.
  */
 int sun3_map_test(unsigned long addr, char *val)
@@ -155,7 +151,6 @@ int sun3_map_test(unsigned long addr, char *val)
 		 "_sun3_map_test_end:\n"
 		 : "=a"(val), "=r"(ret)
 		 : "a"(addr));
-
+	
 	return ret;
 }
-EXPORT_SYMBOL(sun3_map_test);

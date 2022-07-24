@@ -10,8 +10,6 @@
 #define LKC_DIRECT_LINK
 #include "lkc.h"
 
-#define DEBUG_EXPR	0
-
 struct expr *expr_alloc_symbol(struct symbol *sym)
 {
 	struct expr *e = malloc(sizeof(*e));
@@ -64,7 +62,7 @@ struct expr *expr_alloc_or(struct expr *e1, struct expr *e2)
 	return e2 ? expr_alloc_two(E_OR, e1, e2) : e1;
 }
 
-struct expr *expr_copy(const struct expr *org)
+struct expr *expr_copy(struct expr *org)
 {
 	struct expr *e;
 
@@ -87,7 +85,7 @@ struct expr *expr_copy(const struct expr *org)
 		break;
 	case E_AND:
 	case E_OR:
-	case E_LIST:
+	case E_CHOICE:
 		e->left.expr = expr_copy(org->left.expr);
 		e->right.expr = expr_copy(org->right.expr);
 		break;
@@ -145,8 +143,7 @@ static void __expr_eliminate_eq(enum expr_type type, struct expr **ep1, struct e
 		return;
 	}
 	if (e1->type == E_SYMBOL && e2->type == E_SYMBOL &&
-	    e1->left.sym == e2->left.sym &&
-	    (e1->left.sym == &symbol_yes || e1->left.sym == &symbol_no))
+	    e1->left.sym == e2->left.sym && (e1->left.sym->flags & (SYMBOL_YES|SYMBOL_NO)))
 		return;
 	if (!expr_eq(e1, e2))
 		return;
@@ -217,18 +214,16 @@ int expr_eq(struct expr *e1, struct expr *e2)
 		expr_free(e2);
 		trans_count = old_count;
 		return res;
-	case E_LIST:
+	case E_CHOICE:
 	case E_RANGE:
 	case E_NONE:
 		/* panic */;
 	}
 
-	if (DEBUG_EXPR) {
-		expr_fprint(e1, stdout);
-		printf(" = ");
-		expr_fprint(e2, stdout);
-		printf(" ?\n");
-	}
+	print_expr(0, e1, 0);
+	printf(" = ");
+	print_expr(0, e2, 0);
+	printf(" ?\n");
 
 	return 0;
 }
@@ -348,7 +343,7 @@ struct expr *expr_trans_bool(struct expr *e)
 /*
  * e1 || e2 -> ?
  */
-static struct expr *expr_join_or(struct expr *e1, struct expr *e2)
+struct expr *expr_join_or(struct expr *e1, struct expr *e2)
 {
 	struct expr *tmp;
 	struct symbol *sym1, *sym2;
@@ -402,17 +397,15 @@ static struct expr *expr_join_or(struct expr *e1, struct expr *e2)
 			return expr_alloc_symbol(&symbol_yes);
 	}
 
-	if (DEBUG_EXPR) {
-		printf("optimize (");
-		expr_fprint(e1, stdout);
-		printf(") || (");
-		expr_fprint(e2, stdout);
-		printf(")?\n");
-	}
+	printf("optimize ");
+	print_expr(0, e1, 0);
+	printf(" || ");
+	print_expr(0, e2, 0);
+	printf(" ?\n");
 	return NULL;
 }
 
-static struct expr *expr_join_and(struct expr *e1, struct expr *e2)
+struct expr *expr_join_and(struct expr *e1, struct expr *e2)
 {
 	struct expr *tmp;
 	struct symbol *sym1, *sym2;
@@ -450,11 +443,6 @@ static struct expr *expr_join_and(struct expr *e1, struct expr *e2)
 	    (e2->type == E_SYMBOL && e1->type == E_UNEQUAL && e1->right.sym == &symbol_no))
 		// (a) && (a!='n') -> (a)
 		return expr_alloc_symbol(sym1);
-
-	if ((e1->type == E_SYMBOL && e2->type == E_UNEQUAL && e2->right.sym == &symbol_mod) ||
-	    (e2->type == E_SYMBOL && e1->type == E_UNEQUAL && e1->right.sym == &symbol_mod))
-		// (a) && (a!='m') -> (a='y')
-		return expr_alloc_comp(E_EQUAL, sym1, &symbol_yes);
 
 	if (sym1->type == S_TRISTATE) {
 		if (e1->type == E_EQUAL && e2->type == E_UNEQUAL) {
@@ -495,14 +483,11 @@ static struct expr *expr_join_and(struct expr *e1, struct expr *e2)
 		    (e2->type == E_SYMBOL && e1->type == E_UNEQUAL && e1->right.sym == &symbol_yes))
 			return NULL;
 	}
-
-	if (DEBUG_EXPR) {
-		printf("optimize (");
-		expr_fprint(e1, stdout);
-		printf(") && (");
-		expr_fprint(e2, stdout);
-		printf(")?\n");
-	}
+	printf("optimize ");
+	print_expr(0, e1, 0);
+	printf(" && ");
+	print_expr(0, e2, 0);
+	printf(" ?\n");
 	return NULL;
 }
 
@@ -648,7 +633,7 @@ struct expr *expr_transform(struct expr *e)
 	case E_EQUAL:
 	case E_UNEQUAL:
 	case E_SYMBOL:
-	case E_LIST:
+	case E_CHOICE:
 		break;
 	default:
 		e->left.expr = expr_transform(e->left.expr);
@@ -932,7 +917,7 @@ struct expr *expr_trans_compare(struct expr *e, enum expr_type type, struct symb
 		break;
 	case E_SYMBOL:
 		return expr_alloc_comp(type, e->left.sym, sym);
-	case E_LIST:
+	case E_CHOICE:
 	case E_RANGE:
 	case E_NONE:
 		/* panic */;
@@ -955,14 +940,14 @@ tristate expr_calc_value(struct expr *e)
 	case E_AND:
 		val1 = expr_calc_value(e->left.expr);
 		val2 = expr_calc_value(e->right.expr);
-		return EXPR_AND(val1, val2);
+		return E_AND(val1, val2);
 	case E_OR:
 		val1 = expr_calc_value(e->left.expr);
 		val2 = expr_calc_value(e->right.expr);
-		return EXPR_OR(val1, val2);
+		return E_OR(val1, val2);
 	case E_NOT:
 		val1 = expr_calc_value(e->left.expr);
-		return EXPR_NOT(val1);
+		return E_NOT(val1);
 	case E_EQUAL:
 		sym_calc_value(e->left.sym);
 		sym_calc_value(e->right.sym);
@@ -1000,9 +985,9 @@ int expr_compare_type(enum expr_type t1, enum expr_type t2)
 		if (t2 == E_OR)
 			return 1;
 	case E_OR:
-		if (t2 == E_LIST)
+		if (t2 == E_CHOICE)
 			return 1;
-	case E_LIST:
+	case E_CHOICE:
 		if (t2 == 0)
 			return 1;
 	default:
@@ -1013,123 +998,75 @@ int expr_compare_type(enum expr_type t1, enum expr_type t2)
 #endif
 }
 
-static inline struct expr *
-expr_get_leftmost_symbol(const struct expr *e)
-{
-
-	if (e == NULL)
-		return NULL;
-
-	while (e->type != E_SYMBOL)
-		e = e->left.expr;
-
-	return expr_copy(e);
-}
-
-/*
- * Given expression `e1' and `e2', returns the leaf of the longest
- * sub-expression of `e1' not containing 'e2.
- */
-struct expr *expr_simplify_unmet_dep(struct expr *e1, struct expr *e2)
-{
-	struct expr *ret;
-
-	switch (e1->type) {
-	case E_OR:
-		return expr_alloc_and(
-		    expr_simplify_unmet_dep(e1->left.expr, e2),
-		    expr_simplify_unmet_dep(e1->right.expr, e2));
-	case E_AND: {
-		struct expr *e;
-		e = expr_alloc_and(expr_copy(e1), expr_copy(e2));
-		e = expr_eliminate_dups(e);
-		ret = (!expr_eq(e, e1)) ? e1 : NULL;
-		expr_free(e);
-		break;
-		}
-	default:
-		ret = e1;
-		break;
-	}
-
-	return expr_get_leftmost_symbol(ret);
-}
-
-void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *), void *data, int prevtoken)
+void expr_print(struct expr *e, void (*fn)(void *, const char *), void *data, int prevtoken)
 {
 	if (!e) {
-		fn(data, NULL, "y");
+		fn(data, "y");
 		return;
 	}
 
 	if (expr_compare_type(prevtoken, e->type) > 0)
-		fn(data, NULL, "(");
+		fn(data, "(");
 	switch (e->type) {
 	case E_SYMBOL:
 		if (e->left.sym->name)
-			fn(data, e->left.sym, e->left.sym->name);
+			fn(data, e->left.sym->name);
 		else
-			fn(data, NULL, "<choice>");
+			fn(data, "<choice>");
 		break;
 	case E_NOT:
-		fn(data, NULL, "!");
+		fn(data, "!");
 		expr_print(e->left.expr, fn, data, E_NOT);
 		break;
 	case E_EQUAL:
-		if (e->left.sym->name)
-			fn(data, e->left.sym, e->left.sym->name);
-		else
-			fn(data, NULL, "<choice>");
-		fn(data, NULL, "=");
-		fn(data, e->right.sym, e->right.sym->name);
+		fn(data, e->left.sym->name);
+		fn(data, "=");
+		fn(data, e->right.sym->name);
 		break;
 	case E_UNEQUAL:
-		if (e->left.sym->name)
-			fn(data, e->left.sym, e->left.sym->name);
-		else
-			fn(data, NULL, "<choice>");
-		fn(data, NULL, "!=");
-		fn(data, e->right.sym, e->right.sym->name);
+		fn(data, e->left.sym->name);
+		fn(data, "!=");
+		fn(data, e->right.sym->name);
 		break;
 	case E_OR:
 		expr_print(e->left.expr, fn, data, E_OR);
-		fn(data, NULL, " || ");
+		fn(data, " || ");
 		expr_print(e->right.expr, fn, data, E_OR);
 		break;
 	case E_AND:
 		expr_print(e->left.expr, fn, data, E_AND);
-		fn(data, NULL, " && ");
+		fn(data, " && ");
 		expr_print(e->right.expr, fn, data, E_AND);
 		break;
-	case E_LIST:
-		fn(data, e->right.sym, e->right.sym->name);
+	case E_CHOICE:
+		fn(data, e->right.sym->name);
 		if (e->left.expr) {
-			fn(data, NULL, " ^ ");
-			expr_print(e->left.expr, fn, data, E_LIST);
+			fn(data, " ^ ");
+			expr_print(e->left.expr, fn, data, E_CHOICE);
 		}
 		break;
 	case E_RANGE:
-		fn(data, NULL, "[");
-		fn(data, e->left.sym, e->left.sym->name);
-		fn(data, NULL, " ");
-		fn(data, e->right.sym, e->right.sym->name);
-		fn(data, NULL, "]");
+		fn(data, "[");
+		fn(data, e->left.sym->name);
+		fn(data, " ");
+		fn(data, e->right.sym->name);
+		fn(data, "]");
 		break;
 	default:
 	  {
 		char buf[32];
 		sprintf(buf, "<unknown type %d>", e->type);
-		fn(data, NULL, buf);
+		fn(data, buf);
 		break;
 	  }
 	}
 	if (expr_compare_type(prevtoken, e->type) > 0)
-		fn(data, NULL, ")");
+		fn(data, ")");
 }
 
-static void expr_print_file_helper(void *data, struct symbol *sym, const char *str)
+static void expr_print_file_helper(void *data, const char *str)
 {
-	xfwrite(str, strlen(str), 1, data);
+	fwrite(str, strlen(str), 1, data);
 }
 
 void expr_fprint(struct expr *e, FILE *out)
@@ -1137,37 +1074,10 @@ void expr_fprint(struct expr *e, FILE *out)
 	expr_print(e, expr_print_file_helper, out, E_NONE);
 }
 
-static void expr_print_gstr_helper(void *data, struct symbol *sym, const char *str)
+void print_expr(int mask, struct expr *e, int prevtoken)
 {
-	struct gstr *gs = (struct gstr*)data;
-	const char *sym_str = NULL;
-
-	if (sym)
-		sym_str = sym_get_string_value(sym);
-
-	if (gs->max_width) {
-		unsigned extra_length = strlen(str);
-		const char *last_cr = strrchr(gs->s, '\n');
-		unsigned last_line_length;
-
-		if (sym_str)
-			extra_length += 4 + strlen(sym_str);
-
-		if (!last_cr)
-			last_cr = gs->s;
-
-		last_line_length = strlen(gs->s) - (last_cr - gs->s);
-
-		if ((last_line_length + extra_length) > gs->max_width)
-			str_append(gs, "\\\n");
-	}
-
-	str_append(gs, str);
-	if (sym && sym->type != S_UNKNOWN)
-		str_printf(gs, " [=%s]", sym_str);
+	if (!(cdebug & mask))
+		return;
+	expr_fprint(e, stdout);
 }
 
-void expr_gstr_print(struct expr *e, struct gstr *gs)
-{
-	expr_print(e, expr_print_gstr_helper, gs, E_NONE);
-}

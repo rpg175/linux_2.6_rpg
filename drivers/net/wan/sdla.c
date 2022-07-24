@@ -32,6 +32,7 @@
  *		2 of the License, or (at your option) any later version.
  */
 
+#include <linux/config.h> /* for CONFIG_DLCI_MAX */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -50,25 +51,25 @@
 #include <linux/if_arp.h>
 #include <linux/if_frad.h>
 #include <linux/sdla.h>
-#include <linux/bitops.h>
 
 #include <asm/system.h>
+#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/uaccess.h>
 
 static const char* version = "SDLA driver v0.30, 12 Sep 1996, mike.mclagan@linux.org";
 
-static unsigned int valid_port[] = { 0x250, 0x270, 0x280, 0x300, 0x350, 0x360, 0x380, 0x390};
+static unsigned int valid_port[] __initdata = { 0x250, 0x270, 0x280, 0x300, 0x350, 0x360, 0x380, 0x390};
 
-static unsigned int valid_mem[] = {
+static unsigned int valid_mem[]  __initdata = {
 				    0xA0000, 0xA2000, 0xA4000, 0xA6000, 0xA8000, 0xAA000, 0xAC000, 0xAE000, 
                                     0xB0000, 0xB2000, 0xB4000, 0xB6000, 0xB8000, 0xBA000, 0xBC000, 0xBE000,
                                     0xC0000, 0xC2000, 0xC4000, 0xC6000, 0xC8000, 0xCA000, 0xCC000, 0xCE000,
                                     0xD0000, 0xD2000, 0xD4000, 0xD6000, 0xD8000, 0xDA000, 0xDC000, 0xDE000,
                                     0xE0000, 0xE2000, 0xE4000, 0xE6000, 0xE8000, 0xEA000, 0xEC000, 0xEE000}; 
 
-static DEFINE_SPINLOCK(sdla_lock);
+static spinlock_t sdla_lock = SPIN_LOCK_UNLOCKED;
 
 /*********************************************************
  *
@@ -178,14 +179,14 @@ static char sdla_byte(struct net_device *dev, int addr)
 	byte = *temp;
 	spin_unlock_irqrestore(&sdla_lock, flags);
 
-	return byte;
+	return(byte);
 }
 
-static void sdla_stop(struct net_device *dev)
+void sdla_stop(struct net_device *dev)
 {
 	struct frad_local *flp;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 	switch(flp->type)
 	{
 		case SDLA_S502A:
@@ -208,11 +209,11 @@ static void sdla_stop(struct net_device *dev)
 	}
 }
 
-static void sdla_start(struct net_device *dev)
+void sdla_start(struct net_device *dev)
 {
 	struct frad_local *flp;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 	switch(flp->type)
 	{
 		case SDLA_S502A:
@@ -246,7 +247,7 @@ static void sdla_start(struct net_device *dev)
  *
  ***************************************************/
 
-static int sdla_z80_poll(struct net_device *dev, int z80_addr, int jiffs, char resp1, char resp2)
+int sdla_z80_poll(struct net_device *dev, int z80_addr, int jiffs, char resp1, char resp2)
 {
 	unsigned long start, done, now;
 	char          resp, *temp;
@@ -267,7 +268,7 @@ static int sdla_z80_poll(struct net_device *dev, int z80_addr, int jiffs, char r
 			resp = *temp;
 		}
 	}
-	return time_before(jiffies, done) ? jiffies - start : -1;
+	return(time_before(jiffies, done) ? jiffies - start : -1);
 }
 
 /* constants for Z80 CPU speed */
@@ -283,13 +284,13 @@ static int sdla_cpuspeed(struct net_device *dev, struct ifreq *ifr)
 
 	sdla_start(dev);
 	if (sdla_z80_poll(dev, 0, 3*HZ, Z80_READY, 0) < 0)
-		return -EIO;
+		return(-EIO);
 
 	data = LOADER_READY;
 	sdla_write(dev, 0, &data, 1);
 
 	if ((jiffs = sdla_z80_poll(dev, 0, 8*HZ, Z80_SCC_OK, Z80_SCC_BAD)) < 0)
-		return -EIO;
+		return(-EIO);
 
 	sdla_stop(dev);
 	sdla_read(dev, 0, &data, 1);
@@ -297,11 +298,11 @@ static int sdla_cpuspeed(struct net_device *dev, struct ifreq *ifr)
 	if (data == Z80_SCC_BAD)
 	{
 		printk("%s: SCC bad\n", dev->name);
-		return -EIO;
+		return(-EIO);
 	}
 
 	if (data != Z80_SCC_OK)
-		return -EINVAL;
+		return(-EINVAL);
 
 	if (jiffs < 165)
 		ifr->ifr_mtu = SDLA_CPU_16M;
@@ -316,7 +317,7 @@ static int sdla_cpuspeed(struct net_device *dev, struct ifreq *ifr)
 	else
 		ifr->ifr_mtu = SDLA_CPU_3M;
  
-	return 0;
+	return(0);
 }
 
 /************************************************
@@ -328,9 +329,9 @@ static int sdla_cpuspeed(struct net_device *dev, struct ifreq *ifr)
 
 struct _dlci_stat 
 {
-	short dlci;
-	char  flags;
-} __packed;
+	short dlci		__attribute__((packed));
+	char  flags		__attribute__((packed));
+};
 
 struct _frad_stat 
 {
@@ -432,7 +433,7 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 	int                      ret, waiting, len;
 	long                     window;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 	window = flp->type == SDLA_S508 ? SDLA_508_CMD_BUF : SDLA_502_CMD_BUF;
 	cmd_buf = (struct sdla_cmd *)(dev->mem_start + (window & SDLA_ADDR_MASK));
 	ret = 0;
@@ -493,7 +494,7 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 	if (ret != SDLA_RET_OK)
 	   	sdla_errors(dev, cmd, dlci, ret, len, &status);
 
-	return ret;
+	return(ret);
 }
 
 /***********************************************
@@ -504,70 +505,70 @@ static int sdla_cmd(struct net_device *dev, int cmd, short dlci, short flags,
 
 static int sdla_reconfig(struct net_device *dev);
 
-static int sdla_activate(struct net_device *slave, struct net_device *master)
+int sdla_activate(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int i;
 
-	flp = netdev_priv(slave);
+	flp = slave->priv;
 
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
 		if (flp->master[i] == master)
 			break;
 
 	if (i == CONFIG_DLCI_MAX)
-		return -ENODEV;
+		return(-ENODEV);
 
 	flp->dlci[i] = abs(flp->dlci[i]);
 
 	if (netif_running(slave) && (flp->config.station == FRAD_STATION_NODE))
 		sdla_cmd(slave, SDLA_ACTIVATE_DLCI, 0, 0, &flp->dlci[i], sizeof(short), NULL, NULL);
 
-	return 0;
+	return(0);
 }
 
-static int sdla_deactivate(struct net_device *slave, struct net_device *master)
+int sdla_deactivate(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int               i;
 
-	flp = netdev_priv(slave);
+	flp = slave->priv;
 
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
 		if (flp->master[i] == master)
 			break;
 
 	if (i == CONFIG_DLCI_MAX)
-		return -ENODEV;
+		return(-ENODEV);
 
 	flp->dlci[i] = -abs(flp->dlci[i]);
 
 	if (netif_running(slave) && (flp->config.station == FRAD_STATION_NODE))
 		sdla_cmd(slave, SDLA_DEACTIVATE_DLCI, 0, 0, &flp->dlci[i], sizeof(short), NULL, NULL);
 
-	return 0;
+	return(0);
 }
 
-static int sdla_assoc(struct net_device *slave, struct net_device *master)
+int sdla_assoc(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int               i;
 
 	if (master->type != ARPHRD_DLCI)
-		return -EINVAL;
+		return(-EINVAL);
 
-	flp = netdev_priv(slave);
+	flp = slave->priv;
 
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
 	{
 		if (!flp->master[i])
 			break;
 		if (abs(flp->dlci[i]) == *(short *)(master->dev_addr))
-			return -EADDRINUSE;
+			return(-EADDRINUSE);
 	} 
 
 	if (i == CONFIG_DLCI_MAX)
-		return -EMLINK;  /* #### Alan: Comments on this ?? */
+		return(-EMLINK);  /* #### Alan: Comments on this ?? */
 
 
 	flp->master[i] = master;
@@ -581,22 +582,22 @@ static int sdla_assoc(struct net_device *slave, struct net_device *master)
 			sdla_cmd(slave, SDLA_ADD_DLCI, 0, 0, master->dev_addr, sizeof(short), NULL, NULL);
 	}
 
-	return 0;
+	return(0);
 }
 
-static int sdla_deassoc(struct net_device *slave, struct net_device *master)
+int sdla_deassoc(struct net_device *slave, struct net_device *master)
 {
 	struct frad_local *flp;
 	int               i;
 
-	flp = netdev_priv(slave);
+	flp = slave->priv;
 
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
 		if (flp->master[i] == master)
 			break;
 
 	if (i == CONFIG_DLCI_MAX)
-		return -ENODEV;
+		return(-ENODEV);
 
 	flp->master[i] = NULL;
 	flp->dlci[i] = 0;
@@ -609,26 +610,26 @@ static int sdla_deassoc(struct net_device *slave, struct net_device *master)
 			sdla_cmd(slave, SDLA_DELETE_DLCI, 0, 0, master->dev_addr, sizeof(short), NULL, NULL);
 	}
 
-	return 0;
+	return(0);
 }
 
-static int sdla_dlci_conf(struct net_device *slave, struct net_device *master, int get)
+int sdla_dlci_conf(struct net_device *slave, struct net_device *master, int get)
 {
 	struct frad_local *flp;
 	struct dlci_local *dlp;
 	int               i;
 	short             len, ret;
 
-	flp = netdev_priv(slave);
+	flp = slave->priv;
 
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
 		if (flp->master[i] == master)
 			break;
 
 	if (i == CONFIG_DLCI_MAX)
-		return -ENODEV;
+		return(-ENODEV);
 
-	dlp = netdev_priv(master);
+	dlp = master->priv;
 
 	ret = SDLA_RET_OK;
 	len = sizeof(struct dlci_conf);
@@ -641,7 +642,7 @@ static int sdla_dlci_conf(struct net_device *slave, struct net_device *master, i
 			            &dlp->config, sizeof(struct dlci_conf) - 4 * sizeof(short), NULL, NULL);
 	}
 
-	return ret == SDLA_RET_OK ? 0 : -EIO;
+	return(ret == SDLA_RET_OK ? 0 : -EIO);
 }
 
 /**************************
@@ -651,8 +652,7 @@ static int sdla_dlci_conf(struct net_device *slave, struct net_device *master, i
  **************************/
 
 /* NOTE: the DLCI driver deals with freeing the SKB!! */
-static netdev_tx_t sdla_transmit(struct sk_buff *skb,
-				 struct net_device *dev)
+static int sdla_transmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct frad_local *flp;
 	int               ret, addr, accept, i;
@@ -660,7 +660,7 @@ static netdev_tx_t sdla_transmit(struct sk_buff *skb,
 	unsigned long     flags;
 	struct buf_entry  *pbuf;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 	ret = 0;
 	accept = 1;
 
@@ -712,21 +712,23 @@ static netdev_tx_t sdla_transmit(struct sk_buff *skb,
 				}
 				break;
 		}
-
 		switch (ret)
 		{
 			case SDLA_RET_OK:
-				dev->stats.tx_packets++;
+				flp->stats.tx_packets++;
+				ret = DLCI_RET_OK;
 				break;
 
 			case SDLA_RET_CIR_OVERFLOW:
 			case SDLA_RET_BUF_OVERSIZE:
 			case SDLA_RET_NO_BUFS:
-				dev->stats.tx_dropped++;
+				flp->stats.tx_dropped++;
+				ret = DLCI_RET_DROP;
 				break;
 
 			default:
-				dev->stats.tx_errors++;
+				flp->stats.tx_errors++;
+				ret = DLCI_RET_ERR;
 				break;
 		}
 	}
@@ -736,9 +738,7 @@ static netdev_tx_t sdla_transmit(struct sk_buff *skb,
 		if(flp->master[i]!=NULL)
 			netif_wake_queue(flp->master[i]);
 	}		
-
-	dev_kfree_skb(skb);
-	return NETDEV_TX_OK;
+	return(ret);
 }
 
 static void sdla_receive(struct net_device *dev)
@@ -756,7 +756,7 @@ static void sdla_receive(struct net_device *dev)
 	int               i=0, received, success, addr, buf_base, buf_top;
 	short             dlci, len, len2, split;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 	success = 1;
 	received = addr = buf_top = buf_base = 0;
 	len = dlci = 0;
@@ -808,7 +808,7 @@ static void sdla_receive(struct net_device *dev)
 		if (i == CONFIG_DLCI_MAX)
 		{
 			printk(KERN_NOTICE "%s: Received packet from invalid DLCI %i, ignoring.", dev->name, dlci);
-			dev->stats.rx_errors++;
+			flp->stats.rx_errors++;
 			success = 0;
 		}
 	}
@@ -820,7 +820,7 @@ static void sdla_receive(struct net_device *dev)
 		if (skb == NULL) 
 		{
 			printk(KERN_NOTICE "%s: Memory squeeze, dropping packet.\n", dev->name);
-			dev->stats.rx_dropped++;
+			flp->stats.rx_dropped++; 
 			success = 0;
 		}
 		else
@@ -860,15 +860,15 @@ static void sdla_receive(struct net_device *dev)
 
 	if (success)
 	{
-		dev->stats.rx_packets++;
-		dlp = netdev_priv(master);
+		flp->stats.rx_packets++;
+		dlp = master->priv;
 		(*dlp->receive)(skb, master);
 	}
 
 	spin_unlock_irqrestore(&sdla_lock, flags);
 }
 
-static irqreturn_t sdla_isr(int dummy, void *dev_id)
+static irqreturn_t sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device     *dev;
 	struct frad_local *flp;
@@ -876,12 +876,17 @@ static irqreturn_t sdla_isr(int dummy, void *dev_id)
 
 	dev = dev_id;
 
-	flp = netdev_priv(dev);
+	if (dev == NULL)
+	{
+		printk(KERN_WARNING "sdla_isr(): irq %d for unknown device.\n", irq);
+		return IRQ_NONE;
+	}
+
+	flp = dev->priv;
 
 	if (!flp->initialized)
 	{
-		printk(KERN_WARNING "%s: irq %d for uninitialized device.\n",
-		       dev->name, dev->irq);
+		printk(KERN_WARNING "%s: irq %d for uninitialized device.\n", dev->name, irq);
 		return IRQ_NONE;
 	}
 
@@ -926,7 +931,7 @@ static void sdla_poll(unsigned long device)
 	struct frad_local *flp;
 
 	dev = (struct net_device *) device;
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	if (sdla_byte(dev, SDLA_502_RCV_BUF))
 		sdla_receive(dev);
@@ -942,7 +947,7 @@ static int sdla_close(struct net_device *dev)
 	int               len, i;
 	short             dlcis[CONFIG_DLCI_MAX];
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	len = 0;
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
@@ -986,7 +991,7 @@ static int sdla_close(struct net_device *dev)
 
 	netif_stop_queue(dev);
 	
-	return 0;
+	return(0);
 }
 
 struct conf_data {
@@ -1003,13 +1008,13 @@ static int sdla_open(struct net_device *dev)
 	int               len, i;
 	char              byte;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	if (!flp->initialized)
-		return -EPERM;
+		return(-EPERM);
 
 	if (!flp->configured)
-		return -EPERM;
+		return(-EPERM);
 
 	/* time to send in the configuration */
 	len = 0;
@@ -1080,17 +1085,17 @@ static int sdla_open(struct net_device *dev)
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
 		if (flp->dlci[i])
 		{
-			dlp = netdev_priv(flp->master[i]);
+			dlp = flp->master[i]->priv;
 			if (dlp->configured)
 				sdla_cmd(dev, SDLA_SET_DLCI_CONFIGURATION, abs(flp->dlci[i]), 0, &dlp->config, sizeof(struct dlci_conf), NULL, NULL);
 		}
 
 	netif_start_queue(dev);
 	
-	return 0;
+	return(0);
 }
 
-static int sdla_config(struct net_device *dev, struct frad_conf __user *conf, int get)
+static int sdla_config(struct net_device *dev, struct frad_conf *conf, int get)
 {
 	struct frad_local *flp;
 	struct conf_data  data;
@@ -1098,48 +1103,48 @@ static int sdla_config(struct net_device *dev, struct frad_conf __user *conf, in
 	short             size;
 
 	if (dev->type == 0xFFFF)
-		return -EUNATCH;
+		return(-EUNATCH);
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	if (!get)
 	{
 		if (netif_running(dev))
-			return -EBUSY;
+			return(-EBUSY);
 
 		if(copy_from_user(&data.config, conf, sizeof(struct frad_conf)))
 			return -EFAULT;
 
 		if (data.config.station & ~FRAD_STATION_NODE)
-			return -EINVAL;
+			return(-EINVAL);
 
 		if (data.config.flags & ~FRAD_VALID_FLAGS)
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.kbaud < 0) || 
 			 ((data.config.kbaud > 128) && (flp->type != SDLA_S508)))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if (data.config.clocking & ~(FRAD_CLOCK_INT | SDLA_S508_PORT_RS232))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.mtu < 0) || (data.config.mtu > SDLA_MAX_MTU))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.T391 < 5) || (data.config.T391 > 30))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.T392 < 5) || (data.config.T392 > 30))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.N391 < 1) || (data.config.N391 > 255))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.N392 < 1) || (data.config.N392 > 10))
-			return -EINVAL;
+			return(-EINVAL);
 
 		if ((data.config.N393 < 1) || (data.config.N393 > 10))
-			return -EINVAL;
+			return(-EINVAL);
 
 		memcpy(&flp->config, &data.config, sizeof(struct frad_conf));
 		flp->config.flags |= SDLA_DIRECT_RECV;
@@ -1171,7 +1176,7 @@ static int sdla_config(struct net_device *dev, struct frad_conf __user *conf, in
 		{
 			size = sizeof(data);
 			if (sdla_cmd(dev, SDLA_READ_DLCI_CONFIGURATION, 0, 0, NULL, 0, &data, &size) != SDLA_RET_OK)
-				return -EIO;
+				return(-EIO);
 		}
 		else
 			if (flp->configured)
@@ -1185,10 +1190,10 @@ static int sdla_config(struct net_device *dev, struct frad_conf __user *conf, in
 		return copy_to_user(conf, &data.config, sizeof(struct frad_conf))?-EFAULT:0;
 	}
 
-	return 0;
+	return(0);
 }
 
-static int sdla_xfer(struct net_device *dev, struct sdla_mem __user *info, int read)
+static int sdla_xfer(struct net_device *dev, struct sdla_mem *info, int read)
 {
 	struct sdla_mem mem;
 	char	*temp;
@@ -1198,9 +1203,9 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem __user *info, int r
 		
 	if (read)
 	{	
-		temp = kzalloc(mem.len, GFP_KERNEL);
+		temp = kmalloc(mem.len, GFP_KERNEL);
 		if (!temp)
-			return -ENOMEM;
+			return(-ENOMEM);
 		sdla_read(dev, mem.addr, temp, mem.len);
 		if(copy_to_user(mem.data, temp, mem.len))
 		{
@@ -1211,13 +1216,18 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem __user *info, int r
 	}
 	else
 	{
-		temp = memdup_user(mem.data, mem.len);
-		if (IS_ERR(temp))
-			return PTR_ERR(temp);
+		temp = kmalloc(mem.len, GFP_KERNEL);
+		if (!temp)
+			return(-ENOMEM);
+		if(copy_from_user(temp, mem.data, mem.len))
+		{
+			kfree(temp);
+			return -EFAULT;
+		}
 		sdla_write(dev, mem.addr, temp, mem.len);
 		kfree(temp);
 	}
-	return 0;
+	return(0);
 }
 
 static int sdla_reconfig(struct net_device *dev)
@@ -1226,7 +1236,7 @@ static int sdla_reconfig(struct net_device *dev)
 	struct conf_data  data;
 	int               i, len;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	len = 0;
 	for(i=0;i<CONFIG_DLCI_MAX;i++)
@@ -1241,7 +1251,7 @@ static int sdla_reconfig(struct net_device *dev)
 	sdla_cmd(dev, SDLA_SET_DLCI_CONFIGURATION, 0, 0, &data, len, NULL, NULL);
 	sdla_cmd(dev, SDLA_ENABLE_COMMUNICATIONS, 0, 0, NULL, 0, NULL, NULL);
 
-	return 0;
+	return(0);
 }
 
 static int sdla_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
@@ -1251,23 +1261,23 @@ static int sdla_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	if(!capable(CAP_NET_ADMIN))
 		return -EPERM;
 		
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	if (!flp->initialized)
-		return -EINVAL;
+		return(-EINVAL);
 
 	switch (cmd)
 	{
 		case FRAD_GET_CONF:
 		case FRAD_SET_CONF:
-			return sdla_config(dev, ifr->ifr_data, cmd == FRAD_GET_CONF);
+			return(sdla_config(dev, (struct frad_conf *)ifr->ifr_data, cmd == FRAD_GET_CONF));
 
 		case SDLA_IDENTIFY:
 			ifr->ifr_flags = flp->type;
 			break;
 
 		case SDLA_CPUSPEED:
-			return sdla_cpuspeed(dev, ifr);
+			return(sdla_cpuspeed(dev, ifr)); 
 
 /* ==========================================================
 NOTE:  This is rather a useless action right now, as the
@@ -1277,7 +1287,7 @@ NOTE:  This is rather a useless action right now, as the
 ============================================================*/
 		case SDLA_PROTOCOL:
 			if (flp->configured)
-				return -EALREADY;
+				return(-EALREADY);
 
 			switch (ifr->ifr_flags)
 			{
@@ -1285,7 +1295,7 @@ NOTE:  This is rather a useless action right now, as the
 					dev->type = ifr->ifr_flags;
 					break;
 				default:
-					return -ENOPROTOOPT;
+					return(-ENOPROTOOPT);
 			}
 			break;
 
@@ -1295,9 +1305,7 @@ NOTE:  This is rather a useless action right now, as the
 
 		case SDLA_WRITEMEM:
 		case SDLA_READMEM:
-			if(!capable(CAP_SYS_RAWIO))
-				return -EPERM;
-			return sdla_xfer(dev, ifr->ifr_data, cmd == SDLA_READMEM);
+			return(sdla_xfer(dev, (struct sdla_mem *)ifr->ifr_data, cmd == SDLA_READMEM));
 
 		case SDLA_START:
 			sdla_start(dev);
@@ -1308,128 +1316,144 @@ NOTE:  This is rather a useless action right now, as the
 			break;
 
 		default:
-			return -EOPNOTSUPP;
+			return(-EOPNOTSUPP);
 	}
-	return 0;
+	return(0);
 }
 
-static int sdla_change_mtu(struct net_device *dev, int new_mtu)
+int sdla_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct frad_local *flp;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	if (netif_running(dev))
-		return -EBUSY;
+		return(-EBUSY);
 
 	/* for now, you can't change the MTU! */
-	return -EOPNOTSUPP;
+	return(-EOPNOTSUPP);
 }
 
-static int sdla_set_config(struct net_device *dev, struct ifmap *map)
+int sdla_set_config(struct net_device *dev, struct ifmap *map)
 {
 	struct frad_local *flp;
 	int               i;
 	char              byte;
-	unsigned base;
-	int err = -EINVAL;
 
-	flp = netdev_priv(dev);
+	flp = dev->priv;
 
 	if (flp->initialized)
-		return -EINVAL;
+		return(-EINVAL);
 
-	for(i=0; i < ARRAY_SIZE(valid_port); i++)
+	for(i=0;i < sizeof(valid_port) / sizeof (int) ; i++)
 		if (valid_port[i] == map->base_addr)
 			break;   
 
-	if (i == ARRAY_SIZE(valid_port))
-		return -EINVAL;
+	if (i == sizeof(valid_port) / sizeof(int))
+		return(-EINVAL);
 
-	if (!request_region(map->base_addr, SDLA_IO_EXTENTS, dev->name)){
-		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use\n", dev->base_addr);
-		return -EINVAL;
+	dev->base_addr = map->base_addr;
+	if (!request_region(dev->base_addr, SDLA_IO_EXTENTS, dev->name)){
+		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use \n", dev->base_addr);
+		return(-EINVAL);
 	}
-	base = map->base_addr;
-
 	/* test for card types, S502A, S502E, S507, S508                 */
 	/* these tests shut down the card completely, so clear the state */
 	flp->type = SDLA_UNKNOWN;
 	flp->state = 0;
    
 	for(i=1;i<SDLA_IO_EXTENTS;i++)
-		if (inb(base + i) != 0xFF)
+		if (inb(dev->base_addr + i) != 0xFF)
 			break;
 
-	if (i == SDLA_IO_EXTENTS) {   
-		outb(SDLA_HALT, base + SDLA_REG_Z80_CONTROL);
-		if ((inb(base + SDLA_S502_STS) & 0x0F) == 0x08) {
-			outb(SDLA_S502E_INTACK, base + SDLA_REG_CONTROL);
-			if ((inb(base + SDLA_S502_STS) & 0x0F) == 0x0C) {
-				outb(SDLA_HALT, base + SDLA_REG_CONTROL);
+	if (i == SDLA_IO_EXTENTS)
+	{   
+		outb(SDLA_HALT, dev->base_addr + SDLA_REG_Z80_CONTROL);
+		if ((inb(dev->base_addr + SDLA_S502_STS) & 0x0F) == 0x08)
+		{
+			outb(SDLA_S502E_INTACK, dev->base_addr + SDLA_REG_CONTROL);
+			if ((inb(dev->base_addr + SDLA_S502_STS) & 0x0F) == 0x0C)
+			{
+				outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
 				flp->type = SDLA_S502E;
-				goto got_type;
 			}
 		}
 	}
 
-	for(byte=inb(base),i=0;i<SDLA_IO_EXTENTS;i++)
-		if (inb(base + i) != byte)
-			break;
+	if (flp->type == SDLA_UNKNOWN)
+	{
+		for(byte=inb(dev->base_addr),i=0;i<SDLA_IO_EXTENTS;i++)
+			if (inb(dev->base_addr + i) != byte)
+				break;
 
-	if (i == SDLA_IO_EXTENTS) {
-		outb(SDLA_HALT, base + SDLA_REG_CONTROL);
-		if ((inb(base + SDLA_S502_STS) & 0x7E) == 0x30) {
-			outb(SDLA_S507_ENABLE, base + SDLA_REG_CONTROL);
-			if ((inb(base + SDLA_S502_STS) & 0x7E) == 0x32) {
-				outb(SDLA_HALT, base + SDLA_REG_CONTROL);
-				flp->type = SDLA_S507;
-				goto got_type;
+		if (i == SDLA_IO_EXTENTS)
+		{
+			outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
+			if ((inb(dev->base_addr + SDLA_S502_STS) & 0x7E) == 0x30)
+			{
+				outb(SDLA_S507_ENABLE, dev->base_addr + SDLA_REG_CONTROL);
+				if ((inb(dev->base_addr + SDLA_S502_STS) & 0x7E) == 0x32)
+				{
+					outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
+					flp->type = SDLA_S507;
+				}
 			}
 		}
 	}
 
-	outb(SDLA_HALT, base + SDLA_REG_CONTROL);
-	if ((inb(base + SDLA_S508_STS) & 0x3F) == 0x00) {
-		outb(SDLA_S508_INTEN, base + SDLA_REG_CONTROL);
-		if ((inb(base + SDLA_S508_STS) & 0x3F) == 0x10) {
-			outb(SDLA_HALT, base + SDLA_REG_CONTROL);
-			flp->type = SDLA_S508;
-			goto got_type;
-		}
-	}
-
-	outb(SDLA_S502A_HALT, base + SDLA_REG_CONTROL);
-	if (inb(base + SDLA_S502_STS) == 0x40) {
-		outb(SDLA_S502A_START, base + SDLA_REG_CONTROL);
-		if (inb(base + SDLA_S502_STS) == 0x40) {
-			outb(SDLA_S502A_INTEN, base + SDLA_REG_CONTROL);
-			if (inb(base + SDLA_S502_STS) == 0x44) {
-				outb(SDLA_S502A_START, base + SDLA_REG_CONTROL);
-				flp->type = SDLA_S502A;
-				goto got_type;
+	if (flp->type == SDLA_UNKNOWN)
+	{
+		outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
+		if ((inb(dev->base_addr + SDLA_S508_STS) & 0x3F) == 0x00)
+		{
+			outb(SDLA_S508_INTEN, dev->base_addr + SDLA_REG_CONTROL);
+			if ((inb(dev->base_addr + SDLA_S508_STS) & 0x3F) == 0x10)
+			{
+				outb(SDLA_HALT, dev->base_addr + SDLA_REG_CONTROL);
+				flp->type = SDLA_S508;
 			}
 		}
 	}
 
-	printk(KERN_NOTICE "%s: Unknown card type\n", dev->name);
-	err = -ENODEV;
-	goto fail;
+	if (flp->type == SDLA_UNKNOWN)
+	{
+		outb(SDLA_S502A_HALT, dev->base_addr + SDLA_REG_CONTROL);
+		if (inb(dev->base_addr + SDLA_S502_STS) == 0x40)
+		{
+			outb(SDLA_S502A_START, dev->base_addr + SDLA_REG_CONTROL);
+			if (inb(dev->base_addr + SDLA_S502_STS) == 0x40)
+			{
+				outb(SDLA_S502A_INTEN, dev->base_addr + SDLA_REG_CONTROL);
+				if (inb(dev->base_addr + SDLA_S502_STS) == 0x44)
+				{
+					outb(SDLA_S502A_START, dev->base_addr + SDLA_REG_CONTROL);
+					flp->type = SDLA_S502A;
+				}
+			}
+		}
+	}
 
-got_type:
-	switch(base) {
+	if (flp->type == SDLA_UNKNOWN)
+	{
+		printk(KERN_NOTICE "%s: Unknown card type\n", dev->name);
+		return(-ENODEV);
+	}
+
+	switch(dev->base_addr)
+	{
 		case 0x270:
 		case 0x280:
 		case 0x380: 
 		case 0x390:
-			if (flp->type != SDLA_S508 && flp->type != SDLA_S507)
-				goto fail;
+			if ((flp->type != SDLA_S508) && (flp->type != SDLA_S507))
+				return(-EINVAL);
 	}
 
-	switch (map->irq) {
+	switch (map->irq)
+	{
 		case 2:
 			if (flp->type != SDLA_S502E)
-				goto fail;
+				return(-EINVAL);
 			break;
 
 		case 10:
@@ -1437,26 +1461,28 @@ got_type:
 		case 12:
 		case 15:
 		case 4:
-			if (flp->type != SDLA_S508 && flp->type != SDLA_S507)
-				goto fail;
-			break;
+			if ((flp->type != SDLA_S508) && (flp->type != SDLA_S507))
+				return(-EINVAL);
+
 		case 3:
 		case 5:
 		case 7:
 			if (flp->type == SDLA_S502A)
-				goto fail;
+				return(-EINVAL);
 			break;
 
 		default:
-			goto fail;
+			return(-EINVAL);
 	}
+	dev->irq = map->irq;
 
-	err = -EAGAIN;
-	if (request_irq(dev->irq, sdla_isr, 0, dev->name, dev)) 
-		goto fail;
+	if (request_irq(dev->irq, &sdla_isr, 0, dev->name, dev)) 
+		return(-EAGAIN);
 
-	if (flp->type == SDLA_S507) {
-		switch(dev->irq) {
+	if (flp->type == SDLA_S507)
+	{
+		switch(dev->irq)
+		{
 			case 3:
 				flp->state = SDLA_S507_IRQ3;
 				break;
@@ -1484,29 +1510,39 @@ got_type:
 		}
 	}
 
-	for(i=0; i < ARRAY_SIZE(valid_mem); i++)
+	for(i=0;i < sizeof(valid_mem) / sizeof (int) ; i++)
 		if (valid_mem[i] == map->mem_start)
 			break;   
 
-	err = -EINVAL;
-	if (i == ARRAY_SIZE(valid_mem))
-		goto fail2;
+	if (i == sizeof(valid_mem) / sizeof(int))
+	/*
+	 *	FIXME:
+	 *	BUG BUG BUG: MUST RELEASE THE IRQ WE ALLOCATED IN
+	 *	ALL THESE CASES
+	 *
+	 */
+		return(-EINVAL);
 
-	if (flp->type == SDLA_S502A && (map->mem_start & 0xF000) >> 12 == 0x0E)
-		goto fail2;
+	if ((flp->type == SDLA_S502A) && (((map->mem_start & 0xF000) >> 12) == 0x0E))
+		return(-EINVAL);
 
-	if (flp->type != SDLA_S507 && map->mem_start >> 16 == 0x0B)
-		goto fail2;
+	if ((flp->type != SDLA_S507) && ((map->mem_start >> 16) == 0x0B))
+		return(-EINVAL);
 
-	if (flp->type == SDLA_S507 && map->mem_start >> 16 == 0x0D)
-		goto fail2;
+	if ((flp->type == SDLA_S507) && ((map->mem_start >> 16) == 0x0D))
+		return(-EINVAL);
+
+	dev->mem_start = map->mem_start;
+	dev->mem_end = dev->mem_start + 0x2000;
 
 	byte = flp->type != SDLA_S508 ? SDLA_8K_WINDOW : 0;
 	byte |= (map->mem_start & 0xF000) >> (12 + (flp->type == SDLA_S508 ? 1 : 0));
-	switch(flp->type) {
+	switch(flp->type)
+	{
 		case SDLA_S502A:
 		case SDLA_S502E:
-			switch (map->mem_start >> 16) {
+			switch (map->mem_start >> 16)
+			{
 				case 0x0A:
 					byte |= SDLA_S502_SEG_A;
 					break;
@@ -1522,7 +1558,8 @@ got_type:
 			}
 			break;
 		case SDLA_S507:
-			switch (map->mem_start >> 16) {
+			switch (map->mem_start >> 16)
+			{
 				case 0x0A:
 					byte |= SDLA_S507_SEG_A;
 					break;
@@ -1538,7 +1575,8 @@ got_type:
 			}
 			break;
 		case SDLA_S508:
-			switch (map->mem_start >> 16) {
+			switch (map->mem_start >> 16)
+			{
 				case 0x0A:
 					byte |= SDLA_S508_SEG_A;
 					break;
@@ -1556,7 +1594,7 @@ got_type:
 	}
 
 	/* set the memory bits, and enable access */
-	outb(byte, base + SDLA_REG_PC_WINDOW);
+	outb(byte, dev->base_addr + SDLA_REG_PC_WINDOW);
 
 	switch(flp->type)
 	{
@@ -1570,43 +1608,40 @@ got_type:
 			flp->state = SDLA_MEMEN;
 			break;
 	}
-	outb(flp->state, base + SDLA_REG_CONTROL);
+	outb(flp->state, dev->base_addr + SDLA_REG_CONTROL);
 
-	dev->irq = map->irq;
-	dev->base_addr = base;
-	dev->mem_start = map->mem_start;
-	dev->mem_end = dev->mem_start + 0x2000;
 	flp->initialized = 1;
-	return 0;
-
-fail2:
-	free_irq(map->irq, dev);
-fail:
-	release_region(base, SDLA_IO_EXTENTS);
-	return err;
+	return(0);
 }
  
-static const struct net_device_ops sdla_netdev_ops = {
-	.ndo_open	= sdla_open,
-	.ndo_stop	= sdla_close,
-	.ndo_do_ioctl	= sdla_ioctl,
-	.ndo_set_config	= sdla_set_config,
-	.ndo_start_xmit	= sdla_transmit,
-	.ndo_change_mtu	= sdla_change_mtu,
-};
+static struct net_device_stats *sdla_stats(struct net_device *dev)
+{
+	struct frad_local *flp;
+	flp = dev->priv;
+
+	return(&flp->stats);
+}
 
 static void setup_sdla(struct net_device *dev)
 {
-	struct frad_local *flp = netdev_priv(dev);
+	struct frad_local *flp = dev->priv;
 
 	netdev_boot_setup_check(dev);
 
-	dev->netdev_ops		= &sdla_netdev_ops;
+	SET_MODULE_OWNER(dev);
 	dev->flags		= 0;
 	dev->type		= 0xFFFF;
 	dev->hard_header_len	= 0;
 	dev->addr_len		= 0;
 	dev->mtu		= SDLA_MAX_MTU;
+
+	dev->open		= sdla_open;
+	dev->stop		= sdla_close;
+	dev->do_ioctl		= sdla_ioctl;
+	dev->set_config		= sdla_set_config;
+	dev->get_stats		= sdla_stats;
+	dev->hard_start_xmit	= sdla_transmit;
+	dev->change_mtu		= sdla_change_mtu;
 
 	flp->activate		= sdla_activate;
 	flp->deactivate		= sdla_deactivate;
@@ -1641,13 +1676,13 @@ static int __init init_sdla(void)
 
 static void __exit exit_sdla(void)
 {
-	struct frad_local *flp = netdev_priv(sdla);
+	struct frad_local *flp;
 
 	unregister_netdev(sdla);
-	if (flp->initialized) {
+	if (sdla->irq)
 		free_irq(sdla->irq, sdla);
-		release_region(sdla->base_addr, SDLA_IO_EXTENTS);
-	}
+
+	flp = sdla->priv;
 	del_timer_sync(&flp->timer);
 	free_netdev(sdla);
 }

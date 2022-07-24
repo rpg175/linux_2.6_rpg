@@ -1,36 +1,36 @@
 /*
  *  linux/fs/binfmt_script.c
  *
- *  Copyright (C) 1996  Martin von LÃ¶wis
+ *  Copyright (C) 1996  Martin von Löwis
  *  original #!-checking implemented by tytso.
  */
 
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
 #include <linux/file.h>
+#include <linux/smp_lock.h>
 #include <linux/err.h>
 #include <linux/fs.h>
 
 static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	const char *i_arg, *i_name;
-	char *cp;
+	char *cp, *i_name, *i_arg;
 	struct file *file;
 	char interp[BINPRM_BUF_SIZE];
 	int retval;
 
-	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') ||
-	    (bprm->recursion_depth > BINPRM_MAX_RECURSION))
+	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') || (bprm->sh_bang)) 
 		return -ENOEXEC;
 	/*
 	 * This section does the #! interpretation.
 	 * Sorta complicated, but hopefully it will work.  -TYT
 	 */
 
-	bprm->recursion_depth++;
+	bprm->sh_bang++;
 	allow_write_access(bprm->file);
 	fput(bprm->file);
 	bprm->file = NULL;
@@ -50,7 +50,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	if (*cp == '\0') 
 		return -ENOEXEC; /* No interpreter name found */
 	i_name = cp;
-	i_arg = NULL;
+	i_arg = 0;
 	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++)
 		/* nothing */ ;
 	while ((*cp == ' ') || (*cp == '\t'))
@@ -68,9 +68,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * This is done in reverse order, because of how the
 	 * user environment and arguments are stored.
 	 */
-	retval = remove_arg_zero(bprm);
-	if (retval)
-		return retval;
+	remove_arg_zero(bprm);
 	retval = copy_strings_kernel(1, &bprm->interp, bprm);
 	if (retval < 0) return retval; 
 	bprm->argc++;
@@ -98,7 +96,7 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	return search_binary_handler(bprm,regs);
 }
 
-static struct linux_binfmt script_format = {
+struct linux_binfmt script_format = {
 	.module		= THIS_MODULE,
 	.load_binary	= load_script,
 };
@@ -113,6 +111,6 @@ static void __exit exit_script_binfmt(void)
 	unregister_binfmt(&script_format);
 }
 
-core_initcall(init_script_binfmt);
-module_exit(exit_script_binfmt);
+module_init(init_script_binfmt)
+module_exit(exit_script_binfmt)
 MODULE_LICENSE("GPL");

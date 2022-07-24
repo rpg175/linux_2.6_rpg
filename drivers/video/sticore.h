@@ -34,19 +34,35 @@
  * for them to fix it and steal their solution.   prumpf
  */
  
-#include <asm/io.h>
-
 #define STI_WAIT 1
 
+#include <asm/io.h> /* for USE_HPPA_IOREMAP */
+
+#if USE_HPPA_IOREMAP
+
+#define STI_PTR(p)	(p)
+#define PTR_STI(p)	(p)
+static inline int STI_CALL( unsigned long func, 
+		void *flags, void *inptr, void *outptr, void *glob_cfg )
+{
+       int (*f)(void *,void *,void *,void *);
+       f = (void*)func;
+       return f(flags, inptr, outptr, glob_cfg);
+}
+
+#else /* !USE_HPPA_IOREMAP */
+
 #define STI_PTR(p)	( virt_to_phys(p) )
-#define PTR_STI(p)	( phys_to_virt((unsigned long)p) )
-#define STI_CALL(func, flags, inptr, outptr, glob_cfg)	\
-       ({						\
-               pdc_sti_call( func, STI_PTR(flags),	\
-				   STI_PTR(inptr),	\
-				   STI_PTR(outptr),	\
-				   STI_PTR(glob_cfg));	\
+#define PTR_STI(p)	( phys_to_virt((long)p) )
+#define STI_CALL(func, flags, inptr, outptr, glob_cfg) \
+       ({                                                      \
+               pdc_sti_call( func, (unsigned long)STI_PTR(flags), \
+                                   (unsigned long)STI_PTR(inptr), \
+                                   (unsigned long)STI_PTR(outptr), \
+                                   (unsigned long)STI_PTR(glob_cfg)); \
        })
+
+#endif /* USE_HPPA_IOREMAP */
 
 
 #define sti_onscreen_x(sti) (sti->glob_cfg->onscreen_x)
@@ -79,7 +95,7 @@ struct sti_glob_cfg_ext {
 	 u8 curr_mon;			/* current monitor configured */
 	 u8 friendly_boot;		/* in friendly boot mode */
 	s16 power;			/* power calculation (in Watts) */
-	s32 freq_ref;			/* frequency reference */
+	s32 freq_ref;			/* frequency refrence */
 	u32 sti_mem_addr;		/* pointer to global sti memory (size=sti_mem_request) */
 	u32 future_ptr; 		/* pointer to future data */
 };
@@ -336,9 +352,8 @@ struct sti_struct {
 	struct sti_conf_outptr outptr; /* configuration */
 	struct sti_conf_outptr_ext outptr_ext;
 
-	struct pci_dev *pd;
-
 	/* PCI data structures (pg. 17ff from sti.pdf) */
+	struct pci_dev *pd;
 	u8 rm_entry[16]; /* pci region mapper array == pci config space offset */
 
 	/* pointer to the fb_info where this STI device is used */
@@ -352,6 +367,8 @@ struct sti_struct *sti_get_rom(unsigned int index); /* 0: default sti */
 
 /* functions to call the STI ROM directly */
 
+int  sti_init_graph(struct sti_struct *sti);
+void sti_inq_conf(struct sti_struct *sti);
 void sti_putc(struct sti_struct *sti, int c, int y, int x);
 void sti_set(struct sti_struct *sti, int src_y, int src_x,
 	     int height, int width, u8 color);

@@ -14,6 +14,7 @@
 #ifndef  _SOUND_CONFIG_H_
 #define  _SOUND_CONFIG_H_
 
+#include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/sound.h>
 
@@ -110,15 +111,23 @@ struct channel_info {
 #define OPEN_WRITE	PCM_ENABLE_OUTPUT
 #define OPEN_READWRITE	(OPEN_READ|OPEN_WRITE)
 
+#if OPEN_READ == FMODE_READ && OPEN_WRITE == FMODE_WRITE
+
 static inline int translate_mode(struct file *file)
 {
-	if (OPEN_READ == (__force int)FMODE_READ &&
-	    OPEN_WRITE == (__force int)FMODE_WRITE)
-		return (__force int)(file->f_mode & (FMODE_READ | FMODE_WRITE));
-	else
-		return ((file->f_mode & FMODE_READ) ? OPEN_READ : 0) |
-			((file->f_mode & FMODE_WRITE) ? OPEN_WRITE : 0);
+	return file->f_mode;
 }
+
+#else
+
+static inline int translate_mode(struct file *file)
+{
+	return ((file->f_mode & FMODE_READ) ? OPEN_READ : 0) |
+		((file->f_mode & FMODE_WRITE) ? OPEN_WRITE : 0);
+}
+
+#endif
+
 
 #include "sound_calls.h"
 #include "dev_table.h"
@@ -141,7 +150,5 @@ static inline int translate_mode(struct file *file)
 
 #define TIMER_ARMED	121234
 #define TIMER_NOT_ARMED	1
-
-#define MAX_MEM_BLOCKS 1024
 
 #endif

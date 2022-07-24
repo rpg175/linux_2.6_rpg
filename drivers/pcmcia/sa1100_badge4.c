@@ -14,13 +14,14 @@
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 
-#include <mach/hardware.h>
+#include <asm/hardware.h>
 #include <asm/mach-types.h>
-#include <mach/badge4.h>
+#include <asm/arch/badge4.h>
 #include <asm/hardware/sa1111.h>
 
 #include "sa1111_generic.h"
@@ -74,7 +75,7 @@ static void complain_about_jumpering(const char *whom,
 }
 
 static int
-badge4_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state_t *state)
+badge4_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt, const socket_state_t *state)
 {
 	int ret;
 
@@ -82,14 +83,14 @@ badge4_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state
 	case 0:
 		if ((state->Vcc != 0) &&
 		    (state->Vcc != badge4_pcmvcc)) {
-			complain_about_jumpering(__func__, "pcmvcc",
+			complain_about_jumpering(__FUNCTION__, "pcmvcc",
 						 badge4_pcmvcc, state->Vcc);
 			// Apply power regardless of the jumpering.
 			// return -1;
 		}
 		if ((state->Vpp != 0) &&
 		    (state->Vpp != badge4_pcmvpp)) {
-			complain_about_jumpering(__func__, "pcmvpp",
+			complain_about_jumpering(__FUNCTION__, "pcmvpp",
 						 badge4_pcmvpp, state->Vpp);
 			return -1;
 		}
@@ -98,7 +99,7 @@ badge4_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state
 	case 1:
 		if ((state->Vcc != 0) &&
 		    (state->Vcc != badge4_cfvcc)) {
-			complain_about_jumpering(__func__, "cfvcc",
+			complain_about_jumpering(__FUNCTION__, "cfvcc",
 						 badge4_cfvcc, state->Vcc);
 			return -1;
 		}
@@ -127,10 +128,13 @@ badge4_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state
 
 static struct pcmcia_low_level badge4_pcmcia_ops = {
 	.owner			= THIS_MODULE,
+	.init			= sa1111_pcmcia_hw_init,
+	.shutdown		= sa1111_pcmcia_hw_shutdown,
+	.socket_state		= sa1111_pcmcia_socket_state,
 	.configure_socket	= badge4_pcmcia_configure_socket,
+
 	.socket_init		= sa1111_pcmcia_socket_init,
-	.first			= 0,
-	.nr			= 2,
+	.socket_suspend		= sa1111_pcmcia_socket_suspend,
 };
 
 int pcmcia_badge4_init(struct device *dev)
@@ -140,12 +144,10 @@ int pcmcia_badge4_init(struct device *dev)
 	if (machine_is_badge4()) {
 		printk(KERN_INFO
 		       "%s: badge4_pcmvcc=%d, badge4_pcmvpp=%d, badge4_cfvcc=%d\n",
-		       __func__,
+		       __FUNCTION__,
 		       badge4_pcmvcc, badge4_pcmvpp, badge4_cfvcc);
 
-		sa11xx_drv_pcmcia_ops(&badge4_pcmcia_ops);
-		ret = sa1111_pcmcia_add(dev, &badge4_pcmcia_ops,
-				sa11xx_drv_pcmcia_add_one);
+		ret = sa11xx_drv_pcmcia_probe(dev, &badge4_pcmcia_ops, 0, 2);
 	}
 
 	return ret;

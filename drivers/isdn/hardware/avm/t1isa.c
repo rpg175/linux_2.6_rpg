@@ -1,4 +1,4 @@
-/* $Id: t1isa.c,v 1.1.2.3 2004/02/10 01:07:12 keil Exp $
+/* $Id: t1isa.c,v 1.16.6.7 2001/09/23 22:24:34 kai Exp $
  * 
  * Module for AVM T1 HEMA-card.
  * 
@@ -21,16 +21,11 @@
 #include <linux/kernelcapi.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/gfp.h>
 #include <asm/io.h>
 #include <linux/isdn/capicmd.h>
 #include <linux/isdn/capiutil.h>
 #include <linux/isdn/capilli.h>
 #include "avmcard.h"
-
-/* ------------------------------------------------------------- */
-
-static char *revision = "$Revision: 1.1.2.3 $";
 
 /* ------------------------------------------------------------- */
 
@@ -63,6 +58,7 @@ static int t1_detectandinit(unsigned int base, unsigned irq, int cardnr)
 {
 	unsigned char cregs[8];
 	unsigned char reverse_cardnr;
+	unsigned long flags;
 	unsigned char dummy;
 	int i;
 
@@ -77,12 +73,8 @@ static int t1_detectandinit(unsigned int base, unsigned irq, int cardnr)
 	cregs[6] = 0;
 	cregs[7] = 0;
 
-	/*
-	 * no one else should use the ISA bus in this moment,
-	 * but no function there to prevent this :-(
-	 * save_flags(flags); cli();
-	 */
-
+	save_flags(flags);
+	cli();
 	/* board reset */
 	t1outp(base, T1_RESETBOARD, 0xf);
 	mdelay(100);
@@ -95,7 +87,7 @@ static int t1_detectandinit(unsigned int base, unsigned irq, int cardnr)
 	t1outp(base, HEMA_PAL_ID >> 4, cregs[0]);
 	for(i=1;i<7;i++) t1outp(base, 0, cregs[i]);
 	t1outp(base, ((base >> 4)) & 0x3, cregs[7]);
-	/* restore_flags(flags); */
+	restore_flags(flags);
 
 	mdelay(100);
 	t1outp(base, T1_FASTLINK+T1_RESETLINK, 0);
@@ -132,7 +124,7 @@ static int t1_detectandinit(unsigned int base, unsigned irq, int cardnr)
         return 0;
 }
 
-static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
+static irqreturn_t t1isa_interrupt(int interrupt, void *devptr, struct pt_regs *regs)
 {
 	avmcard *card = devptr;
 	avmctrl_info *cinfo = &card->ctrlinfo[0];
@@ -145,9 +137,6 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 	unsigned DataB3Len;
 	unsigned NCCI;
 	unsigned WindowSize;
-	unsigned long flags;
-
-	spin_lock_irqsave(&card->lock, flags);
 
 	while (b1_rx_full(card->port)) {
 
@@ -160,7 +149,6 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 			ApplId = (unsigned) b1_get_word(card->port);
 			MsgLen = t1_get_slice(card->port, card->msgbuf);
 			DataB3Len = t1_get_slice(card->port, card->databuf);
-			spin_unlock_irqrestore(&card->lock, flags);
 
 			if (MsgLen < 30) { /* not CAPI 64Bit */
 				memset(card->msgbuf+MsgLen, 0, 30-MsgLen);
@@ -182,7 +170,6 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 			ApplId = (unsigned) b1_get_word(card->port);
 			MsgLen = t1_get_slice(card->port, card->msgbuf);
 			if (!(skb = alloc_skb(MsgLen, GFP_ATOMIC))) {
-				spin_unlock_irqrestore(&card->lock, flags);
 				printk(KERN_ERR "%s: incoming packet dropped\n",
 						card->name);
 			} else {
@@ -191,7 +178,7 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 					capilib_data_b3_conf(&cinfo->ncci_head, ApplId,
 							     CAPIMSG_NCCI(skb->data),
 							     CAPIMSG_MSGID(skb->data));
-				spin_unlock_irqrestore(&card->lock, flags);
+
 				capi_ctr_handle_message(ctrl, ApplId, skb);
 			}
 			break;
@@ -201,34 +188,33 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 			ApplId = b1_get_word(card->port);
 			NCCI = b1_get_word(card->port);
 			WindowSize = b1_get_word(card->port);
+
 			capilib_new_ncci(&cinfo->ncci_head, ApplId, NCCI, WindowSize);
-			spin_unlock_irqrestore(&card->lock, flags);
+
 			break;
 
 		case RECEIVE_FREE_NCCI:
 
 			ApplId = b1_get_word(card->port);
 			NCCI = b1_get_word(card->port);
+
 			if (NCCI != 0xffffffff)
 				capilib_free_ncci(&cinfo->ncci_head, ApplId, NCCI);
-			spin_unlock_irqrestore(&card->lock, flags);
+
 			break;
 
 		case RECEIVE_START:
 			b1_put_byte(card->port, SEND_POLLACK);
-			spin_unlock_irqrestore(&card->lock, flags);
 			capi_ctr_resume_output(ctrl);
 			break;
 
 		case RECEIVE_STOP:
-			spin_unlock_irqrestore(&card->lock, flags);
 			capi_ctr_suspend_output(ctrl);
 			break;
 
 		case RECEIVE_INIT:
 
 			cinfo->versionlen = t1_get_slice(card->port, cinfo->versionbuf);
-			spin_unlock_irqrestore(&card->lock, flags);
 			b1_parse_version(cinfo);
 			printk(KERN_INFO "%s: %s-card (%s) now active\n",
 			       card->name,
@@ -240,7 +226,6 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 		case RECEIVE_TASK_READY:
 			ApplId = (unsigned) b1_get_word(card->port);
 			MsgLen = t1_get_slice(card->port, card->msgbuf);
-			spin_unlock_irqrestore(&card->lock, flags);
 			card->msgbuf[MsgLen] = 0;
 			while (    MsgLen > 0
 			       && (   card->msgbuf[MsgLen-1] == '\n'
@@ -254,7 +239,6 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 
 		case RECEIVE_DEBUGMSG:
 			MsgLen = t1_get_slice(card->port, card->msgbuf);
-			spin_unlock_irqrestore(&card->lock, flags);
 			card->msgbuf[MsgLen] = 0;
 			while (    MsgLen > 0
 			       && (   card->msgbuf[MsgLen-1] == '\n'
@@ -267,11 +251,9 @@ static irqreturn_t t1isa_interrupt(int interrupt, void *devptr)
 
 
 		case 0xff:
-			spin_unlock_irqrestore(&card->lock, flags);
 			printk(KERN_ERR "%s: card reseted ?\n", card->name);
 			return IRQ_HANDLED;
 		default:
-			spin_unlock_irqrestore(&card->lock, flags);
 			printk(KERN_ERR "%s: b1_interrupt: 0x%x ???\n",
 					card->name, b1cmd);
 			return IRQ_NONE;
@@ -314,33 +296,31 @@ static int t1isa_load_firmware(struct capi_ctr *ctrl, capiloaddata *data)
 		return -EIO;
 	}
 
-	spin_lock_irqsave(&card->lock, flags);
+	save_flags(flags);
+	cli();
 	b1_setinterrupt(port, card->irq, card->cardtype);
 	b1_put_byte(port, SEND_INIT);
 	b1_put_word(port, CAPI_MAXAPPL);
 	b1_put_word(port, AVM_NCCI_PER_CHANNEL*30);
 	b1_put_word(port, ctrl->cnr - 1);
-	spin_unlock_irqrestore(&card->lock, flags);
+	restore_flags(flags);
 
 	return 0;
 }
 
-static void t1isa_reset_ctr(struct capi_ctr *ctrl)
+void t1isa_reset_ctr(struct capi_ctr *ctrl)
 {
 	avmctrl_info *cinfo = (avmctrl_info *)(ctrl->driverdata);
 	avmcard *card = cinfo->card;
 	unsigned int port = card->port;
-	unsigned long flags;
 
 	t1_disable_irq(port);
 	b1_reset(port);
 	b1_reset(port);
 
 	memset(cinfo->version, 0, sizeof(cinfo->version));
-	spin_lock_irqsave(&card->lock, flags);
 	capilib_release(&cinfo->ncci_head);
-	spin_unlock_irqrestore(&card->lock, flags);
-	capi_ctr_down(ctrl);
+	capi_ctr_reseted(ctrl);
 }
 
 static void t1isa_remove(struct pci_dev *pdev)
@@ -369,7 +349,7 @@ static void t1isa_remove(struct pci_dev *pdev)
 static u16 t1isa_send_message(struct capi_ctr *ctrl, struct sk_buff *skb);
 static char *t1isa_procinfo(struct capi_ctr *ctrl);
 
-static int t1isa_probe(struct pci_dev *pdev, int cardnr)
+static int __init t1isa_probe(struct pci_dev *pdev, int cardnr)
 {
 	avmctrl_info *cinfo;
 	avmcard *card;
@@ -421,7 +401,6 @@ static int t1isa_probe(struct pci_dev *pdev, int cardnr)
 	t1_disable_irq(card->port);
 	b1_reset(card->port);
 
-	cinfo->capi_ctrl.owner = THIS_MODULE;
 	cinfo->capi_ctrl.driver_name   = "t1isa";
 	cinfo->capi_ctrl.driverdata    = cinfo;
 	cinfo->capi_ctrl.register_appl = b1_register_appl;
@@ -430,8 +409,9 @@ static int t1isa_probe(struct pci_dev *pdev, int cardnr)
 	cinfo->capi_ctrl.load_firmware = t1isa_load_firmware;
 	cinfo->capi_ctrl.reset_ctr     = t1isa_reset_ctr;
 	cinfo->capi_ctrl.procinfo      = t1isa_procinfo;
-	cinfo->capi_ctrl.proc_fops = &b1ctl_proc_fops;
+	cinfo->capi_ctrl.ctr_read_proc = b1ctl_read_proc;
 	strcpy(cinfo->capi_ctrl.name, card->name);
+	cinfo->capi_ctrl.owner = THIS_MODULE;
 
 	retval = attach_capi_ctr(&cinfo->capi_ctrl);
 	if (retval) {
@@ -466,28 +446,34 @@ static u16 t1isa_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 	u8 subcmd = CAPIMSG_SUBCOMMAND(skb->data);
 	u16 dlen, retval;
 
-	spin_lock_irqsave(&card->lock, flags);
 	if (CAPICMD(cmd, subcmd) == CAPI_DATA_B3_REQ) {
 		retval = capilib_data_b3_req(&cinfo->ncci_head,
 					     CAPIMSG_APPID(skb->data),
 					     CAPIMSG_NCCI(skb->data),
 					     CAPIMSG_MSGID(skb->data));
-		if (retval != CAPI_NOERROR) {
-			spin_unlock_irqrestore(&card->lock, flags);
-			return retval;
-		}
+		if (retval != CAPI_NOERROR) 
+			goto out;
+
 		dlen = CAPIMSG_DATALEN(skb->data);
 
+		save_flags(flags);
+		cli();
 		b1_put_byte(port, SEND_DATA_B3_REQ);
 		t1_put_slice(port, skb->data, len);
 		t1_put_slice(port, skb->data + len, dlen);
+		restore_flags(flags);
 	} else {
+		retval = CAPI_NOERROR;
+
+		save_flags(flags);
+		cli();
 		b1_put_byte(port, SEND_MESSAGE);
 		t1_put_slice(port, skb->data, len);
+		restore_flags(flags);
 	}
-	spin_unlock_irqrestore(&card->lock, flags);
+ out:
 	dev_kfree_skb_any(skb);
-	return CAPI_NOERROR;
+	return retval;
 }
 /* ------------------------------------------------------------- */
 
@@ -516,63 +502,30 @@ static int io[MAX_CARDS];
 static int irq[MAX_CARDS];
 static int cardnr[MAX_CARDS];
 
-module_param_array(io, int, NULL, 0);
-module_param_array(irq, int, NULL, 0);
-module_param_array(cardnr, int, NULL, 0);
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_CARDS) "i");
+MODULE_PARM(cardnr, "1-" __MODULE_STRING(MAX_CARDS) "i");
 MODULE_PARM_DESC(io, "I/O base address(es)");
 MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
 MODULE_PARM_DESC(cardnr, "Card number(s) (as jumpered)");
 
-static int t1isa_add_card(struct capi_driver *driver, capicardparams *data)
-{
-	int i;
-
-	for (i = 0; i < MAX_CARDS; i++) {
-		if (isa_dev[i].resource[0].start)
-			continue;
-
-		isa_dev[i].resource[0].start = data->port;
-		isa_dev[i].irq = data->irq;
-
-		if (t1isa_probe(&isa_dev[i], data->cardnr) == 0)
-			return 0;
-	}
-	return -ENODEV;
-}
-
-static struct capi_driver capi_driver_t1isa = {
-	.name		= "t1isa",
-	.revision	= "1.0",
-	.add_card       = t1isa_add_card,
-};
-
 static int __init t1isa_init(void)
 {
-	char rev[32];
-	char *p;
 	int i;
-
-	if ((p = strchr(revision, ':')) != NULL && p[1]) {
-		strlcpy(rev, p + 2, 32);
-		if ((p = strchr(rev, '$')) != NULL && p > rev)
-		   *(p-1) = 0;
-	} else
-		strcpy(rev, "1.0");
+	int found = 0;
 
 	for (i = 0; i < MAX_CARDS; i++) {
 		if (!io[i])
 			break;
 
 		isa_dev[i].resource[0].start = io[i];
-		isa_dev[i].irq = irq[i];
+		isa_dev[i].irq_resource[0].start = irq[i];
 
-		if (t1isa_probe(&isa_dev[i], cardnr[i]) != 0)
-			return -ENODEV;
+		if (t1isa_probe(&isa_dev[i], cardnr[i]) == 0)
+			found++;
 	}
-
-	strlcpy(capi_driver_t1isa.revision, rev, 32);
-	register_capi_driver(&capi_driver_t1isa);
-	printk(KERN_INFO "t1isa: revision %s\n", rev);
+	if (found == 0)
+		return -ENODEV;
 
 	return 0;
 }
@@ -581,7 +534,6 @@ static void __exit t1isa_exit(void)
 {
 	int i;
 
-	unregister_capi_driver(&capi_driver_t1isa);
 	for (i = 0; i < MAX_CARDS; i++) {
 		if (!io[i])
 			break;

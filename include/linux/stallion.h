@@ -3,7 +3,7 @@
 /*
  *	stallion.h  -- stallion multiport serial driver.
  *
- *	Copyright (C) 1996-1998  Stallion Technologies
+ *	Copyright (C) 1996-1998  Stallion Technologies (support@stallion.oz.au).
  *	Copyright (C) 1994-1996  Greg Ungerer.
  *
  *	This program is free software; you can redistribute it and/or modify
@@ -20,6 +20,8 @@
  *	along with this program; if not, write to the Free Software
  *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
+
+#include <linux/version.h>
 
 /*****************************************************************************/
 #ifndef	_STALLION_H
@@ -52,11 +54,11 @@
  *	protection - since "write" code only needs to change the head, and
  *	interrupt code only needs to change the tail.
  */
-struct stlrq {
+typedef struct {
 	char	*buf;
 	char	*head;
 	char	*tail;
-};
+} stlrq_t;
 
 /*
  *	Port, panel and board structures to hold status info about each.
@@ -67,20 +69,21 @@ struct stlrq {
  *	is associated with, this makes it (fairly) easy to get back to the
  *	board/panel info for a port.
  */
-struct stlport {
+typedef struct stlport {
 	unsigned long		magic;
-	struct tty_port		port;
-	unsigned int		portnr;
-	unsigned int		panelnr;
-	unsigned int		brdnr;
+	int			portnr;
+	int			panelnr;
+	int			brdnr;
 	int			ioaddr;
 	int			uartaddr;
-	unsigned int		pagenr;
-	unsigned long		istate;
+	int			pagenr;
+	long			istate;
+	int			flags;
 	int			baud_base;
 	int			custom_divisor;
 	int			close_delay;
 	int			closing_wait;
+	int			refcount;
 	int			openwaitcnt;
 	int			brklen;
 	unsigned int		sigs;
@@ -91,35 +94,44 @@ struct stlport {
 	unsigned long		clk;
 	unsigned long		hwid;
 	void			*uartp;
+	struct tty_struct	*tty;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
+	struct wait_queue	*open_wait;
+	struct wait_queue	*close_wait;
+#else
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
+#endif
+	struct work_struct	tqueue;
 	comstats_t		stats;
-	struct stlrq		tx;
-};
+	stlrq_t			tx;
+} stlport_t;
 
-struct stlpanel {
+typedef struct stlpanel {
 	unsigned long	magic;
-	unsigned int	panelnr;
-	unsigned int	brdnr;
-	unsigned int	pagenr;
-	unsigned int	nrports;
+	int		panelnr;
+	int		brdnr;
+	int		pagenr;
+	int		nrports;
 	int		iobase;
 	void		*uartp;
 	void		(*isr)(struct stlpanel *panelp, unsigned int iobase);
 	unsigned int	hwid;
 	unsigned int	ackmask;
-	struct stlport	*ports[STL_PORTSPERPANEL];
-};
+	stlport_t	*ports[STL_PORTSPERPANEL];
+} stlpanel_t;
 
-struct stlbrd {
+typedef struct stlbrd {
 	unsigned long	magic;
-	unsigned int	brdnr;
-	unsigned int	brdtype;
-	unsigned int	state;
-	unsigned int	nrpanels;
-	unsigned int	nrports;
-	unsigned int	nrbnks;
+	int		brdnr;
+	int		brdtype;
+	int		state;
+	int		nrpanels;
+	int		nrports;
+	int		nrbnks;
 	int		irq;
 	int		irqtype;
-	int		(*isr)(struct stlbrd *brdp);
+	void		(*isr)(struct stlbrd *brdp);
 	unsigned int	ioaddr1;
 	unsigned int	ioaddr2;
 	unsigned int	iosize1;
@@ -131,9 +143,9 @@ struct stlbrd {
 	unsigned long	clk;
 	unsigned int	bnkpageaddr[STL_MAXBANKS];
 	unsigned int	bnkstataddr[STL_MAXBANKS];
-	struct stlpanel	*bnk2panel[STL_MAXBANKS];
-	struct stlpanel	*panels[STL_MAXPANELS];
-};
+	stlpanel_t	*bnk2panel[STL_MAXBANKS];
+	stlpanel_t	*panels[STL_MAXPANELS];
+} stlbrd_t;
 
 
 /*

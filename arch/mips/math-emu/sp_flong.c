@@ -3,7 +3,8 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.
+ * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
+ * http://www.algor.co.uk
  *
  * ########################################################################
  *
@@ -28,9 +29,7 @@
 
 ieee754sp ieee754sp_flong(s64 x)
 {
-	u64 xm;		/* <--- need 64-bit mantissa temp */
-	int xe;
-	int xs;
+	COMPXDP;		/* <--- need 64-bit mantissa temp */
 
 	CLEARCX;
 

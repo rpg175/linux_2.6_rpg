@@ -1,4 +1,4 @@
-#include <linux/unistd.h>
+
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
@@ -6,7 +6,6 @@
 #include <linux/romfs_fs.h>
 #include <linux/initrd.h>
 #include <linux/sched.h>
-#include <linux/freezer.h>
 
 #include "do_mounts.h"
 
@@ -24,46 +23,43 @@ static int __init no_initrd(char *str)
 
 __setup("noinitrd", no_initrd);
 
-static int __init do_linuxrc(void *_shell)
+static int __init do_linuxrc(void * shell)
 {
-	static const char *argv[] = { "linuxrc", NULL, };
-	extern const char *envp_init[];
-	const char *shell = _shell;
+	static char *argv[] = { "linuxrc", NULL, };
+	extern char * envp_init[];
 
-	sys_close(old_fd);sys_close(root_fd);
-	sys_setsid();
-	return kernel_execve(shell, argv, envp_init);
+	close(old_fd);close(root_fd);
+	close(0);close(1);close(2);
+	setsid();
+	(void) open("/dev/console",O_RDWR,0);
+	(void) dup(0);
+	(void) dup(0);
+	return execve(shell, argv, envp_init);
 }
 
 static void __init handle_initrd(void)
 {
 	int error;
-	int pid;
+	int i, pid;
 
 	real_root_dev = new_encode_dev(ROOT_DEV);
-	create_dev("/dev/root.old", Root_RAM0);
+	create_dev("/dev/root.old", Root_RAM0, NULL);
 	/* mount initrd on rootfs' /root */
 	mount_block_root("/dev/root.old", root_mountflags & ~MS_RDONLY);
 	sys_mkdir("/old", 0700);
-	root_fd = sys_open("/", 0, 0);
-	old_fd = sys_open("/old", 0, 0);
+	root_fd = open("/", 0, 0);
+	old_fd = open("/old", 0, 0);
 	/* move initrd over / and chdir/chroot in initrd root */
 	sys_chdir("/root");
 	sys_mount(".", "/", NULL, MS_MOVE, NULL);
 	sys_chroot(".");
-
-	/*
-	 * In case that a resume from disk is carried out by linuxrc or one of
-	 * its children, we need to tell the freezer not to wait for us.
-	 */
-	current->flags |= PF_FREEZER_SKIP;
+	mount_devfs_fs ();
 
 	pid = kernel_thread(do_linuxrc, "/linuxrc", SIGCHLD);
-	if (pid > 0)
-		while (pid != sys_wait4(-1, NULL, 0, NULL))
+	if (pid > 0) {
+		while (pid != waitpid(-1, &i, 0))
 			yield();
-
-	current->flags &= ~PF_FREEZER_SKIP;
+	}
 
 	/* move initrd to rootfs' /old */
 	sys_fchdir(old_fd);
@@ -71,8 +67,9 @@ static void __init handle_initrd(void)
 	/* switch root and cwd back to / of rootfs */
 	sys_fchdir(root_fd);
 	sys_chroot(".");
-	sys_close(old_fd);
-	sys_close(root_fd);
+	close(old_fd);
+	close(root_fd);
+	umount_devfs("/old/dev");
 
 	if (new_decode_dev(real_root_dev) == Root_RAM0) {
 		sys_chdir("/old");
@@ -87,11 +84,8 @@ static void __init handle_initrd(void)
 	if (!error)
 		printk("okay\n");
 	else {
-		int fd = sys_open("/dev/root.old", O_RDWR, 0);
-		if (error == -ENOENT)
-			printk("/initrd does not exist. Ignored.\n");
-		else
-			printk("failed\n");
+		int fd = open("/dev/root.old", O_RDWR, 0);
+		printk("failed\n");
 		printk(KERN_NOTICE "Unmounting old root\n");
 		sys_umount("/old", MNT_DETACH);
 		printk(KERN_NOTICE "Trying to free ramdisk memory ... ");
@@ -99,7 +93,7 @@ static void __init handle_initrd(void)
 			error = fd;
 		} else {
 			error = sys_ioctl(fd, BLKFLSBUF, 0);
-			sys_close(fd);
+			close(fd);
 		}
 		printk(!error ? "okay\n" : "failed\n");
 	}
@@ -108,7 +102,7 @@ static void __init handle_initrd(void)
 int __init initrd_load(void)
 {
 	if (mount_initrd) {
-		create_dev("/dev/ram", Root_RAM0);
+		create_dev("/dev/ram", Root_RAM0, NULL);
 		/*
 		 * Load the initrd data into /dev/ram0. Execute it as initrd
 		 * unless /dev/ram0 is supposed to be our actual root device,

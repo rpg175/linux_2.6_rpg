@@ -27,21 +27,18 @@
 #include <asm/pgalloc.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
-#include <asm/fixmap.h>
 
-void *__kmap_atomic(struct page *page)
+void *kmap_atomic(struct page *page, enum km_type type)
 {
+	unsigned long idx;
 	unsigned long vaddr;
-	long idx, type;
 
-	/* even !CONFIG_PREEMPT needs this, for in_atomic in do_page_fault */
-	pagefault_disable();
-	if (!PageHighMem(page))
+	inc_preempt_count();
+	if (page < highmem_start_page)
 		return page_address(page);
 
-	type = kmap_atomic_idx_push();
 	idx = type + KM_TYPE_NR*smp_processor_id();
-	vaddr = __fix_to_virt(FIX_KMAP_BEGIN + idx);
+	vaddr = fix_kmap_begin + idx * PAGE_SIZE;
 
 /* XXX Fix - Anton */
 #if 0
@@ -50,10 +47,11 @@ void *__kmap_atomic(struct page *page)
 	flush_cache_all();
 #endif
 
-#ifdef CONFIG_DEBUG_HIGHMEM
-	BUG_ON(!pte_none(*(kmap_pte-idx)));
+#if HIGHMEM_DEBUG
+	if (!pte_none(*(kmap_pte+idx)))
+		BUG();
 #endif
-	set_pte(kmap_pte-idx, mk_pte(page, kmap_prot));
+	set_pte(kmap_pte+idx, mk_pte(page, kmap_prot));
 /* XXX Fix - Anton */
 #if 0
 	__flush_tlb_one(vaddr);
@@ -63,67 +61,39 @@ void *__kmap_atomic(struct page *page)
 
 	return (void*) vaddr;
 }
-EXPORT_SYMBOL(__kmap_atomic);
 
-void __kunmap_atomic(void *kvaddr)
+void kunmap_atomic(void *kvaddr, enum km_type type)
 {
-	unsigned long vaddr = (unsigned long) kvaddr & PAGE_MASK;
-	int type;
+	unsigned long vaddr = (unsigned long) kvaddr;
+	unsigned long idx = type + KM_TYPE_NR*smp_processor_id();
 
-	if (vaddr < FIXADDR_START) { // FIXME
-		pagefault_enable();
+	if (vaddr < fix_kmap_begin) { // FIXME
+		dec_preempt_count();
 		return;
 	}
 
-	type = kmap_atomic_idx();
+	if (vaddr != fix_kmap_begin + idx * PAGE_SIZE)
+		BUG();
 
-#ifdef CONFIG_DEBUG_HIGHMEM
-	{
-		unsigned long idx;
-
-		idx = type + KM_TYPE_NR * smp_processor_id();
-		BUG_ON(vaddr != __fix_to_virt(FIX_KMAP_BEGIN+idx));
-
-		/* XXX Fix - Anton */
+/* XXX Fix - Anton */
 #if 0
-		__flush_cache_one(vaddr);
+	__flush_cache_one(vaddr);
 #else
-		flush_cache_all();
+	flush_cache_all();
 #endif
 
-		/*
-		 * force other mappings to Oops if they'll try to access
-		 * this pte without first remap it
-		 */
-		pte_clear(&init_mm, vaddr, kmap_pte-idx);
-		/* XXX Fix - Anton */
+#ifdef HIGHMEM_DEBUG
+	/*
+	 * force other mappings to Oops if they'll try to access
+	 * this pte without first remap it
+	 */
+	pte_clear(kmap_pte+idx);
+/* XXX Fix - Anton */
 #if 0
-		__flush_tlb_one(vaddr);
+	__flush_tlb_one(vaddr);
 #else
-		flush_tlb_all();
+	flush_tlb_all();
 #endif
-	}
 #endif
-
-	kmap_atomic_idx_pop();
-	pagefault_enable();
-}
-EXPORT_SYMBOL(__kunmap_atomic);
-
-/* We may be fed a pagetable here by ptep_to_xxx and others. */
-struct page *kmap_atomic_to_page(void *ptr)
-{
-	unsigned long idx, vaddr = (unsigned long)ptr;
-	pte_t *pte;
-
-	if (vaddr < SRMMU_NOCACHE_VADDR)
-		return virt_to_page(ptr);
-	if (vaddr < PKMAP_BASE)
-		return pfn_to_page(__nocache_pa(vaddr) >> PAGE_SHIFT);
-	BUG_ON(vaddr < FIXADDR_START);
-	BUG_ON(vaddr > FIXADDR_TOP);
-
-	idx = virt_to_fix(vaddr);
-	pte = kmap_pte - (idx - FIX_KMAP_BEGIN);
-	return pte_page(*pte);
+	dec_preempt_count();
 }

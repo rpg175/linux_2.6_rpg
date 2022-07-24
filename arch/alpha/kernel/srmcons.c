@@ -5,6 +5,7 @@
  * (TTY driver and console driver)
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/console.h>
@@ -21,7 +22,7 @@
 #include <asm/uaccess.h>
 
 
-static DEFINE_SPINLOCK(srmcons_callback_lock);
+static spinlock_t srmcons_callback_lock = SPIN_LOCK_UNLOCKED;
 static int srm_is_registered_console = 0;
 
 /* 
@@ -90,15 +91,15 @@ srmcons_receive_chars(unsigned long data)
 
 /* called with callback_lock held */
 static int
-srmcons_do_write(struct tty_struct *tty, const char *buf, int count)
+srmcons_do_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
-	static char str_cr[1] = "\r";
+	unsigned char *str_cr = "\r";
 	long c, remaining = count;
 	srmcons_result result;
-	char *cur;
+	unsigned char *cur;
 	int need_cr;
 
-	for (cur = (char *)buf; remaining > 0; ) {
+	for (cur = (unsigned char *)buf; remaining > 0; ) {
 		need_cr = 0;
 		/* 
 		 * Break it up into reasonable size chunks to allow a chance
@@ -131,13 +132,42 @@ srmcons_do_write(struct tty_struct *tty, const char *buf, int count)
 }
 
 static int
-srmcons_write(struct tty_struct *tty,
+srmcons_write(struct tty_struct *tty, int from_user,
 	      const unsigned char *buf, int count)
 {
 	unsigned long flags;
 
+	if (from_user) {
+		unsigned char tmp[512];
+		int ret = 0;
+		size_t c;
+
+		while ((c = count) > 0) {
+			if (c > sizeof(tmp))
+				c = sizeof(tmp);
+			
+			c -= copy_from_user(tmp, buf, c);
+
+			if (!c) { 
+				printk("%s: EFAULT (count %d)\n",
+				       __FUNCTION__, count);
+				return -EFAULT;
+			}
+
+			spin_lock_irqsave(&srmcons_callback_lock, flags);
+			srmcons_do_write(tty, tmp, c);
+			spin_unlock_irqrestore(&srmcons_callback_lock, flags);
+
+			buf += c;
+			count -= c;
+			ret += c;
+		}
+
+		return ret;
+	}
+
 	spin_lock_irqsave(&srmcons_callback_lock, flags);
-	srmcons_do_write(tty, (const char *) buf, count);
+	srmcons_do_write(tty, buf, count);
 	spin_unlock_irqrestore(&srmcons_callback_lock, flags);
 
 	return count;
@@ -159,26 +189,33 @@ static int
 srmcons_get_private_struct(struct srmcons_private **ps)
 {
 	static struct srmcons_private *srmconsp = NULL;
-	static DEFINE_SPINLOCK(srmconsp_lock);
+	static spinlock_t srmconsp_lock = SPIN_LOCK_UNLOCKED;
 	unsigned long flags;
 	int retval = 0;
 
-	if (srmconsp == NULL) {
-		srmconsp = kmalloc(sizeof(*srmconsp), GFP_KERNEL);
-		spin_lock_irqsave(&srmconsp_lock, flags);
+	spin_lock_irqsave(&srmconsp_lock, flags);
 
-		if (srmconsp == NULL)
-			retval = -ENOMEM;
-		else {
-			srmconsp->tty = NULL;
-			spin_lock_init(&srmconsp->lock);
-			init_timer(&srmconsp->timer);
+	do {
+		if (srmconsp != NULL) {
+			*ps = srmconsp;
+			break;
 		}
 
-		spin_unlock_irqrestore(&srmconsp_lock, flags);
-	}
+		srmconsp = kmalloc(sizeof(*srmconsp), GFP_KERNEL);
+		if (srmconsp == NULL) {
+			retval = -ENOMEM;
+			break;
+		}
 
-	*ps = srmconsp;
+		srmconsp->tty = NULL;
+		srmconsp->lock = SPIN_LOCK_UNLOCKED;
+		init_timer(&srmconsp->timer);
+
+		*ps = srmconsp;
+	} while(0);
+
+	spin_unlock_irqrestore(&srmconsp_lock, flags);
+
 	return retval;
 }
 
@@ -229,7 +266,7 @@ srmcons_close(struct tty_struct *tty, struct file *filp)
 
 static struct tty_driver *srmcons_driver;
 
-static const struct tty_operations srmcons_ops = {
+static struct tty_operations srmcons_ops = {
 	.open		= srmcons_open,
 	.close		= srmcons_close,
 	.write		= srmcons_write,
@@ -289,7 +326,7 @@ srm_console_device(struct console *co, int *index)
 	return srmcons_driver;
 }
 
-static int
+static int __init
 srm_console_setup(struct console *co, char *options)
 {
 	return 0;
@@ -300,7 +337,7 @@ static struct console srmcons = {
 	.write		= srm_console_write,
 	.device		= srm_console_device,
 	.setup		= srm_console_setup,
-	.flags		= CON_PRINTBUFFER | CON_BOOT,
+	.flags		= CON_PRINTBUFFER,
 	.index		= -1,
 };
 

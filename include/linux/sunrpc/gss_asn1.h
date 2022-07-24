@@ -69,7 +69,10 @@ u32 g_verify_token_header(
      struct xdr_netobj *mech,
      int *body_size,
      unsigned char **buf_in,
+     int tok_type,
      int toksize);
+
+u32 g_get_mech_oid(struct xdr_netobj *mech, struct xdr_netobj * in_buf);
 
 int g_token_size(
      struct xdr_netobj *mech,
@@ -78,4 +81,5 @@ int g_token_size(
 void g_make_token_header(
      struct xdr_netobj *mech,
      int body_size,
-     unsigned char **buf);
+     unsigned char **buf,
+     int tok_type);

@@ -1,42 +1,23 @@
 /*
- *    Implements HPUX syscalls.
+ * linux/arch/parisc/kernel/sys_hpux.c
  *
- *    Copyright (C) 1999 Matthew Wilcox <willy with parisc-linux.org>
- *    Copyright (C) 2000 Philipp Rumpf
- *    Copyright (C) 2000 John Marvin <jsm with parisc-linux.org>
- *    Copyright (C) 2000 Michael Ang <mang with subcarrier.org>
- *    Copyright (C) 2001 Nathan Neulinger <nneul at umr.edu>
- *
- *    This program is free software; you can redistribute it and/or modify
- *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation; either version 2 of the License, or
- *    (at your option) any later version.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU General Public License for more details.
- *
- *    You should have received a copy of the GNU General Public License
- *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ * implements HPUX syscalls.
  */
 
-#include <linux/capability.h>
-#include <linux/file.h>
 #include <linux/fs.h>
-#include <linux/namei.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/syscalls.h>
+#include <linux/smp_lock.h>
 #include <linux/utsname.h>
-#include <linux/vfs.h>
 #include <linux/vmalloc.h>
+#include <linux/vfs.h>
 
 #include <asm/errno.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
 
+unsigned long sys_brk(unsigned long addr);
+ 
 unsigned long hpux_brk(unsigned long addr)
 {
 	/* Sigh.  Looks like HP/UX libc relies on kernel bugs. */
@@ -60,13 +41,15 @@ int hpux_ptrace(void)
 	return -ENOSYS;
 }
 
-int hpux_wait(int __user *stat_loc)
+int hpux_wait(int *stat_loc)
 {
+	extern int sys_waitpid(int, int *, int);
 	return sys_waitpid(-1, stat_loc, 0);
 }
 
 int hpux_setpgrp(void)
 {
+	extern int sys_setpgid(int, int);
 	return sys_setpgid(0,0);
 }
 
@@ -134,7 +117,7 @@ struct hpux_ustat {
  *  aid in porting forward if and when sys_ustat() is changed from
  *  its form in kernel 2.2.5.
  */
-static int hpux_ustat(dev_t dev, struct hpux_ustat __user *ubuf)
+static int hpux_ustat(dev_t dev, struct hpux_ustat *ubuf)
 {
 	struct super_block *s;
 	struct hpux_ustat tmp;  /* Changed to hpux_ustat */
@@ -144,18 +127,19 @@ static int hpux_ustat(dev_t dev, struct hpux_ustat __user *ubuf)
 	s = user_get_super(dev);
 	if (s == NULL)
 		goto out;
-	err = statfs_by_dentry(s->s_root, &sbuf);
+	err = vfs_statfs(s, &sbuf);
 	drop_super(s);
 	if (err)
 		goto out;
 
-	memset(&tmp,0,sizeof(tmp));
+	memset(&tmp,0,sizeof(struct hpux_ustat));  /* Changed to hpux_ustat */
 
 	tmp.f_tfree = (int32_t)sbuf.f_bfree;
 	tmp.f_tinode = (u_int32_t)sbuf.f_ffree;
 	tmp.f_blksize = (u_int32_t)sbuf.f_bsize;  /*  Added this line  */
 
-	err = copy_to_user(ubuf, &tmp, sizeof(tmp)) ? -EFAULT : 0;
+	/* Changed to hpux_ustat:  */
+	err = copy_to_user(ubuf,&tmp,sizeof(struct hpux_ustat)) ? -EFAULT : 0;
 out:
 	return err;
 }
@@ -185,41 +169,38 @@ struct hpux_statfs {
      int16_t f_pad;
 };
 
-static int do_statfs_hpux(struct kstatfs *st, struct hpux_statfs __user *p)
-{
-	struct hpux_statfs buf;
-	memset(&buf, 0, sizeof(buf));
-	buf.f_type = st->f_type;
-	buf.f_bsize = st->f_bsize;
-	buf.f_blocks = st->f_blocks;
-	buf.f_bfree = st->f_bfree;
-	buf.f_bavail = st->f_bavail;
-	buf.f_files = st->f_files;
-	buf.f_ffree = st->f_ffree;
-	buf.f_fsid[0] = st->f_fsid.val[0];
-	buf.f_fsid[1] = st->f_fsid.val[1];
-	if (copy_to_user(p, &buf, sizeof(buf)))
-		return -EFAULT;
-	return 0;
-}
-
 /* hpux statfs */
-asmlinkage long hpux_statfs(const char __user *pathname,
-						struct hpux_statfs __user *buf)
+int hpux_statfs(const char *path, struct hpux_statfs *buf)
 {
-	struct kstatfs st;
-	int error = user_statfs(pathname, &st);
-	if (!error)
-		error = do_statfs_hpux(&st, buf);
-	return error;
-}
+	int error;
+	int len;
+	char *kpath;
 
-asmlinkage long hpux_fstatfs(unsigned int fd, struct hpux_statfs __user * buf)
-{
-	struct kstatfs st;
-	int error = fd_statfs(fd, &st);
-	if (!error)
-		error = do_statfs_hpux(&st, buf);
+	len = strlen_user((char *)path); 
+
+	kpath = (char *) kmalloc(len+1, GFP_KERNEL);
+	if ( !kpath ) {
+	printk(KERN_DEBUG "failed to kmalloc kpath\n");
+	return 0;
+	}
+
+	if ( copy_from_user(kpath, (char *)path, len+1) ) {
+	printk(KERN_DEBUG "failed to copy_from_user kpath\n");
+	kfree(kpath);
+	return 0;
+	}
+
+	printk(KERN_DEBUG "hpux_statfs(\"%s\",-)\n", kpath);
+
+	kfree(kpath);
+
+	/* just fake it, beginning of structures match */
+	extern int sys_statfs(const char *, struct statfs *);
+	error = sys_statfs(path, (struct statfs *) buf);
+
+	/* ignoring rest of statfs struct, but it should be zeros. Need to do 
+		something with f_fsid[1], which is the fstype for sysfs */
+
 	return error;
 }
 
@@ -233,7 +214,7 @@ asmlinkage long hpux_fstatfs(unsigned int fd, struct hpux_statfs __user * buf)
 /*  TODO: Are these put_user calls OK?  Should they pass an int?
  *        (I copied it from sys_i386.c like this.)
  */
-static int hpux_uname(struct hpux_utsname __user *name)
+static int hpux_uname(struct hpux_utsname *name)
 {
 	int error;
 
@@ -244,21 +225,16 @@ static int hpux_uname(struct hpux_utsname __user *name)
 
 	down_read(&uts_sem);
 
-	error = __copy_to_user(&name->sysname, &utsname()->sysname,
-			       HPUX_UTSLEN - 1);
-	error |= __put_user(0, name->sysname + HPUX_UTSLEN - 1);
-	error |= __copy_to_user(&name->nodename, &utsname()->nodename,
-				HPUX_UTSLEN - 1);
-	error |= __put_user(0, name->nodename + HPUX_UTSLEN - 1);
-	error |= __copy_to_user(&name->release, &utsname()->release,
-				HPUX_UTSLEN - 1);
-	error |= __put_user(0, name->release + HPUX_UTSLEN - 1);
-	error |= __copy_to_user(&name->version, &utsname()->version,
-				HPUX_UTSLEN - 1);
-	error |= __put_user(0, name->version + HPUX_UTSLEN - 1);
-	error |= __copy_to_user(&name->machine, &utsname()->machine,
-				HPUX_UTSLEN - 1);
-	error |= __put_user(0, name->machine + HPUX_UTSLEN - 1);
+	error = __copy_to_user(&name->sysname,&system_utsname.sysname,HPUX_UTSLEN-1);
+	error |= __put_user(0,name->sysname+HPUX_UTSLEN-1);
+	error |= __copy_to_user(&name->nodename,&system_utsname.nodename,HPUX_UTSLEN-1);
+	error |= __put_user(0,name->nodename+HPUX_UTSLEN-1);
+	error |= __copy_to_user(&name->release,&system_utsname.release,HPUX_UTSLEN-1);
+	error |= __put_user(0,name->release+HPUX_UTSLEN-1);
+	error |= __copy_to_user(&name->version,&system_utsname.version,HPUX_UTSLEN-1);
+	error |= __put_user(0,name->version+HPUX_UTSLEN-1);
+	error |= __copy_to_user(&name->machine,&system_utsname.machine,HPUX_UTSLEN-1);
+	error |= __put_user(0,name->machine+HPUX_UTSLEN-1);
 
 	up_read(&uts_sem);
 
@@ -275,17 +251,20 @@ static int hpux_uname(struct hpux_utsname __user *name)
 	return error;
 }
 
+int sys_sethostname(char *, int);
+int sys_gethostname(char *, int);
+
 /*  Note: HP-UX just uses the old suser() function to check perms
  *  in this system call.  We'll use capable(CAP_SYS_ADMIN).
  */
-int hpux_utssys(char __user *ubuf, int n, int type)
+int hpux_utssys(char *ubuf, int n, int type)
 {
 	int len;
 	int error;
 	switch( type ) {
 	case 0:
 		/*  uname():  */
-		return hpux_uname((struct hpux_utsname __user *)ubuf);
+		return( hpux_uname( (struct hpux_utsname *)ubuf ) );
 		break ;
 	case 1:
 		/*  Obsolete (used to be umask().)  */
@@ -293,9 +272,8 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 		break ;
 	case 2:
 		/*  ustat():  */
-		return hpux_ustat(new_decode_dev(n),
-				  (struct hpux_ustat __user *)ubuf);
-		break;
+		return( hpux_ustat(new_decode_dev(n), (struct hpux_ustat *)ubuf) );
+		break ;
 	case 3:
 		/*  setuname():
 		 *
@@ -311,7 +289,7 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 			return -EINVAL ;
 		/*  Unlike Linux, HP-UX truncates it if n is too big:  */
 		len = (n <= __NEW_UTS_LEN) ? n : __NEW_UTS_LEN ;
-		return sys_sethostname(ubuf, len);
+		return( sys_sethostname(ubuf, len) );
 		break ;
 	case 4:
 		/*  sethostname():
@@ -325,7 +303,7 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 			return -EINVAL ;
 		/*  Unlike Linux, HP-UX truncates it if n is too big:  */
 		len = (n <= __NEW_UTS_LEN) ? n : __NEW_UTS_LEN ;
-		return sys_sethostname(ubuf, len);
+		return( sys_sethostname(ubuf, len) );
 		break ;
 	case 5:
 		/*  gethostname():
@@ -335,7 +313,7 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 		/*  Unlike Linux, HP-UX returns an error if n==0:  */
 		if ( n <= 0 )
 			return -EINVAL ;
-		return sys_gethostname(ubuf, n);
+		return( sys_gethostname(ubuf, n) );
 		break ;
 	case 6:
 		/*  Supposedly called from setuname() in libc.
@@ -357,8 +335,8 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 		/*  TODO:  print a warning about using this?  */
 		down_write(&uts_sem);
 		error = -EFAULT;
-		if (!copy_from_user(utsname()->sysname, ubuf, len)) {
-			utsname()->sysname[len] = 0;
+		if (!copy_from_user(system_utsname.sysname, ubuf, len)) {
+			system_utsname.sysname[len] = 0;
 			error = 0;
 		}
 		up_write(&uts_sem);
@@ -384,8 +362,8 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 		/*  TODO:  print a warning about this?  */
 		down_write(&uts_sem);
 		error = -EFAULT;
-		if (!copy_from_user(utsname()->release, ubuf, len)) {
-			utsname()->release[len] = 0;
+		if (!copy_from_user(system_utsname.release, ubuf, len)) {
+			system_utsname.release[len] = 0;
 			error = 0;
 		}
 		up_write(&uts_sem);
@@ -399,20 +377,20 @@ int hpux_utssys(char __user *ubuf, int n, int type)
 	}
 }
 
-int hpux_getdomainname(char __user *name, int len)
+int hpux_getdomainname(char *name, int len)
 {
  	int nlen;
  	int err = -EFAULT;
  	
  	down_read(&uts_sem);
  	
-	nlen = strlen(utsname()->domainname) + 1;
+	nlen = strlen(system_utsname.domainname) + 1;
 
 	if (nlen < len)
 		len = nlen;
 	if(len > __NEW_UTS_LEN)
 		goto done;
-	if(copy_to_user(name, utsname()->domainname, len))
+	if(copy_to_user(name, system_utsname.domainname, len))
 		goto done;
 	err = 0;
 done:
@@ -423,7 +401,12 @@ done:
 
 int hpux_pipe(int *kstack_fildes)
 {
-	return do_pipe_flags(kstack_fildes, 0);
+	int error;
+
+	lock_kernel();
+	error = do_pipe(kstack_fildes);
+	unlock_kernel();
+	return error;
 }
 
 /* lies - says it works, but it really didn't lock anything */
@@ -445,32 +428,27 @@ int hpux_sysfs(int opcode, unsigned long arg1, unsigned long arg2)
 	printk(KERN_DEBUG "hpux_sysfs called with arg1='%lx'\n", arg1);
 
 	if ( opcode == 1 ) { /* GETFSIND */	
-		char __user *user_fsname = (char __user *)arg1;
-		len = strlen_user(user_fsname);
+		len = strlen_user((char *)arg1);
 		printk(KERN_DEBUG "len of arg1 = %d\n", len);
-		if (len == 0)
-			return 0;
-		fsname = kmalloc(len, GFP_KERNEL);
-		if (!fsname) {
+
+		fsname = (char *) kmalloc(len+1, GFP_KERNEL);
+		if ( !fsname ) {
 			printk(KERN_DEBUG "failed to kmalloc fsname\n");
 			return 0;
 		}
 
-		if (copy_from_user(fsname, user_fsname, len)) {
+		if ( copy_from_user(fsname, (char *)arg1, len+1) ) {
 			printk(KERN_DEBUG "failed to copy_from_user fsname\n");
 			kfree(fsname);
 			return 0;
 		}
-
-		/* String could be altered by userspace after strlen_user() */
-		fsname[len] = '\0';
 
 		printk(KERN_DEBUG "that is '%s' as (char *)\n", fsname);
 		if ( !strcmp(fsname, "hfs") ) {
 			fstype = 0;
 		} else {
 			fstype = 0;
-		}
+		};
 
 		kfree(fsname);
 
@@ -484,7 +462,7 @@ int hpux_sysfs(int opcode, unsigned long arg1, unsigned long arg2)
 
 
 /* Table of syscall names and handle for unimplemented routines */
-static const char * const syscall_names[] = {
+static const char *syscall_names[] = {
 	"nosys",                  /* 0 */
 	"exit",                  
 	"fork",                  
@@ -681,8 +659,8 @@ static const char * const syscall_names[] = {
 	"setdomainname",         
 	"async_daemon",          
 	"getdirentries",          /* 195 */
-	NULL,                
-	NULL,               
+	"statfs",                
+	"fstatfs",               
 	"vfsmount",              
 	NULL,                    
 	"waitpid",                /* 200 */

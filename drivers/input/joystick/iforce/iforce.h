@@ -1,6 +1,8 @@
 /*
+ * $Id: iforce.h,v 1.13 2002/07/07 10:22:50 jdeneux Exp $
+ *
  *  Copyright (c) 2000-2002 Vojtech Pavlik <vojtech@ucw.cz>
- *  Copyright (c) 2001-2002, 2007 Johann Deneux <johann.deneux@gmail.com>
+ *  Copyright (c) 2001-2002 Johann Deneux <deneux@ifrance.com>
  *
  *  USB/RS232 I-Force joysticks and wheels.
  */
@@ -33,8 +35,9 @@
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/serio.h>
+#include <linux/config.h>
 #include <linux/circ_buf.h>
-#include <linux/mutex.h>
+#include <asm/semaphore.h>
 
 /* This module provides arbitrary resource management routines.
  * I use it to manage the device's memory.
@@ -42,14 +45,16 @@
  */
 #include <linux/ioport.h>
 
-
 #define IFORCE_MAX_LENGTH	16
 
 /* iforce::bus */
 #define IFORCE_232	1
 #define IFORCE_USB	2
 
-#define IFORCE_EFFECTS_MAX	32
+#define FALSE 0
+#define TRUE 1
+
+#define FF_EFFECTS_MAX	32
 
 /* Each force feedback effect is made of one core effect, which can be
  * associated to at most to effect modifiers
@@ -60,13 +65,26 @@
 #define FF_CORE_IS_PLAYED	3	/* Effect is currently being played */
 #define FF_CORE_SHOULD_PLAY	4	/* User wants the effect to be played */
 #define FF_CORE_UPDATE		5	/* Effect is being updated */
-#define FF_MODCORE_CNT		6
+#define FF_MODCORE_MAX		5
+
+#define CHECK_OWNERSHIP(i, iforce)	\
+	((i) < FF_EFFECTS_MAX && i >= 0 && \
+	test_bit(FF_CORE_IS_USED, (iforce)->core_effects[(i)].flags) && \
+	(current->pid == 0 || \
+	(iforce)->core_effects[(i)].owner == current->pid))
 
 struct iforce_core_effect {
 	/* Information about where modifiers are stored in the device's memory */
 	struct resource mod1_chunk;
 	struct resource mod2_chunk;
-	unsigned long flags[BITS_TO_LONGS(FF_MODCORE_CNT)];
+	unsigned long flags[NBITS(FF_MODCORE_MAX)];
+	pid_t owner;
+	/* Used to keep track of parameters of an effect. They are needed
+	 * to know what parts of an effect changed in an update operation.
+	 * We try to send only parameter packets if possible, as sending
+	 * effect parameter requires the effect to be stoped and restarted
+	 */
+	struct ff_effect effect;
 };
 
 #define FF_CMD_EFFECT		0x010e
@@ -99,7 +117,7 @@ struct iforce_device {
 };
 
 struct iforce {
-	struct input_dev *dev;		/* Input device interface */
+	struct input_dev dev;		/* Input device interface */
 	struct iforce_device *type;
 	int bus;
 
@@ -122,13 +140,13 @@ struct iforce {
 	/* Buffer used for asynchronous sending of bytes to the device */
 	struct circ_buf xmit;
 	unsigned char xmit_data[XMIT_SIZE];
-	unsigned long xmit_flags[1];
-
+	long xmit_flags[1];
+	
 					/* Force Feedback */
 	wait_queue_head_t wait;
 	struct resource device_memory;
-	struct iforce_core_effect core_effects[IFORCE_EFFECTS_MAX];
-	struct mutex mem_mutex;
+	struct iforce_core_effect core_effects[FF_EFFECTS_MAX];
+	struct semaphore mem_mutex;
 };
 
 /* Get hi and low bytes of a 16-bits int */
@@ -150,22 +168,24 @@ void iforce_serial_xmit(struct iforce *iforce);
 
 /* iforce-usb.c */
 void iforce_usb_xmit(struct iforce *iforce);
+void iforce_usb_delete(struct iforce *iforce);
 
 /* iforce-main.c */
 int iforce_init_device(struct iforce *iforce);
+void iforce_delete_device(struct iforce *iforce);
 
 /* iforce-packets.c */
 int iforce_control_playback(struct iforce*, u16 id, unsigned int);
-void iforce_process_packet(struct iforce *iforce, u16 cmd, unsigned char *data);
+void iforce_process_packet(struct iforce *iforce, u16 cmd, unsigned char *data, struct pt_regs *regs);
 int iforce_send_packet(struct iforce *iforce, u16 cmd, unsigned char* data);
 void iforce_dump_packet(char *msg, u16 cmd, unsigned char *data) ;
 int iforce_get_id_packet(struct iforce *iforce, char *packet);
 
 /* iforce-ff.c */
-int iforce_upload_periodic(struct iforce *, struct ff_effect *, struct ff_effect *);
-int iforce_upload_constant(struct iforce *, struct ff_effect *, struct ff_effect *);
-int iforce_upload_condition(struct iforce *, struct ff_effect *, struct ff_effect *);
+int iforce_upload_periodic(struct iforce*, struct ff_effect*, int is_update);
+int iforce_upload_constant(struct iforce*, struct ff_effect*, int is_update);
+int iforce_upload_condition(struct iforce*, struct ff_effect*, int is_update);
 
 /* Public variables */
-extern struct serio_driver iforce_serio_drv;
+extern struct serio_dev iforce_serio_dev;
 extern struct usb_driver iforce_usb_driver;

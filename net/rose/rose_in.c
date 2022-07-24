@@ -16,6 +16,7 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -25,7 +26,8 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp_states.h>
+#include <net/ip.h>			/* For ip_rcv */
+#include <net/tcp.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
@@ -39,7 +41,7 @@
  */
 static int rose_state1_machine(struct sock *sk, struct sk_buff *skb, int frametype)
 {
-	struct rose_sock *rose = rose_sk(sk);
+	rose_cb *rose = rose_sk(sk);
 
 	switch (frametype) {
 	case ROSE_CALL_ACCEPTED:
@@ -76,7 +78,7 @@ static int rose_state1_machine(struct sock *sk, struct sk_buff *skb, int framety
  */
 static int rose_state2_machine(struct sock *sk, struct sk_buff *skb, int frametype)
 {
-	struct rose_sock *rose = rose_sk(sk);
+	rose_cb *rose = rose_sk(sk);
 
 	switch (frametype) {
 	case ROSE_CLEAR_REQUEST:
@@ -104,7 +106,7 @@ static int rose_state2_machine(struct sock *sk, struct sk_buff *skb, int framety
  */
 static int rose_state3_machine(struct sock *sk, struct sk_buff *skb, int frametype, int ns, int nr, int q, int d, int m)
 {
-	struct rose_sock *rose = rose_sk(sk);
+	rose_cb *rose = rose_sk(sk);
 	int queued = 0;
 
 	switch (frametype) {
@@ -182,7 +184,7 @@ static int rose_state3_machine(struct sock *sk, struct sk_buff *skb, int framety
 				break;
 			}
 			if (atomic_read(&sk->sk_rmem_alloc) >
-			    (sk->sk_rcvbuf >> 1))
+			    (sk->sk_rcvbuf / 2))
 				rose->condition |= ROSE_COND_OWN_RX_BUSY;
 		}
 		/*
@@ -214,7 +216,7 @@ static int rose_state3_machine(struct sock *sk, struct sk_buff *skb, int framety
  */
 static int rose_state4_machine(struct sock *sk, struct sk_buff *skb, int frametype)
 {
-	struct rose_sock *rose = rose_sk(sk);
+	rose_cb *rose = rose_sk(sk);
 
 	switch (frametype) {
 	case ROSE_RESET_REQUEST:
@@ -263,7 +265,7 @@ static int rose_state5_machine(struct sock *sk, struct sk_buff *skb, int framety
 /* Higher level upcall for a LAPB frame */
 int rose_process_rx_frame(struct sock *sk, struct sk_buff *skb)
 {
-	struct rose_sock *rose = rose_sk(sk);
+	rose_cb *rose = rose_sk(sk);
 	int queued = 0, frametype, ns, nr, q, d, m;
 
 	if (rose->state == ROSE_STATE_0)

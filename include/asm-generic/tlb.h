@@ -1,4 +1,4 @@
-/* include/asm-generic/tlb.h
+/* asm-generic/tlb.h
  *
  *	Generic TLB shootdown code
  *
@@ -13,8 +13,8 @@
 #ifndef _ASM_GENERIC__TLB_H
 #define _ASM_GENERIC__TLB_H
 
+#include <linux/config.h>
 #include <linux/swap.h>
-#include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 
 /*
@@ -22,11 +22,7 @@
  * and page free order so much..
  */
 #ifdef CONFIG_SMP
-  #ifdef ARCH_FREE_PTR_NR
-    #define FREE_PTR_NR   ARCH_FREE_PTR_NR
-  #else
-    #define FREE_PTE_NR	506
-  #endif
+  #define FREE_PTE_NR	506
   #define tlb_fast_mode(tlb) ((tlb)->nr == ~0U)
 #else
   #define FREE_PTE_NR	1
@@ -34,13 +30,16 @@
 #endif
 
 /* struct mmu_gather is an opaque type used by the mm code for passing around
- * any data needed by arch specific code for tlb_remove_page.
+ * any data needed by arch specific code for tlb_remove_page.  This structure
+ * can be per-CPU or per-MM as the page table lock is held for the duration of
+ * TLB shootdown.
  */
 struct mmu_gather {
 	struct mm_struct	*mm;
 	unsigned int		nr;	/* set to ~0U means fast mode */
 	unsigned int		need_flush;/* Really unmapped some ptes? */
 	unsigned int		fullmm; /* non-zero means full mm flush */
+	unsigned long		freed;
 	struct page *		pages[FREE_PTE_NR];
 };
 
@@ -53,7 +52,7 @@ DECLARE_PER_CPU(struct mmu_gather, mmu_gathers);
 static inline struct mmu_gather *
 tlb_gather_mmu(struct mm_struct *mm, unsigned int full_mm_flush)
 {
-	struct mmu_gather *tlb = &get_cpu_var(mmu_gathers);
+	struct mmu_gather *tlb = &per_cpu(mmu_gathers, smp_processor_id());
 
 	tlb->mm = mm;
 
@@ -61,6 +60,7 @@ tlb_gather_mmu(struct mm_struct *mm, unsigned int full_mm_flush)
 	tlb->nr = num_online_cpus() > 1 ? 0U : ~0U;
 
 	tlb->fullmm = full_mm_flush;
+	tlb->freed = 0;
 
 	return tlb;
 }
@@ -80,18 +80,24 @@ tlb_flush_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long end)
 
 /* tlb_finish_mmu
  *	Called at the end of the shootdown operation to free up any resources
- *	that were required.
+ *	that were required.  The page table lock is still held at this point.
  */
 static inline void
 tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long end)
 {
+	int freed = tlb->freed;
+	struct mm_struct *mm = tlb->mm;
+	int rss = mm->rss;
+
+	if (rss < freed)
+		freed = rss;
+	mm->rss = rss - freed;
 	tlb_flush_mmu(tlb, start, end);
 
 	/* keep the page table cache within bounds */
 	check_pgt_cache();
-
-	put_cpu_var(mmu_gathers);
 }
+
 
 /* tlb_remove_page
  *	Must perform the equivalent to __free_pte(pte_get_and_clear(ptep)), while
@@ -123,26 +129,16 @@ static inline void tlb_remove_page(struct mmu_gather *tlb, struct page *page)
 		__tlb_remove_tlb_entry(tlb, ptep, address);	\
 	} while (0)
 
-#define pte_free_tlb(tlb, ptep, address)			\
+#define pte_free_tlb(tlb, ptep)					\
 	do {							\
 		tlb->need_flush = 1;				\
-		__pte_free_tlb(tlb, ptep, address);		\
+		__pte_free_tlb(tlb, ptep);			\
 	} while (0)
 
-#ifndef __ARCH_HAS_4LEVEL_HACK
-#define pud_free_tlb(tlb, pudp, address)			\
+#define pmd_free_tlb(tlb, pmdp)					\
 	do {							\
 		tlb->need_flush = 1;				\
-		__pud_free_tlb(tlb, pudp, address);		\
+		__pmd_free_tlb(tlb, pmdp);			\
 	} while (0)
-#endif
-
-#define pmd_free_tlb(tlb, pmdp, address)			\
-	do {							\
-		tlb->need_flush = 1;				\
-		__pmd_free_tlb(tlb, pmdp, address);		\
-	} while (0)
-
-#define tlb_migrate_finish(mm) do {} while (0)
 
 #endif /* _ASM_GENERIC__TLB_H */

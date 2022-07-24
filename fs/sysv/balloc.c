@@ -27,23 +27,23 @@
    sb->sv_sbd2->s_tfree = *sb->sv_free_blocks
    but we nevertheless keep it up to date. */
 
-static inline sysv_zone_t *get_chunk(struct super_block *sb, struct buffer_head *bh)
+static inline u32 *get_chunk(struct super_block *sb, struct buffer_head *bh)
 {
 	char *bh_data = bh->b_data;
 
 	if (SYSV_SB(sb)->s_type == FSTYPE_SYSV4)
-		return (sysv_zone_t*)(bh_data+4);
+		return (u32*)(bh_data+4);
 	else
-		return (sysv_zone_t*)(bh_data+2);
+		return (u32*)(bh_data+2);
 }
 
 /* NOTE NOTE NOTE: nr is a block number _as_ _stored_ _on_ _disk_ */
 
-void sysv_free_block(struct super_block * sb, sysv_zone_t nr)
+void sysv_free_block(struct super_block * sb, u32 nr)
 {
 	struct sysv_sb_info * sbi = SYSV_SB(sb);
 	struct buffer_head * bh;
-	sysv_zone_t *blocks = sbi->s_bcache;
+	u32 *blocks = sbi->s_bcache;
 	unsigned count;
 	unsigned block = fs32_to_cpu(sbi, nr);
 
@@ -81,7 +81,7 @@ void sysv_free_block(struct super_block * sb, sysv_zone_t nr)
 			return;
 		}
 		memset(bh->b_data, 0, sb->s_blocksize);
-		*(__fs16*)bh->b_data = cpu_to_fs16(sbi, count);
+		*(u16*)bh->b_data = cpu_to_fs16(sbi, count);
 		memcpy(get_chunk(sb,bh), blocks, count * sizeof(sysv_zone_t));
 		mark_buffer_dirty(bh);
 		set_buffer_uptodate(bh);
@@ -96,11 +96,11 @@ void sysv_free_block(struct super_block * sb, sysv_zone_t nr)
 	unlock_super(sb);
 }
 
-sysv_zone_t sysv_new_block(struct super_block * sb)
+u32 sysv_new_block(struct super_block * sb)
 {
 	struct sysv_sb_info *sbi = SYSV_SB(sb);
 	unsigned int block;
-	sysv_zone_t nr;
+	u32 nr;
 	struct buffer_head * bh;
 	unsigned count;
 
@@ -133,7 +133,7 @@ sysv_zone_t sysv_new_block(struct super_block * sb)
 			*sbi->s_bcache_count = cpu_to_fs16(sbi, 1);
 			goto Enospc;
 		}
-		count = fs16_to_cpu(sbi, *(__fs16*)bh->b_data);
+		count = fs16_to_cpu(sbi, *(u16*)bh->b_data);
 		if (count > sbi->s_flc_size) {
 			printk("sysv_new_block: free-list block with >flc_size entries\n");
 			brelse(bh);
@@ -161,7 +161,7 @@ unsigned long sysv_count_free_blocks(struct super_block * sb)
 	int sb_count;
 	int count;
 	struct buffer_head * bh = NULL;
-	sysv_zone_t *blocks;
+	u32 *blocks;
 	unsigned block;
 	int n;
 
@@ -184,16 +184,15 @@ unsigned long sysv_count_free_blocks(struct super_block * sb)
 	n = fs16_to_cpu(sbi, *sbi->s_bcache_count);
 	blocks = sbi->s_bcache;
 	while (1) {
-		sysv_zone_t zone;
 		if (n > sbi->s_flc_size)
 			goto E2big;
-		zone = 0;
-		while (n && (zone = blocks[--n]) != 0)
+		block = 0;
+		while (n && (block = blocks[--n]) != 0)
 			count++;
-		if (zone == 0)
+		if (block == 0)
 			break;
 
-		block = fs32_to_cpu(sbi, zone);
+		block = fs32_to_cpu(sbi, block);
 		if (bh)
 			brelse(bh);
 
@@ -203,7 +202,7 @@ unsigned long sysv_count_free_blocks(struct super_block * sb)
 		bh = sb_bread(sb, block);
 		if (!bh)
 			goto Eio;
-		n = fs16_to_cpu(sbi, *(__fs16*)bh->b_data);
+		n = fs16_to_cpu(sbi, *(u16*)bh->b_data);
 		blocks = get_chunk(sb, bh);
 	}
 	if (bh)

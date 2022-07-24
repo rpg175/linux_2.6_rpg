@@ -7,7 +7,7 @@
  * Adapted for booting Linux by Hannu Savolainen 1993
  * based on gzip-1.0.3 
  *
- * Nicolas Pitre <nico@fluxnic.net>, 1999/04/14 :
+ * Nicolas Pitre <nico@cam.org>, 1999/04/14 :
  *   Little mods for all variable to reside either into rodata or bss segments
  *   by marking constant variables with 'const' and initializing all the others
  *   at run-time only.  This allows for the kernel uncompressor to run
@@ -102,10 +102,6 @@
       a repeat code (16, 17, or 18) to go across the boundary between
       the two sets of lengths.
  */
-#include <linux/compiler.h>
-#ifdef NO_INFLATE_MALLOC
-#include <linux/slab.h>
-#endif
 
 #ifdef RCSID
 static char rcsid[] = "#Id: inflate.c,v 0.14 1993/06/10 13:27:04 jloup Exp #";
@@ -121,10 +117,6 @@ static char rcsid[] = "#Id: inflate.c,v 0.14 1993/06/10 13:27:04 jloup Exp #";
 #include "gzip.h"
 #define STATIC
 #endif /* !STATIC */
-
-#ifndef INIT
-#define INIT
-#endif
 	
 #define slide window
 
@@ -146,15 +138,15 @@ struct huft {
 
 
 /* Function prototypes */
-STATIC int INIT huft_build OF((unsigned *, unsigned, unsigned, 
+STATIC int huft_build OF((unsigned *, unsigned, unsigned, 
 		const ush *, const ush *, struct huft **, int *));
-STATIC int INIT huft_free OF((struct huft *));
-STATIC int INIT inflate_codes OF((struct huft *, struct huft *, int, int));
-STATIC int INIT inflate_stored OF((void));
-STATIC int INIT inflate_fixed OF((void));
-STATIC int INIT inflate_dynamic OF((void));
-STATIC int INIT inflate_block OF((int *));
-STATIC int INIT inflate OF((void));
+STATIC int huft_free OF((struct huft *));
+STATIC int inflate_codes OF((struct huft *, struct huft *, int, int));
+STATIC int inflate_stored OF((void));
+STATIC int inflate_fixed OF((void));
+STATIC int inflate_dynamic OF((void));
+STATIC int inflate_block OF((int *));
+STATIC int inflate OF((void));
 
 
 /* The inflate algorithm uses a sliding 32 K byte window on the uncompressed
@@ -229,49 +221,10 @@ STATIC const ush mask_bits[] = {
     0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff, 0xffff
 };
 
-#define NEXTBYTE()  ({ int v = get_byte(); if (v < 0) goto underrun; (uch)v; })
+#define NEXTBYTE()  (uch)get_byte()
 #define NEEDBITS(n) {while(k<(n)){b|=((ulg)NEXTBYTE())<<k;k+=8;}}
 #define DUMPBITS(n) {b>>=(n);k-=(n);}
 
-#ifndef NO_INFLATE_MALLOC
-/* A trivial malloc implementation, adapted from
- *  malloc by Hannu Savolainen 1993 and Matthias Urlichs 1994
- */
-
-static unsigned long malloc_ptr;
-static int malloc_count;
-
-static void *malloc(int size)
-{
-       void *p;
-
-       if (size < 0)
-		error("Malloc error");
-       if (!malloc_ptr)
-		malloc_ptr = free_mem_ptr;
-
-       malloc_ptr = (malloc_ptr + 3) & ~3;     /* Align */
-
-       p = (void *)malloc_ptr;
-       malloc_ptr += size;
-
-       if (free_mem_end_ptr && malloc_ptr >= free_mem_end_ptr)
-		error("Out of memory");
-
-       malloc_count++;
-       return p;
-}
-
-static void free(void *where)
-{
-       malloc_count--;
-       if (!malloc_count)
-		malloc_ptr = free_mem_ptr;
-}
-#else
-#define malloc(a) kmalloc(a, GFP_KERNEL)
-#define free(a) kfree(a)
-#endif
 
 /*
    Huffman code decoding is performed using a multi-level table lookup.
@@ -318,7 +271,7 @@ STATIC const int dbits = 6;          /* bits in base distance lookup table */
 STATIC unsigned hufts;         /* track memory usage */
 
 
-STATIC int INIT huft_build(
+STATIC int huft_build(
 	unsigned *b,            /* code lengths in bits (all assumed <= BMAX) */
 	unsigned n,             /* number of codes (assumed <= N_MAX) */
 	unsigned s,             /* number of simple-valued codes (0..s-1) */
@@ -334,6 +287,7 @@ STATIC int INIT huft_build(
    oversubscribed set of lengths), and three if not enough memory. */
 {
   unsigned a;                   /* counter for codes of length k */
+  unsigned c[BMAX+1];           /* bit length count table */
   unsigned f;                   /* i repeats in table every f entries */
   int g;                        /* maximum code length */
   int h;                        /* table level */
@@ -344,33 +298,18 @@ STATIC int INIT huft_build(
   register unsigned *p;         /* pointer into c[], b[], or v[] */
   register struct huft *q;      /* points to current table */
   struct huft r;                /* table entry for structure assignment */
+  struct huft *u[BMAX];         /* table stack */
+  unsigned v[N_MAX];            /* values in order of bit length */
   register int w;               /* bits before this table == (l * h) */
+  unsigned x[BMAX+1];           /* bit offsets, then code stack */
   unsigned *xp;                 /* pointer into x */
   int y;                        /* number of dummy codes added */
   unsigned z;                   /* number of entries in current table */
-  struct {
-    unsigned c[BMAX+1];           /* bit length count table */
-    struct huft *u[BMAX];         /* table stack */
-    unsigned v[N_MAX];            /* values in order of bit length */
-    unsigned x[BMAX+1];           /* bit offsets, then code stack */
-  } *stk;
-  unsigned *c, *v, *x;
-  struct huft **u;
-  int ret;
 
 DEBG("huft1 ");
 
-  stk = malloc(sizeof(*stk));
-  if (stk == NULL)
-    return 3;			/* out of memory */
-
-  c = stk->c;
-  v = stk->v;
-  x = stk->x;
-  u = stk->u;
-
   /* Generate counts for each bit length */
-  memzero(stk->c, sizeof(stk->c));
+  memzero(c, sizeof(c));
   p = b;  i = n;
   do {
     Tracecv(*p, (stderr, (n-i >= ' ' && n-i <= '~' ? "%c %d\n" : "0x%x %d\n"), 
@@ -382,8 +321,7 @@ DEBG("huft1 ");
   {
     *t = (struct huft *)NULL;
     *m = 0;
-    ret = 2;
-    goto out;
+    return 0;
   }
 
 DEBG("huft2 ");
@@ -408,14 +346,10 @@ DEBG("huft3 ");
 
   /* Adjust last length count to fill out codes, if needed */
   for (y = 1 << j; j < i; j++, y <<= 1)
-    if ((y -= c[j]) < 0) {
-      ret = 2;                 /* bad input: more codes than bits */
-      goto out;
-    }
-  if ((y -= c[i]) < 0) {
-    ret = 2;
-    goto out;
-  }
+    if ((y -= c[j]) < 0)
+      return 2;                 /* bad input: more codes than bits */
+  if ((y -= c[i]) < 0)
+    return 2;
   c[i] += y;
 
 DEBG("huft4 ");
@@ -435,7 +369,6 @@ DEBG("huft5 ");
     if ((j = *p++) != 0)
       v[x[j]++] = i;
   } while (++i < n);
-  n = x[g];                   /* set n to length of v */
 
 DEBG("h6 ");
 
@@ -472,13 +405,12 @@ DEBG1("1 ");
 DEBG1("2 ");
           f -= a + 1;           /* deduct codes from patterns left */
           xp = c + k;
-          if (j < z)
-            while (++j < z)       /* try smaller tables up to z bits */
-            {
-              if ((f <<= 1) <= *++xp)
-                break;            /* enough codes to use up j bits */
-              f -= *xp;           /* else deduct codes from patterns */
-            }
+          while (++j < z)       /* try smaller tables up to z bits */
+          {
+            if ((f <<= 1) <= *++xp)
+              break;            /* enough codes to use up j bits */
+            f -= *xp;           /* else deduct codes from patterns */
+          }
         }
 DEBG1("3 ");
         z = 1 << j;             /* table entries for j-bit table */
@@ -489,8 +421,7 @@ DEBG1("3 ");
         {
           if (h)
             huft_free(u[0]);
-          ret = 3;             /* not enough memory */
-	  goto out;
+          return 3;             /* not enough memory */
         }
 DEBG1("4 ");
         hufts += z + 1;         /* track memory usage */
@@ -554,16 +485,12 @@ DEBG("h6f ");
 DEBG("huft7 ");
 
   /* Return true (1) if we were given an incomplete table */
-  ret = y != 0 && g != 1;
-
-  out:
-  free(stk);
-  return ret;
+  return y != 0 && g != 1;
 }
 
 
 
-STATIC int INIT huft_free(
+STATIC int huft_free(
 	struct huft *t         /* table to free */
 	)
 /* Free the malloc'ed tables built by huft_build(), which makes a linked
@@ -585,7 +512,7 @@ STATIC int INIT huft_free(
 }
 
 
-STATIC int INIT inflate_codes(
+STATIC int inflate_codes(
 	struct huft *tl,    /* literal/length decoder tables */
 	struct huft *td,    /* distance decoder tables */
 	int bl,             /* number of bits decoded by tl[] */
@@ -693,14 +620,11 @@ STATIC int INIT inflate_codes(
 
   /* done */
   return 0;
-
- underrun:
-  return 4;			/* Input underrun */
 }
 
 
 
-STATIC int INIT inflate_stored(void)
+STATIC int inflate_stored(void)
 /* "decompress" an inflated type 0 (stored) block. */
 {
   unsigned n;           /* number of bytes in block */
@@ -752,16 +676,11 @@ DEBG("<stor");
 
   DEBG(">");
   return 0;
-
- underrun:
-  return 4;			/* Input underrun */
 }
 
 
-/*
- * We use `noinline' here to prevent gcc-3.5 from using too much stack space
- */
-STATIC int noinline INIT inflate_fixed(void)
+
+STATIC int inflate_fixed(void)
 /* decompress an inflated type 1 (fixed Huffman codes) block.  We should
    either replace this with a custom decoder, or at least precompute the
    Huffman tables. */
@@ -771,13 +690,9 @@ STATIC int noinline INIT inflate_fixed(void)
   struct huft *td;      /* distance code table */
   int bl;               /* lookup bits for tl */
   int bd;               /* lookup bits for td */
-  unsigned *l;          /* length list for huft_build */
+  unsigned l[288];      /* length list for huft_build */
 
 DEBG("<fix");
-
-  l = malloc(sizeof(*l) * 288);
-  if (l == NULL)
-    return 3;			/* out of memory */
 
   /* set up literal table */
   for (i = 0; i < 144; i++)
@@ -789,10 +704,9 @@ DEBG("<fix");
   for (; i < 288; i++)          /* make a complete, but wrong code set */
     l[i] = 8;
   bl = 7;
-  if ((i = huft_build(l, 288, 257, cplens, cplext, &tl, &bl)) != 0) {
-    free(l);
+  if ((i = huft_build(l, 288, 257, cplens, cplext, &tl, &bl)) != 0)
     return i;
-  }
+
 
   /* set up distance table */
   for (i = 0; i < 30; i++)      /* make an incomplete code set */
@@ -801,7 +715,6 @@ DEBG("<fix");
   if ((i = huft_build(l, 30, 0, cpdist, cpdext, &td, &bd)) > 1)
   {
     huft_free(tl);
-    free(l);
 
     DEBG(">");
     return i;
@@ -809,23 +722,19 @@ DEBG("<fix");
 
 
   /* decompress until an end-of-block code */
-  if (inflate_codes(tl, td, bl, bd)) {
-    free(l);
+  if (inflate_codes(tl, td, bl, bd))
     return 1;
-  }
+
 
   /* free the decoding tables, return */
-  free(l);
   huft_free(tl);
   huft_free(td);
   return 0;
 }
 
 
-/*
- * We use `noinline' here to prevent gcc-3.5 from using too much stack space
- */
-STATIC int noinline INIT inflate_dynamic(void)
+
+STATIC int inflate_dynamic(void)
 /* decompress an inflated type 2 (dynamic Huffman codes) block. */
 {
   int i;                /* temporary variables */
@@ -840,21 +749,15 @@ STATIC int noinline INIT inflate_dynamic(void)
   unsigned nb;          /* number of bit length codes */
   unsigned nl;          /* number of literal/length codes */
   unsigned nd;          /* number of distance codes */
-  unsigned *ll;         /* literal/length and distance code lengths */
+#ifdef PKZIP_BUG_WORKAROUND
+  unsigned ll[288+32];  /* literal/length and distance code lengths */
+#else
+  unsigned ll[286+30];  /* literal/length and distance code lengths */
+#endif
   register ulg b;       /* bit buffer */
   register unsigned k;  /* number of bits in bit buffer */
-  int ret;
 
 DEBG("<dyn");
-
-#ifdef PKZIP_BUG_WORKAROUND
-  ll = malloc(sizeof(*ll) * (288+32));  /* literal/length and distance code lengths */
-#else
-  ll = malloc(sizeof(*ll) * (286+30));  /* literal/length and distance code lengths */
-#endif
-
-  if (ll == NULL)
-    return 1;
 
   /* make local bit buffer */
   b = bb;
@@ -876,10 +779,7 @@ DEBG("<dyn");
 #else
   if (nl > 286 || nd > 30)
 #endif
-  {
-    ret = 1;             /* bad lengths */
-    goto out;
-  }
+    return 1;                   /* bad lengths */
 
 DEBG("dyn1 ");
 
@@ -901,8 +801,7 @@ DEBG("dyn2 ");
   {
     if (i == 1)
       huft_free(tl);
-    ret = i;                   /* incomplete code set */
-    goto out;
+    return i;                   /* incomplete code set */
   }
 
 DEBG("dyn3 ");
@@ -924,10 +823,8 @@ DEBG("dyn3 ");
       NEEDBITS(2)
       j = 3 + ((unsigned)b & 3);
       DUMPBITS(2)
-      if ((unsigned)i + j > n) {
-        ret = 1;
-	goto out;
-      }
+      if ((unsigned)i + j > n)
+        return 1;
       while (j--)
         ll[i++] = l;
     }
@@ -936,10 +833,8 @@ DEBG("dyn3 ");
       NEEDBITS(3)
       j = 3 + ((unsigned)b & 7);
       DUMPBITS(3)
-      if ((unsigned)i + j > n) {
-        ret = 1;
-	goto out;
-      }
+      if ((unsigned)i + j > n)
+        return 1;
       while (j--)
         ll[i++] = 0;
       l = 0;
@@ -949,10 +844,8 @@ DEBG("dyn3 ");
       NEEDBITS(7)
       j = 11 + ((unsigned)b & 0x7f);
       DUMPBITS(7)
-      if ((unsigned)i + j > n) {
-        ret = 1;
-	goto out;
-      }
+      if ((unsigned)i + j > n)
+        return 1;
       while (j--)
         ll[i++] = 0;
       l = 0;
@@ -981,8 +874,7 @@ DEBG("dyn5b ");
       error("incomplete literal tree");
       huft_free(tl);
     }
-    ret = i;                   /* incomplete code set */
-    goto out;
+    return i;                   /* incomplete code set */
   }
 DEBG("dyn5c ");
   bd = dbits;
@@ -998,18 +890,15 @@ DEBG("dyn5d ");
       huft_free(td);
     }
     huft_free(tl);
-    ret = i;                   /* incomplete code set */
-    goto out;
+    return i;                   /* incomplete code set */
 #endif
   }
 
 DEBG("dyn6 ");
 
   /* decompress until an end-of-block code */
-  if (inflate_codes(tl, td, bl, bd)) {
-    ret = 1;
-    goto out;
-  }
+  if (inflate_codes(tl, td, bl, bd))
+    return 1;
 
 DEBG("dyn7 ");
 
@@ -1018,19 +907,12 @@ DEBG("dyn7 ");
   huft_free(td);
 
   DEBG(">");
-  ret = 0;
-out:
-  free(ll);
-  return ret;
-
-underrun:
-  ret = 4;			/* Input underrun */
-  goto out;
+  return 0;
 }
 
 
 
-STATIC int INIT inflate_block(
+STATIC int inflate_block(
 	int *e                  /* last block flag */
 	)
 /* decompress an inflated block */
@@ -1074,19 +956,17 @@ STATIC int INIT inflate_block(
 
   /* bad block type */
   return 2;
-
- underrun:
-  return 4;			/* Input underrun */
 }
 
 
 
-STATIC int INIT inflate(void)
+STATIC int inflate(void)
 /* decompress an inflated entry */
 {
   int e;                /* last block flag */
   int r;                /* result code */
   unsigned h;           /* maximum struct huft's malloc'ed */
+  void *ptr;
 
   /* initialize window, bit buffer */
   wp = 0;
@@ -1098,12 +978,12 @@ STATIC int INIT inflate(void)
   h = 0;
   do {
     hufts = 0;
-#ifdef ARCH_HAS_DECOMP_WDOG
-    arch_decomp_wdog();
-#endif
-    r = inflate_block(&e);
-    if (r)
-	    return r;
+    gzip_mark(&ptr);
+    if ((r = inflate_block(&e)) != 0) {
+      gzip_release(&ptr);	    
+      return r;
+    }
+    gzip_release(&ptr);
     if (hufts > h)
       h = hufts;
   } while (!e);
@@ -1142,7 +1022,7 @@ static ulg crc;		/* initialized in makecrc() so it'll reside in bss */
  * gzip-1.0.3/makecrc.c.
  */
 
-static void INIT
+static void
 makecrc(void)
 {
 /* Not copyrighted 1990 Mark Adler	*/
@@ -1190,7 +1070,7 @@ makecrc(void)
 /*
  * Do the uncompression!
  */
-static int INIT gunzip(void)
+static int gunzip(void)
 {
     uch flags;
     unsigned char magic[2]; /* magic header */
@@ -1199,9 +1079,9 @@ static int INIT gunzip(void)
     ulg orig_len = 0;       /* original uncompressed length */
     int res;
 
-    magic[0] = NEXTBYTE();
-    magic[1] = NEXTBYTE();
-    method   = NEXTBYTE();
+    magic[0] = (unsigned char)get_byte();
+    magic[1] = (unsigned char)get_byte();
+    method = (unsigned char)get_byte();
 
     if (magic[0] != 037 ||
 	((magic[1] != 0213) && (magic[1] != 0236))) {
@@ -1228,29 +1108,29 @@ static int INIT gunzip(void)
 	    error("Input has invalid flags");
 	    return -1;
     }
-    NEXTBYTE();	/* Get timestamp */
-    NEXTBYTE();
-    NEXTBYTE();
-    NEXTBYTE();
+    (ulg)get_byte();	/* Get timestamp */
+    ((ulg)get_byte()) << 8;
+    ((ulg)get_byte()) << 16;
+    ((ulg)get_byte()) << 24;
 
-    (void)NEXTBYTE();  /* Ignore extra flags for the moment */
-    (void)NEXTBYTE();  /* Ignore OS type for the moment */
+    (void)get_byte();  /* Ignore extra flags for the moment */
+    (void)get_byte();  /* Ignore OS type for the moment */
 
     if ((flags & EXTRA_FIELD) != 0) {
-	    unsigned len = (unsigned)NEXTBYTE();
-	    len |= ((unsigned)NEXTBYTE())<<8;
-	    while (len--) (void)NEXTBYTE();
+	    unsigned len = (unsigned)get_byte();
+	    len |= ((unsigned)get_byte())<<8;
+	    while (len--) (void)get_byte();
     }
 
     /* Get original file name if it was truncated */
     if ((flags & ORIG_NAME) != 0) {
 	    /* Discard the old name */
-	    while (NEXTBYTE() != 0) /* null */ ;
+	    while (get_byte() != 0) /* null */ ;
     } 
 
     /* Discard file comment if any */
     if ((flags & COMMENT) != 0) {
-	    while (NEXTBYTE() != 0) /* null */ ;
+	    while (get_byte() != 0) /* null */ ;
     }
 
     /* Decompress */
@@ -1267,9 +1147,6 @@ static int INIT gunzip(void)
 	    case 3:
 		    error("out of memory");
 		    break;
-	    case 4:
-		    error("out of input data");
-		    break;
 	    default:
 		    error("invalid compressed format (other)");
 	    }
@@ -1280,15 +1157,15 @@ static int INIT gunzip(void)
     /* crc32  (see algorithm.doc)
      * uncompressed input size modulo 2^32
      */
-    orig_crc = (ulg) NEXTBYTE();
-    orig_crc |= (ulg) NEXTBYTE() << 8;
-    orig_crc |= (ulg) NEXTBYTE() << 16;
-    orig_crc |= (ulg) NEXTBYTE() << 24;
+    orig_crc = (ulg) get_byte();
+    orig_crc |= (ulg) get_byte() << 8;
+    orig_crc |= (ulg) get_byte() << 16;
+    orig_crc |= (ulg) get_byte() << 24;
     
-    orig_len = (ulg) NEXTBYTE();
-    orig_len |= (ulg) NEXTBYTE() << 8;
-    orig_len |= (ulg) NEXTBYTE() << 16;
-    orig_len |= (ulg) NEXTBYTE() << 24;
+    orig_len = (ulg) get_byte();
+    orig_len |= (ulg) get_byte() << 8;
+    orig_len |= (ulg) get_byte() << 16;
+    orig_len |= (ulg) get_byte() << 24;
     
     /* Validate decompression */
     if (orig_crc != CRC_VALUE) {
@@ -1300,10 +1177,6 @@ static int INIT gunzip(void)
 	    return -1;
     }
     return 0;
-
- underrun:			/* NEXTBYTE() goto's here if needed */
-    error("out of input data");
-    return -1;
 }
 
 

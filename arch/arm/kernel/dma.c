@@ -12,41 +12,37 @@
  *  DMA facilities.
  */
 #include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/mman.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/errno.h>
-#include <linux/scatterlist.h>
-#include <linux/seq_file.h>
-#include <linux/proc_fs.h>
 
 #include <asm/dma.h>
 
 #include <asm/mach/dma.h>
 
-DEFINE_SPINLOCK(dma_spin_lock);
-EXPORT_SYMBOL(dma_spin_lock);
+spinlock_t dma_spin_lock = SPIN_LOCK_UNLOCKED;
 
-static dma_t *dma_chan[MAX_DMA_CHANNELS];
+#if MAX_DMA_CHANNELS > 0
 
-static inline dma_t *dma_channel(unsigned int chan)
+static dma_t dma_chan[MAX_DMA_CHANNELS];
+
+/*
+ * Get dma list for /proc/dma
+ */
+int get_dma_list(char *buf)
 {
-	if (chan >= MAX_DMA_CHANNELS)
-		return NULL;
+	dma_t *dma;
+	char *p = buf;
+	int i;
 
-	return dma_chan[chan];
-}
+	for (i = 0, dma = dma_chan; i < MAX_DMA_CHANNELS; i++, dma++)
+		if (dma->lock)
+			p += sprintf(p, "%2d: %14s %s\n", i,
+				     dma->d_ops->type, dma->device_id);
 
-int __init isa_dma_add(unsigned int chan, dma_t *dma)
-{
-	if (!dma->d_ops)
-		return -EINVAL;
-
-	sg_init_table(&dma->buf, 1);
-
-	if (dma_chan[chan])
-		return -EBUSY;
-	dma_chan[chan] = dma;
-	return 0;
+	return p - buf;
 }
 
 /*
@@ -54,12 +50,12 @@ int __init isa_dma_add(unsigned int chan, dma_t *dma)
  *
  * On certain platforms, we have to allocate an interrupt as well...
  */
-int request_dma(unsigned int chan, const char *device_id)
+int request_dma(dmach_t channel, const char *device_id)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 	int ret;
 
-	if (!dma)
+	if (channel >= MAX_DMA_CHANNELS || !dma->d_ops)
 		goto bad_dma;
 
 	if (xchg(&dma->lock, 1) != 0)
@@ -71,7 +67,7 @@ int request_dma(unsigned int chan, const char *device_id)
 
 	ret = 0;
 	if (dma->d_ops->request)
-		ret = dma->d_ops->request(chan, dma);
+		ret = dma->d_ops->request(channel, dma);
 
 	if (ret)
 		xchg(&dma->lock, 0);
@@ -79,224 +75,228 @@ int request_dma(unsigned int chan, const char *device_id)
 	return ret;
 
 bad_dma:
-	printk(KERN_ERR "dma: trying to allocate DMA%d\n", chan);
+	printk(KERN_ERR "dma: trying to allocate DMA%d\n", channel);
 	return -EINVAL;
 
 busy:
 	return -EBUSY;
 }
-EXPORT_SYMBOL(request_dma);
 
 /*
  * Free DMA channel
  *
  * On certain platforms, we have to free interrupt as well...
  */
-void free_dma(unsigned int chan)
+void free_dma(dmach_t channel)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
-	if (!dma)
+	if (channel >= MAX_DMA_CHANNELS || !dma->d_ops)
 		goto bad_dma;
 
 	if (dma->active) {
-		printk(KERN_ERR "dma%d: freeing active DMA\n", chan);
-		dma->d_ops->disable(chan, dma);
+		printk(KERN_ERR "dma%d: freeing active DMA\n", channel);
+		dma->d_ops->disable(channel, dma);
 		dma->active = 0;
 	}
 
 	if (xchg(&dma->lock, 0) != 0) {
 		if (dma->d_ops->free)
-			dma->d_ops->free(chan, dma);
+			dma->d_ops->free(channel, dma);
 		return;
 	}
 
-	printk(KERN_ERR "dma%d: trying to free free DMA\n", chan);
+	printk(KERN_ERR "dma%d: trying to free free DMA\n", channel);
 	return;
 
 bad_dma:
-	printk(KERN_ERR "dma: trying to free DMA%d\n", chan);
+	printk(KERN_ERR "dma: trying to free DMA%d\n", channel);
 }
-EXPORT_SYMBOL(free_dma);
 
 /* Set DMA Scatter-Gather list
  */
-void set_dma_sg (unsigned int chan, struct scatterlist *sg, int nr_sg)
+void set_dma_sg (dmach_t channel, struct scatterlist *sg, int nr_sg)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
 	if (dma->active)
 		printk(KERN_ERR "dma%d: altering DMA SG while "
-		       "DMA active\n", chan);
+		       "DMA active\n", channel);
 
 	dma->sg = sg;
 	dma->sgcount = nr_sg;
+	dma->using_sg = 1;
 	dma->invalid = 1;
 }
-EXPORT_SYMBOL(set_dma_sg);
 
 /* Set DMA address
  *
  * Copy address to the structure, and set the invalid bit
  */
-void __set_dma_addr (unsigned int chan, void *addr)
+void set_dma_addr (dmach_t channel, unsigned long physaddr)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
 	if (dma->active)
 		printk(KERN_ERR "dma%d: altering DMA address while "
-		       "DMA active\n", chan);
+		       "DMA active\n", channel);
 
-	dma->sg = NULL;
-	dma->addr = addr;
+	dma->sg = &dma->buf;
+	dma->sgcount = 1;
+	dma->buf.__address = bus_to_virt(physaddr);
+	dma->using_sg = 0;
 	dma->invalid = 1;
 }
-EXPORT_SYMBOL(__set_dma_addr);
 
 /* Set DMA byte count
  *
  * Copy address to the structure, and set the invalid bit
  */
-void set_dma_count (unsigned int chan, unsigned long count)
+void set_dma_count (dmach_t channel, unsigned long count)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
 	if (dma->active)
 		printk(KERN_ERR "dma%d: altering DMA count while "
-		       "DMA active\n", chan);
+		       "DMA active\n", channel);
 
-	dma->sg = NULL;
-	dma->count = count;
+	dma->sg = &dma->buf;
+	dma->sgcount = 1;
+	dma->buf.length = count;
+	dma->using_sg = 0;
 	dma->invalid = 1;
 }
-EXPORT_SYMBOL(set_dma_count);
 
 /* Set DMA direction mode
  */
-void set_dma_mode (unsigned int chan, unsigned int mode)
+void set_dma_mode (dmach_t channel, dmamode_t mode)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
 	if (dma->active)
 		printk(KERN_ERR "dma%d: altering DMA mode while "
-		       "DMA active\n", chan);
+		       "DMA active\n", channel);
 
 	dma->dma_mode = mode;
 	dma->invalid = 1;
 }
-EXPORT_SYMBOL(set_dma_mode);
 
 /* Enable DMA channel
  */
-void enable_dma (unsigned int chan)
+void enable_dma (dmach_t channel)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
 	if (!dma->lock)
 		goto free_dma;
 
 	if (dma->active == 0) {
 		dma->active = 1;
-		dma->d_ops->enable(chan, dma);
+		dma->d_ops->enable(channel, dma);
 	}
 	return;
 
 free_dma:
-	printk(KERN_ERR "dma%d: trying to enable free DMA\n", chan);
+	printk(KERN_ERR "dma%d: trying to enable free DMA\n", channel);
 	BUG();
 }
-EXPORT_SYMBOL(enable_dma);
 
 /* Disable DMA channel
  */
-void disable_dma (unsigned int chan)
+void disable_dma (dmach_t channel)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 
 	if (!dma->lock)
 		goto free_dma;
 
 	if (dma->active == 1) {
 		dma->active = 0;
-		dma->d_ops->disable(chan, dma);
+		dma->d_ops->disable(channel, dma);
 	}
 	return;
 
 free_dma:
-	printk(KERN_ERR "dma%d: trying to disable free DMA\n", chan);
+	printk(KERN_ERR "dma%d: trying to disable free DMA\n", channel);
 	BUG();
 }
-EXPORT_SYMBOL(disable_dma);
 
 /*
  * Is the specified DMA channel active?
  */
-int dma_channel_active(unsigned int chan)
+int dma_channel_active(dmach_t channel)
 {
-	dma_t *dma = dma_channel(chan);
-	return dma->active;
+	return dma_chan[channel].active;
 }
-EXPORT_SYMBOL(dma_channel_active);
 
-void set_dma_page(unsigned int chan, char pagenr)
+void set_dma_page(dmach_t channel, char pagenr)
 {
-	printk(KERN_ERR "dma%d: trying to set_dma_page\n", chan);
+	printk(KERN_ERR "dma%d: trying to set_dma_page\n", channel);
 }
-EXPORT_SYMBOL(set_dma_page);
 
-void set_dma_speed(unsigned int chan, int cycle_ns)
+void set_dma_speed(dmach_t channel, int cycle_ns)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 	int ret = 0;
 
 	if (dma->d_ops->setspeed)
-		ret = dma->d_ops->setspeed(chan, dma, cycle_ns);
+		ret = dma->d_ops->setspeed(channel, dma, cycle_ns);
 	dma->speed = ret;
 }
-EXPORT_SYMBOL(set_dma_speed);
 
-int get_dma_residue(unsigned int chan)
+int get_dma_residue(dmach_t channel)
 {
-	dma_t *dma = dma_channel(chan);
+	dma_t *dma = dma_chan + channel;
 	int ret = 0;
 
 	if (dma->d_ops->residue)
-		ret = dma->d_ops->residue(chan, dma);
+		ret = dma->d_ops->residue(channel, dma);
 
 	return ret;
 }
-EXPORT_SYMBOL(get_dma_residue);
 
-#ifdef CONFIG_PROC_FS
-static int proc_dma_show(struct seq_file *m, void *v)
+void __init init_dma(void)
 {
-	int i;
+	arch_dma_init(dma_chan);
+}
 
-	for (i = 0 ; i < MAX_DMA_CHANNELS ; i++) {
-		dma_t *dma = dma_channel(i);
-		if (dma && dma->lock)
-			seq_printf(m, "%2d: %s\n", i, dma->device_id);
-	}
+#else
+
+int request_dma(dmach_t channel, const char *device_id)
+{
+	return -EINVAL;
+}
+
+int get_dma_residue(dmach_t channel)
+{
 	return 0;
 }
 
-static int proc_dma_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, proc_dma_show, NULL);
-}
+#define GLOBAL_ALIAS(_a,_b) asm (".set " #_a "," #_b "; .globl " #_a)
+GLOBAL_ALIAS(disable_dma, get_dma_residue);
+GLOBAL_ALIAS(enable_dma, get_dma_residue);
+GLOBAL_ALIAS(free_dma, get_dma_residue);
+GLOBAL_ALIAS(get_dma_list, get_dma_residue);
+GLOBAL_ALIAS(set_dma_mode, get_dma_residue);
+GLOBAL_ALIAS(set_dma_page, get_dma_residue);
+GLOBAL_ALIAS(set_dma_count, get_dma_residue);
+GLOBAL_ALIAS(set_dma_addr, get_dma_residue);
+GLOBAL_ALIAS(set_dma_sg, get_dma_residue);
+GLOBAL_ALIAS(set_dma_speed, get_dma_residue);
+GLOBAL_ALIAS(init_dma, get_dma_residue);
 
-static const struct file_operations proc_dma_operations = {
-	.open		= proc_dma_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
-
-static int __init proc_dma_init(void)
-{
-	proc_create("dma", 0, NULL, &proc_dma_operations);
-	return 0;
-}
-
-__initcall(proc_dma_init);
 #endif
+
+EXPORT_SYMBOL(request_dma);
+EXPORT_SYMBOL(free_dma);
+EXPORT_SYMBOL(enable_dma);
+EXPORT_SYMBOL(disable_dma);
+EXPORT_SYMBOL(set_dma_addr);
+EXPORT_SYMBOL(set_dma_count);
+EXPORT_SYMBOL(set_dma_mode);
+EXPORT_SYMBOL(set_dma_page);
+EXPORT_SYMBOL(get_dma_residue);
+EXPORT_SYMBOL(set_dma_sg);
+EXPORT_SYMBOL(set_dma_speed);
+
+EXPORT_SYMBOL(dma_spin_lock);

@@ -21,18 +21,18 @@
 
 #include "emu8000_local.h"
 #include <asm/uaccess.h>
-#include <linux/moduleparam.h>
 
-static int emu8000_reset_addr;
-module_param(emu8000_reset_addr, int, 0444);
+MODULE_PARM(emu8000_reset_addr, "i");
 MODULE_PARM_DESC(emu8000_reset_addr, "reset write address at each time (makes slowdown)");
+
+int emu8000_reset_addr = 0;
 
 
 /*
  * Open up channels.
  */
 static int
-snd_emu8000_open_dma(struct snd_emu8000 *emu, int write)
+snd_emu8000_open_dma(emu8000_t *emu, int write)
 {
 	int i;
 
@@ -59,7 +59,7 @@ snd_emu8000_open_dma(struct snd_emu8000 *emu, int write)
  * Close all dram channels.
  */
 static void
-snd_emu8000_close_dma(struct snd_emu8000 *emu)
+snd_emu8000_close_dma(emu8000_t *emu)
 {
 	int i;
 
@@ -82,19 +82,19 @@ snd_emu8000_close_dma(struct snd_emu8000 *emu)
  * 8bit samples etc.
  */
 static unsigned short
-read_word(const void __user *buf, int offset, int mode)
+read_word(const void *buf, int offset, int mode)
 {
 	unsigned short c;
 	if (mode & SNDRV_SFNT_SAMPLE_8BITS) {
 		unsigned char cc;
-		get_user(cc, (unsigned char __user *)buf + offset);
+		get_user(cc, (unsigned char*)buf + offset);
 		c = cc << 8; /* convert 8bit -> 16bit */
 	} else {
 #ifdef SNDRV_LITTLE_ENDIAN
-		get_user(c, (unsigned short __user *)buf + offset);
+		get_user(c, (unsigned short*)buf + offset);
 #else
 		unsigned short cc;
-		get_user(cc, (unsigned short __user *)buf + offset);
+		get_user(cc, (unsigned short*)buf + offset);
 		c = swab16(cc);
 #endif
 	}
@@ -106,10 +106,11 @@ read_word(const void __user *buf, int offset, int mode)
 /*
  */
 static void
-snd_emu8000_write_wait(struct snd_emu8000 *emu)
+snd_emu8000_write_wait(emu8000_t *emu)
 {
 	while ((EMU8000_SMALW_READ(emu) & 0x80000000) != 0) {
-		schedule_timeout_interruptible(1);
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(1);
 		if (signal_pending(current))
 			break;
 	}
@@ -127,8 +128,8 @@ snd_emu8000_write_wait(struct snd_emu8000 *emu)
  * This is therefore much slower than need be, but is at least
  * working.
  */
-static inline void
-write_word(struct snd_emu8000 *emu, int *offset, unsigned short data)
+inline static void
+write_word(emu8000_t *emu, int *offset, unsigned short data)
 {
 	if (emu8000_reset_addr) {
 		if (emu8000_reset_addr > 1)
@@ -144,20 +145,18 @@ write_word(struct snd_emu8000 *emu, int *offset, unsigned short data)
  * the generic soundfont routines as a callback.
  */
 int
-snd_emu8000_sample_new(struct snd_emux *rec, struct snd_sf_sample *sp,
-		       struct snd_util_memhdr *hdr,
-		       const void __user *data, long count)
+snd_emu8000_sample_new(snd_emux_t *rec, snd_sf_sample_t *sp,
+		       snd_util_memhdr_t *hdr, const void *data, long count)
 {
 	int  i;
 	int  rc;
 	int  offset;
 	int  truesize;
 	int  dram_offset, dram_start;
-	struct snd_emu8000 *emu;
+	emu8000_t *emu;
 
-	emu = rec->hw;
-	if (snd_BUG_ON(!sp))
-		return -EINVAL;
+	emu = snd_magic_cast(emu8000_t, rec->hw, return -EINVAL);
+	snd_assert(sp != NULL, return -EINVAL);
 
 	if (sp->v.size == 0)
 		return 0;
@@ -184,10 +183,10 @@ snd_emu8000_sample_new(struct snd_emux *rec, struct snd_sf_sample *sp,
 	}
 
 	if (sp->v.mode_flags & SNDRV_SFNT_SAMPLE_8BITS) {
-		if (!access_ok(VERIFY_READ, data, sp->v.size))
+		if (verify_area(VERIFY_READ, data, sp->v.size))
 			return -EFAULT;
 	} else {
-		if (!access_ok(VERIFY_READ, data, sp->v.size * 2))
+		if (verify_area(VERIFY_READ, data, sp->v.size * 2))
 			return -EFAULT;
 	}
 
@@ -284,8 +283,7 @@ snd_emu8000_sample_new(struct snd_emux *rec, struct snd_sf_sample *sp,
  * free a sample block
  */
 int
-snd_emu8000_sample_free(struct snd_emux *rec, struct snd_sf_sample *sp,
-			struct snd_util_memhdr *hdr)
+snd_emu8000_sample_free(snd_emux_t *rec, snd_sf_sample_t *sp, snd_util_memhdr_t *hdr)
 {
 	if (sp->block) {
 		snd_util_mem_free(hdr, sp->block);
@@ -299,7 +297,7 @@ snd_emu8000_sample_free(struct snd_emux *rec, struct snd_sf_sample *sp,
  * sample_reset callback - terminate voices
  */
 void
-snd_emu8000_sample_reset(struct snd_emux *rec)
+snd_emu8000_sample_reset(snd_emux_t *rec)
 {
 	snd_emux_terminate_all(rec);
 }

@@ -1,21 +1,23 @@
+// $Id: vmax301.c,v 1.28 2003/05/21 15:15:08 dwmw2 Exp $
 /* ######################################################################
 
    Tempustech VMAX SBC301 MTD Driver.
-
+  
    The VMAx 301 is a SBC based on . It
    comes with three builtin AMD 29F016B flash chips and a socket for SRAM or
-   more flash. Each unit has it's own 8k mapping into a settable region
+   more flash. Each unit has it's own 8k mapping into a settable region 
    (0xD8000). There are two 8k mappings for each MTD, the first is always set
    to the lower 8k of the device the second is paged. Writing a 16 bit page
    value to anywhere in the first 8k will cause the second 8k to page around.
 
-   To boot the device a bios extension must be installed into the first 8k
-   of flash that is smart enough to copy itself down, page in the rest of
+   To boot the device a bios extension must be installed into the first 8k 
+   of flash that is smart enough to copy itself down, page in the rest of 
    itself and begin executing.
-
+   
    ##################################################################### */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
@@ -33,10 +35,10 @@
 /* Actually we could use two spinlocks, but we'd have to have
    more private space in the struct map_info. We lose a little
    performance like this, but we'd probably lose more by having
-   the extra indirection from having one of the map->map_priv
+   the extra indirection from having one of the map->map_priv 
    fields pointing to yet another private struct.
 */
-static DEFINE_SPINLOCK(vmax301_spin);
+static spinlock_t vmax301_spin = SPIN_LOCK_UNLOCKED;
 
 static void __vmax301_page(struct map_info *map, unsigned long page)
 {
@@ -52,12 +54,32 @@ static inline void vmax301_page(struct map_info *map,
 		__vmax301_page(map, page);
 }
 
-static map_word vmax301_read8(struct map_info *map, unsigned long ofs)
+static __u8 vmax301_read8(struct map_info *map, unsigned long ofs)
 {
-	map_word ret;
+	__u8 ret;
 	spin_lock(&vmax301_spin);
 	vmax301_page(map, ofs);
-	ret.x[0] = readb(map->map_priv_2 + (ofs & WINDOW_MASK));
+	ret = readb(map->map_priv_2 + (ofs & WINDOW_MASK));
+	spin_unlock(&vmax301_spin);
+	return ret;
+}
+
+static __u16 vmax301_read16(struct map_info *map, unsigned long ofs)
+{
+	__u16 ret;
+	spin_lock(&vmax301_spin);
+	vmax301_page(map, ofs);
+	ret = readw(map->map_priv_2 + (ofs & WINDOW_MASK));
+	spin_unlock(&vmax301_spin);
+	return ret;
+}
+
+static __u32 vmax301_read32(struct map_info *map, unsigned long ofs)
+{
+	__u32 ret;
+	spin_lock(&vmax301_spin);
+	vmax301_page(map, ofs);
+	ret =  readl(map->map_priv_2 + (ofs & WINDOW_MASK));
 	spin_unlock(&vmax301_spin);
 	return ret;
 }
@@ -78,11 +100,27 @@ static void vmax301_copy_from(struct map_info *map, void *to, unsigned long from
 	}
 }
 
-static void vmax301_write8(struct map_info *map, map_word d, unsigned long adr)
+static void vmax301_write8(struct map_info *map, __u8 d, unsigned long adr)
 {
 	spin_lock(&vmax301_spin);
 	vmax301_page(map, adr);
-	writeb(d.x[0], map->map_priv_2 + (adr & WINDOW_MASK));
+	writeb(d, map->map_priv_2 + (adr & WINDOW_MASK));
+	spin_unlock(&vmax301_spin);
+}
+
+static void vmax301_write16(struct map_info *map, __u16 d, unsigned long adr)
+{
+	spin_lock(&vmax301_spin);
+	vmax301_page(map, adr);
+	writew(d, map->map_priv_2 + (adr & WINDOW_MASK));
+	spin_unlock(&vmax301_spin);
+}
+
+static void vmax301_write32(struct map_info *map, __u32 d, unsigned long adr)
+{
+	spin_lock(&vmax301_spin);
+	vmax301_page(map, adr);
+	writel(d, map->map_priv_2 + (adr & WINDOW_MASK));
 	spin_unlock(&vmax301_spin);
 }
 
@@ -96,7 +134,7 @@ static void vmax301_copy_to(struct map_info *map, unsigned long to, const void *
 		spin_lock(&vmax301_spin);
 		vmax301_page(map, to);
 		memcpy_toio(map->map_priv_2 + to, from, thislen);
-		spin_unlock(&vmax301_spin);
+		spin_unlock(&vmax301_spin);		
 		to += thislen;
 		from += thislen;
 		len -= thislen;
@@ -108,10 +146,14 @@ static struct map_info vmax_map[2] = {
 		.name = "VMAX301 Internal Flash",
 		.phys = NO_XIP,
 		.size = 3*2*1024*1024,
-		.bankwidth = 1,
-		.read = vmax301_read8,
+		.buswidth = 1,
+		.read8 = vmax301_read8,
+		.read16 = vmax301_read16,
+		.read32 = vmax301_read32,
 		.copy_from = vmax301_copy_from,
-		.write = vmax301_write8,
+		.write8 = vmax301_write8,
+		.write16 = vmax301_write16,
+		.write32 = vmax301_write32,
 		.copy_to = vmax301_copy_to,
 		.map_priv_1 = WINDOW_START + WINDOW_LENGTH,
 		.map_priv_2 = 0xFFFFFFFF
@@ -120,10 +162,14 @@ static struct map_info vmax_map[2] = {
 		.name = "VMAX301 Socket",
 		.phys = NO_XIP,
 		.size = 0,
-		.bankwidth = 1,
-		.read = vmax301_read8,
+		.buswidth = 1,
+		.read8 = vmax301_read8,
+		.read16 = vmax301_read16,
+		.read32 = vmax301_read32,
 		.copy_from = vmax301_copy_from,
-		.write = vmax301_write8,
+		.write8 = vmax301_write8,
+		.write16 = vmax301_write16,
+		.write32 = vmax301_write32,
 		.copy_to = vmax301_copy_to,
 		.map_priv_1 = WINDOW_START + (3*WINDOW_LENGTH),
 		.map_priv_2 = 0xFFFFFFFF
@@ -135,7 +181,7 @@ static struct mtd_info *vmax_mtd[2] = {NULL, NULL};
 static void __exit cleanup_vmax301(void)
 {
 	int i;
-
+	
 	for (i=0; i<2; i++) {
 		if (vmax_mtd[i]) {
 			del_mtd_device(vmax_mtd[i]);
@@ -145,7 +191,7 @@ static void __exit cleanup_vmax301(void)
 	iounmap((void *)vmax_map[0].map_priv_1 - WINDOW_START);
 }
 
-static int __init init_vmax301(void)
+int __init init_vmax301(void)
 {
 	int i;
 	unsigned long iomapadr;
@@ -159,13 +205,13 @@ static int __init init_vmax301(void)
 		return -EIO;
 	}
 	/* Put the address in the map's private data area.
-	   We store the actual MTD IO address rather than the
+	   We store the actual MTD IO address rather than the 
 	   address of the first half, because it's used more
-	   often.
+	   often. 
 	*/
 	vmax_map[0].map_priv_2 = iomapadr + WINDOW_START;
 	vmax_map[1].map_priv_2 = iomapadr + (3*WINDOW_START);
-
+	
 	for (i=0; i<2; i++) {
 		vmax_mtd[i] = do_map_probe("cfi_probe", &vmax_map[i]);
 		if (!vmax_mtd[i])
@@ -180,7 +226,7 @@ static int __init init_vmax301(void)
 		}
 	}
 
-	if (!vmax_mtd[0] && !vmax_mtd[1]) {
+	if (!vmax_mtd[1] && !vmax_mtd[2]) {
 		iounmap((void *)iomapadr);
 		return -ENXIO;
 	}

@@ -2,13 +2,15 @@
 # Makefile for USB Core files and filesystem
 #
 
-ccflags-$(CONFIG_USB_DEBUG) := -DDEBUG
+usbcore-objs	:= usb.o usb-debug.o hub.o hcd.o urb.o message.o \
+			config.o file.o buffer.o driverfs.o
 
-usbcore-y := usb.o hub.o hcd.o urb.o message.o driver.o
-usbcore-y += config.o file.o buffer.o sysfs.o endpoint.o
-usbcore-y += devio.o notify.o generic.o quirks.o devices.o
+ifeq ($(CONFIG_PCI),y)
+	usbcore-objs	+= hcd-pci.o
+endif
 
-usbcore-$(CONFIG_PCI)		+= hcd-pci.o
-usbcore-$(CONFIG_USB_DEVICEFS)	+= inode.o
+ifeq ($(CONFIG_USB_DEVICEFS),y)
+	usbcore-objs	+= devio.o inode.o devices.o
+endif
 
-obj-$(CONFIG_USB)		+= usbcore.o
+obj-$(CONFIG_USB)	+= usbcore.o

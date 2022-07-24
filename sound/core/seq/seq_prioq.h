@@ -1,6 +1,6 @@
 /*
  *   ALSA sequencer Priority Queue
- *   Copyright (c) 1998 by Frank van de Pol <fvdpol@coil.demon.nl>
+ *   Copyright (c) 1998 by Frank van de Pol <fvdpol@home.nl>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -26,37 +26,37 @@
 
 /* === PRIOQ === */
 
-struct snd_seq_prioq {
-	struct snd_seq_event_cell *head;      /* pointer to head of prioq */
-	struct snd_seq_event_cell *tail;      /* pointer to tail of prioq */
+typedef struct {
+	snd_seq_event_cell_t* head;      /* pointer to head of prioq */
+	snd_seq_event_cell_t* tail;      /* pointer to tail of prioq */
 	int cells;
 	spinlock_t lock;
-};
+} prioq_t;
 
 
 /* create new prioq (constructor) */
-struct snd_seq_prioq *snd_seq_prioq_new(void);
+extern prioq_t *snd_seq_prioq_new(void);
 
 /* delete prioq (destructor) */
-void snd_seq_prioq_delete(struct snd_seq_prioq **fifo);
+extern void snd_seq_prioq_delete(prioq_t **fifo);
 
 /* enqueue cell to prioq */
-int snd_seq_prioq_cell_in(struct snd_seq_prioq *f, struct snd_seq_event_cell *cell);
+extern int snd_seq_prioq_cell_in(prioq_t *f, snd_seq_event_cell_t *cell);
 
 /* dequeue cell from prioq */ 
-struct snd_seq_event_cell *snd_seq_prioq_cell_out(struct snd_seq_prioq *f);
+extern snd_seq_event_cell_t *snd_seq_prioq_cell_out(prioq_t *f);
 
 /* return number of events available in prioq */
-int snd_seq_prioq_avail(struct snd_seq_prioq *f);
+extern int snd_seq_prioq_avail(prioq_t *f);
 
 /* peek at cell at the head of the prioq */
-struct snd_seq_event_cell *snd_seq_prioq_cell_peek(struct snd_seq_prioq *f);
+extern snd_seq_event_cell_t *snd_seq_prioq_cell_peek(prioq_t *f);
 
 /* client left queue */
-void snd_seq_prioq_leave(struct snd_seq_prioq *f, int client, int timestamp);        
+extern void snd_seq_prioq_leave(prioq_t *f, int client, int timestamp);        
 
 /* Remove events */
-void snd_seq_prioq_remove_events(struct snd_seq_prioq *f, int client,
-				 struct snd_seq_remove_events *info);
+void snd_seq_prioq_remove_events(prioq_t * f, int client,
+	snd_seq_remove_events_t *info);
 
 #endif

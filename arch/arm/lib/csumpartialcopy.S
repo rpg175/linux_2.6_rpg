@@ -18,11 +18,11 @@
  */
 
 		.macro	save_regs
-		stmfd	sp!, {r1, r4 - r8, lr}
+		stmfd	sp!, {r1, r4 - r8, fp, ip, lr, pc}
 		.endm
 
-		.macro	load_regs
-		ldmfd	sp!, {r1, r4 - r8, pc}
+		.macro	load_regs,flags
+		LOADREGS(\flags,fp,{r1, r4 - r8, fp, sp, pc})
 		.endm
 
 		.macro	load1b, reg1
@@ -48,6 +48,5 @@
 		.endm
 
 #define FN_ENTRY	ENTRY(csum_partial_copy_nocheck)
-#define FN_EXIT		ENDPROC(csum_partial_copy_nocheck)
 
 #include "csumpartialcopygeneric.S"

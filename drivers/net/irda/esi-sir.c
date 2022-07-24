@@ -68,14 +68,11 @@ static int esi_open(struct sir_dev *dev)
 {
 	struct qos_info *qos = &dev->qos;
 
-	/* Power up and set dongle to 9600 baud */
-	sirdev_set_dtr_rts(dev, FALSE, TRUE);
-
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_115200;
 	qos->min_turn_time.bits = 0x01; /* Needs at least 10 ms */
 	irda_qos_bits_to_value(qos);
 
-	/* irda thread waits 50 msec for power settling */
+	/* shouldn't we do set_dtr_rts(FALSE, TRUE) here (power up at 9600)? */
 
 	return 0;
 }
@@ -83,7 +80,7 @@ static int esi_open(struct sir_dev *dev)
 static int esi_close(struct sir_dev *dev)
 {
 	/* Power off dongle */
-	sirdev_set_dtr_rts(dev, FALSE, FALSE);
+	dev->set_dtr_rts(dev, FALSE, FALSE);
 
 	return 0;
 }
@@ -91,13 +88,11 @@ static int esi_close(struct sir_dev *dev)
 /*
  * Function esi_change_speed (task)
  *
- * Set the speed for the Extended Systems JetEye PC ESI-9680 type dongle
- * Apparently (see old esi-driver) no delays are needed here...
+ *    Set the speed for the Extended Systems JetEye PC ESI-9680 type dongle
  *
  */
 static int esi_change_speed(struct sir_dev *dev, unsigned speed)
 {
-	int ret = 0;
 	int dtr, rts;
 	
 	switch (speed) {
@@ -109,7 +104,6 @@ static int esi_change_speed(struct sir_dev *dev, unsigned speed)
 		dtr = rts = TRUE;
 		break;
 	default:
-		ret = -EINVAL;
 		speed = 9600;
 		/* fall through */
 	case 9600:
@@ -119,10 +113,12 @@ static int esi_change_speed(struct sir_dev *dev, unsigned speed)
 	}
 
 	/* Change speed of dongle */
-	sirdev_set_dtr_rts(dev, dtr, rts);
+	dev->set_dtr_rts(dev, dtr, rts);
 	dev->speed = speed;
 
-	return ret;
+	/* do we need some delay for power stabilization? */
+
+	return 0;
 }
 
 /*
@@ -133,18 +129,9 @@ static int esi_change_speed(struct sir_dev *dev, unsigned speed)
  */
 static int esi_reset(struct sir_dev *dev)
 {
-	sirdev_set_dtr_rts(dev, FALSE, FALSE);
+	dev->set_dtr_rts(dev, FALSE, FALSE);
 
-	/* Hm, the old esi-driver left the dongle unpowered relying on
-	 * the following speed change to repower. This might work for
-	 * the esi because we only need the modem lines. However, now the
-	 * general rule is reset must bring the dongle to some working
-	 * well-known state because speed change might write to registers.
-	 * The old esi-driver didn't any delay here - let's hope it' fine.
-	 */
-
-	sirdev_set_dtr_rts(dev, FALSE, TRUE);
-	dev->speed = 9600;
+	/* Hm, probably repower to 9600 and some delays? */
 
 	return 0;
 }

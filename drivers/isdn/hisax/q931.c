@@ -1,4 +1,4 @@
-/* $Id: q931.c,v 1.12.2.3 2004/01/13 14:31:26 keil Exp $
+/* $Id: q931.c,v 1.10.6.3 2001/09/23 22:24:50 kai Exp $
  *
  * code to decode ITU Q.931 call control messages
  *
@@ -21,9 +21,9 @@
 #include "l3_1tr6.h"
 
 void
-iecpy(u_char * dest, u_char * iestart, int ieoffset)
+iecpy(u8 * dest, u8 * iestart, int ieoffset)
 {
-	u_char *p;
+	u8 *p;
 	int l;
 
 	p = iestart + ieoffset + 2;
@@ -38,7 +38,7 @@ iecpy(u_char * dest, u_char * iestart, int ieoffset)
  */
 static
 struct MessageType {
-	u_char nr;
+	u8 nr;
 	char *descr;
 } mtlist[] = {
 
@@ -140,7 +140,7 @@ struct MessageType {
 	}
 };
 
-#define MTSIZE ARRAY_SIZE(mtlist)
+#define MTSIZE sizeof(mtlist)/sizeof(struct MessageType)
 
 static
 struct MessageType mt_n0[] =
@@ -157,7 +157,7 @@ struct MessageType mt_n0[] =
 	{MT_N0_CLO_ACK, "CLOse ACKnowledge"}
 };
 
-#define MT_N0_LEN ARRAY_SIZE(mt_n0)
+#define MT_N0_LEN (sizeof(mt_n0) / sizeof(struct MessageType))
 
 static
 struct MessageType mt_n1[] =
@@ -194,11 +194,11 @@ struct MessageType mt_n1[] =
 	{MT_N1_STAT, "STATus"}
 };
 
-#define MT_N1_LEN ARRAY_SIZE(mt_n1)
+#define MT_N1_LEN (sizeof(mt_n1) / sizeof(struct MessageType))
 
 
 static int
-prbits(char *dest, u_char b, int start, int len)
+prbits(char *dest, u8 b, int start, int len)
 {
 	char *dp = dest;
 
@@ -214,8 +214,8 @@ prbits(char *dest, u_char b, int start, int len)
 }
 
 static
-u_char *
-skipext(u_char * p)
+u8 *
+skipext(u8 * p)
 {
 	while (!(*p++ & 0x80));
 	return (p);
@@ -230,7 +230,7 @@ skipext(u_char * p)
 
 static
 struct CauseValue {
-	u_char nr;
+	u8 nr;
 	char *edescr;
 	char *ddescr;
 } cvlist[] = {
@@ -438,15 +438,15 @@ struct CauseValue {
 	},
 };
 
-#define CVSIZE ARRAY_SIZE(cvlist)
+#define CVSIZE sizeof(cvlist)/sizeof(struct CauseValue)
 
 static
 int
-prcause(char *dest, u_char * p)
+prcause(char *dest, u8 * p)
 {
-	u_char *end;
+	u8 *end;
 	char *dp = dest;
-	int i, cause;
+	u_int i, cause;
 
 	end = p + p[1] + 1;
 	p += 2;
@@ -516,10 +516,10 @@ struct MessageType cause_1tr6[] =
 	{CAUSE_UserInfoDiscarded, "User Info Discarded"}
 };
 
-static int cause_1tr6_len = ARRAY_SIZE(cause_1tr6);
+int cause_1tr6_len = (sizeof(cause_1tr6) / sizeof(struct MessageType));
 
 static int
-prcause_1tr6(char *dest, u_char * p)
+prcause_1tr6(char *dest, u8 * p)
 {
 	char *dp = dest;
 	int i, cause;
@@ -554,7 +554,7 @@ prcause_1tr6(char *dest, u_char * p)
 }
 
 static int
-prchident(char *dest, u_char * p)
+prchident(char *dest, u8 * p)
 {
 	char *dp = dest;
 
@@ -566,7 +566,7 @@ prchident(char *dest, u_char * p)
 }
 
 static int
-prcalled(char *dest, u_char * p)
+prcalled(char *dest, u8 * p)
 {
 	int l;
 	char *dp = dest;
@@ -583,7 +583,7 @@ prcalled(char *dest, u_char * p)
 	return (dp - dest);
 }
 static int
-prcalling(char *dest, u_char * p)
+prcalling(char *dest, u8 * p)
 {
 	int l;
 	char *dp = dest;
@@ -610,7 +610,7 @@ prcalling(char *dest, u_char * p)
 
 static
 int
-prbearer(char *dest, u_char * p)
+prbearer(char *dest, u8 * p)
 {
 	char *dp = dest, ch;
 
@@ -658,10 +658,10 @@ prbearer(char *dest, u_char * p)
 
 static
 int
-prbearer_ni1(char *dest, u_char * p)
+prbearer_ni1(char *dest, u8 * p)
 {
 	char *dp = dest;
-	u_char len;
+	u8 len;
 
 	p++;
 	len = *p++;
@@ -715,7 +715,7 @@ prbearer_ni1(char *dest, u_char * p)
 }
 
 static int
-general(char *dest, u_char * p)
+general(char *dest, u8 * p)
 {
 	char *dp = dest;
 	char ch = ' ';
@@ -742,7 +742,7 @@ general(char *dest, u_char * p)
 }
 
 static int
-general_ni1(char *dest, u_char * p)
+general_ni1(char *dest, u8 * p)
 {
 	char *dp = dest;
 	char ch = ' ';
@@ -769,7 +769,7 @@ general_ni1(char *dest, u_char * p)
 }
 
 static int
-prcharge(char *dest, u_char * p)
+prcharge(char *dest, u8 * p)
 {
 	char *dp = dest;
 	int l;
@@ -786,7 +786,7 @@ prcharge(char *dest, u_char * p)
 	return (dp - dest);
 }
 static int
-prtext(char *dest, u_char * p)
+prtext(char *dest, u8 * p)
 {
 	char *dp = dest;
 	int l;
@@ -802,7 +802,7 @@ prtext(char *dest, u_char * p)
 }
 
 static int
-prfeatureind(char *dest, u_char * p)
+prfeatureind(char *dest, u8 * p)
 {
 	char *dp = dest;
 
@@ -839,7 +839,7 @@ prfeatureind(char *dest, u_char * p)
 
 static
 struct DTag { /* Display tags */
-	u_char nr;
+	u8 nr;
 	char *descr;
 } dtaglist[] = {
 	{ 0x82, "Continuation" },
@@ -865,13 +865,14 @@ struct DTag { /* Display tags */
 	{ 0x96, "Redirection name" },
 	{ 0x9e, "Text" },
 };
-#define DTAGSIZE ARRAY_SIZE(dtaglist)
+#define DTAGSIZE sizeof(dtaglist)/sizeof(struct DTag)
 
 static int
-disptext_ni1(char *dest, u_char * p)
+disptext_ni1(char *dest, u8 * p)
 {
 	char *dp = dest;
-	int l, tag, len, i;
+	int l, tag, len;
+	u_int i;
 
 	p++;
 	l = *p++ - 1;
@@ -907,7 +908,7 @@ disptext_ni1(char *dest, u_char * p)
 	return (dp - dest);
 }
 static int
-display(char *dest, u_char * p)
+display(char *dest, u8 * p)
 {
 	char *dp = dest;
 	char ch = ' ';
@@ -935,8 +936,8 @@ display(char *dest, u_char * p)
 	return (dp - dest);
 }
 
-static int
-prfacility(char *dest, u_char * p)
+int
+prfacility(char *dest, u8 * p)
 {
 	char *dp = dest;
 	int l, l2;
@@ -967,9 +968,9 @@ prfacility(char *dest, u_char * p)
 
 static
 struct InformationElement {
-	u_char nr;
+	u8 nr;
 	char *descr;
-	int (*f) (char *, u_char *);
+	int (*f) (char *, u8 *);
 } ielist[] = {
 
 	{
@@ -1074,7 +1075,7 @@ struct InformationElement {
 };
 
 
-#define IESIZE ARRAY_SIZE(ielist)
+#define IESIZE sizeof(ielist)/sizeof(struct InformationElement)
 
 static
 struct InformationElement ielist_ni1[] = {
@@ -1102,7 +1103,7 @@ struct InformationElement ielist_ni1[] = {
 };
 
 
-#define IESIZE_NI1 ARRAY_SIZE(ielist_ni1)
+#define IESIZE_NI1 sizeof(ielist_ni1)/sizeof(struct InformationElement)
 
 static
 struct InformationElement ielist_ni1_cs5[] = {
@@ -1110,14 +1111,14 @@ struct InformationElement ielist_ni1_cs5[] = {
 	{ 0x2a, "Display text", disptext_ni1 },
 };
 
-#define IESIZE_NI1_CS5 ARRAY_SIZE(ielist_ni1_cs5)
+#define IESIZE_NI1_CS5 sizeof(ielist_ni1_cs5)/sizeof(struct InformationElement)
 
 static
 struct InformationElement ielist_ni1_cs6[] = {
 	{ 0x7b, "Call appearance", general_ni1 },
 };
 
-#define IESIZE_NI1_CS6 ARRAY_SIZE(ielist_ni1_cs6)
+#define IESIZE_NI1_CS6 sizeof(ielist_ni1_cs6)/sizeof(struct InformationElement)
 
 static struct InformationElement we_0[] =
 {
@@ -1133,7 +1134,7 @@ static struct InformationElement we_0[] =
 	{WE0_userInfo, "User Info", general}
 };
 
-#define WE_0_LEN ARRAY_SIZE(we_0)
+#define WE_0_LEN (sizeof(we_0) / sizeof(struct InformationElement))
 
 static struct InformationElement we_6[] =
 {
@@ -1145,25 +1146,34 @@ static struct InformationElement we_6[] =
 	{WE6_statusCalled, "Status Called", general},
 	{WE6_addTransAttr, "Additional Transmission Attributes", general}
 };
-#define WE_6_LEN ARRAY_SIZE(we_6)
+#define WE_6_LEN (sizeof(we_6) / sizeof(struct InformationElement))
 
 int
-QuickHex(char *txt, u_char * p, int cnt)
+QuickHex(char *txt, u8 * p, int cnt)
 {
 	register int i;
 	register char *t = txt;
+	register u8 w;
 
 	for (i = 0; i < cnt; i++) {
 		*t++ = ' ';
-		*t++ = hex_asc_hi(p[i]);
-		*t++ = hex_asc_lo(p[i]);
+		w = (p[i] >> 4) & 0x0f;
+		if (w < 10)
+			*t++ = '0' + w;
+		else
+			*t++ = 'A' - 10 + w;
+		w = p[i] & 0x0f;
+		if (w < 10)
+			*t++ = '0' + w;
+		else
+			*t++ = 'A' - 10 + w;
 	}
 	*t++ = 0;
 	return (t - txt);
 }
 
 void
-LogFrame(struct IsdnCardState *cs, u_char * buf, int size)
+LogFrame(struct IsdnCardState *cs, u8 * buf, int size)
 {
 	char *dp;
 
@@ -1187,11 +1197,11 @@ LogFrame(struct IsdnCardState *cs, u_char * buf, int size)
 void
 dlogframe(struct IsdnCardState *cs, struct sk_buff *skb, int dir)
 {
-	u_char *bend, *buf;
+	u8 *bend, *buf;
 	char *dp;
 	unsigned char pd, cr_l, cr, mt;
 	unsigned char sapi, tei, ftyp;
-	int i, cset = 0, cs_old = 0, cs_fest = 0;
+	u_int i, cset = 0, cs_old = 0, cs_fest = 0;
 	int size, finish = 0;
 
 	if (skb->len < 3)
@@ -1393,12 +1403,12 @@ dlogframe(struct IsdnCardState *cs, struct sk_buff *skb, int dir)
 			}
 			/* No, locate it in the table */
 			if (cset == 0) {
-				for (i = 0; i < IESIZE_NI1; i++)
+				for (i = 0; i < IESIZE; i++)
 					if (*buf == ielist_ni1[i].nr)
 						break;
 
 				/* When not found, give appropriate msg */
-				if (i != IESIZE_NI1) {
+				if (i != IESIZE) {
 					dp += sprintf(dp, "  %s\n", ielist_ni1[i].descr);
 					dp += ielist_ni1[i].f(dp, buf);
 				} else

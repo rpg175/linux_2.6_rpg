@@ -3,7 +3,7 @@
 #ifndef __HEADER_cwcasync_H__
 #define __HEADER_cwcasync_H__
 
-static struct dsp_symbol_entry cwcasync_symbols[] = {
+static symbol_entry_t cwcasync_symbols[] = {
   { 0x8000, "EXECCHILD",0x03 },
   { 0x8001, "EXECCHILD_98",0x03 },
   { 0x8003, "EXECCHILD_PUSH1IND",0x03 },
@@ -159,11 +159,11 @@ static u32 cwcasync_code[] = {
 };
 /* #CODE_END */
 
-static struct dsp_segment_desc cwcasync_segments[] = {
+static segment_desc_t cwcasync_segments[] = {
   { SEGTYPE_SP_PROGRAM, 0x00000000, 0x000001b6, cwcasync_code },
 };
 
-static struct dsp_module_desc cwcasync_module = {
+static dsp_module_desc_t cwcasync_module = {
   "cwcasync",
   {
     32,

@@ -25,16 +25,22 @@
 #include "seq_kernel.h"
 
 /*
+ * type definitions
+ */
+typedef struct snd_seq_oss_arg_t snd_seq_oss_arg_t;
+typedef struct snd_seq_oss_callback_t snd_seq_oss_callback_t;
+
+/*
  * argument structure for synthesizer operations
  */
-struct snd_seq_oss_arg {
+struct snd_seq_oss_arg_t {
 	/* given by OSS sequencer */
 	int app_index;	/* application unique index */
 	int file_mode;	/* file mode - see below */
 	int seq_mode;	/* sequencer mode - see below */
 
 	/* following must be initialized in open callback */
-	struct snd_seq_addr addr;	/* opened port address */
+	snd_seq_addr_t addr;	/* opened port address */
 	void *private_data;	/* private data for lowlevel drivers */
 
 	/* note-on event passing mode: initially given by OSS seq,
@@ -47,14 +53,14 @@ struct snd_seq_oss_arg {
 /*
  * synthesizer operation callbacks
  */
-struct snd_seq_oss_callback {
+struct snd_seq_oss_callback_t {
 	struct module *owner;
-	int (*open)(struct snd_seq_oss_arg *p, void *closure);
-	int (*close)(struct snd_seq_oss_arg *p);
-	int (*ioctl)(struct snd_seq_oss_arg *p, unsigned int cmd, unsigned long arg);
-	int (*load_patch)(struct snd_seq_oss_arg *p, int format, const char __user *buf, int offs, int count);
-	int (*reset)(struct snd_seq_oss_arg *p);
-	int (*raw_event)(struct snd_seq_oss_arg *p, unsigned char *data);
+	int (*open)(snd_seq_oss_arg_t *p, void *closure);
+	int (*close)(snd_seq_oss_arg_t *p);
+	int (*ioctl)(snd_seq_oss_arg_t *p, unsigned int cmd, unsigned long arg);
+	int (*load_patch)(snd_seq_oss_arg_t *p, int format, const char *buf, int offs, int count);
+	int (*reset)(snd_seq_oss_arg_t *p);
+	int (*raw_event)(snd_seq_oss_arg_t *p, unsigned char *data);
 };
 
 /* flag: file_mode */
@@ -82,13 +88,13 @@ struct snd_seq_oss_callback {
 /*
  * data pointer to snd_seq_register_device
  */
-struct snd_seq_oss_reg {
+typedef struct snd_seq_oss_reg {
 	int type;
 	int subtype;
 	int nvoices;
-	struct snd_seq_oss_callback oper;
+	snd_seq_oss_callback_t oper;
 	void *private_data;
-};
+} snd_seq_oss_reg_t;
 
 /* device id */
 #define SNDRV_SEQ_DEV_ID_OSS		"seq-oss"

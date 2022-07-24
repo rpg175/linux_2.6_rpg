@@ -2,6 +2,7 @@
 #define __LINUX_PHONEDEV_H
 
 #include <linux/types.h>
+#include <linux/version.h>
 
 #ifdef __KERNEL__
 
@@ -9,7 +10,7 @@
 
 struct phone_device {
 	struct phone_device *next;
-	const struct file_operations *f_op;
+	struct file_operations *f_op;
 	int (*open) (struct phone_device *, struct file *);
 	int board;		/* Device private index */
 	int minor;

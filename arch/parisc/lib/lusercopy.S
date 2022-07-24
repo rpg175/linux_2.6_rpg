@@ -1,11 +1,8 @@
 /*
- *    User Space Access Routines
+ * Linux/PA-RISC Project (http://www.parisc-linux.org/)
  *
- *    Copyright (C) 2000-2002 Hewlett-Packard (John Marvin)
- *    Copyright (C) 2000 Richard Hirst <rhirst with parisc-linux.org>
- *    Copyright (C) 2001 Matthieu Delahaye <delahaym at esiee.fr>
- *    Copyright (C) 2003 Randolph Chung <tausq with parisc-linux.org>
- *
+ * Assembly Language User Access Routines
+ *  Copyright (C) 2000 Hewlett-Packard (John Marvin)
  *
  *    This program is free software; you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
@@ -19,7 +16,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 /*
@@ -37,7 +34,6 @@
 	
 #include <asm/assembly.h>
 #include <asm/errno.h>
-#include <linux/linkage.h>
 
 	/*
 	 * get_sr gets the appropriate space value into
@@ -54,11 +50,87 @@
 	mtsp        %r1,%sr1
 	.endm
 
-	.macro fixup_branch lbl
-	ldil	    L%\lbl, %r1
-	ldo	    R%\lbl(%r1), %r1
-	bv          %r0(%r1)
-	.endm
+	/*
+	 * unsigned long
+	 * lcopy_to_user(void *to, const void *from, unsigned long n)
+	 *
+	 * Returns 0 for success.
+	 * otherwise, returns number of bytes not transferred.
+	 */
+
+	.export lcopy_to_user,code
+lcopy_to_user:
+	.proc
+	.callinfo NO_CALLS
+	.entry
+	comib,=,n   0,%r24,$lctu_done
+	get_sr
+$lctu_loop:
+	ldbs,ma     1(%r25),%r1
+	addib,<>    -1,%r24,$lctu_loop
+1:      stbs,ma     %r1,1(%sr1,%r26)
+$lctu_done:
+	bv          %r0(%r2)
+	copy        %r24,%r28
+	.exit
+
+2:      b $lctu_done
+	ldo         1(%r24),%r24
+
+	.section __ex_table,"a"
+#ifdef __LP64__
+	.dword      1b,(2b-1b)
+#else
+	.word       1b,(2b-1b)
+#endif
+	.previous
+
+	.procend
+
+	/*
+	 * unsigned long
+	 * lcopy_from_user(void *to, const void *from, unsigned long n)
+	 *
+	 * Returns 0 for success.
+	 * otherwise, returns number of bytes not transferred.
+	 *
+	 * NOTE: This routine will also zero any bytes in the
+	 *       destination that were not copied due to a fault.
+	 *
+	 */
+
+	.export lcopy_from_user,code
+lcopy_from_user:
+	.proc
+	.callinfo NO_CALLS
+	.entry
+	comib,=,n   0,%r24,$lcfu_done
+	get_sr
+$lcfu_loop:
+1:      ldbs,ma     1(%sr1,%r25),%r1
+	addib,<>    -1,%r24,$lcfu_loop
+	stbs,ma     %r1,1(%r26)
+$lcfu_done:
+	bv          %r0(%r2)
+	copy        %r24,%r28
+	.exit
+
+2:      copy        %r24,%r23
+$lcfu_zero_loop:
+	addib,<>    -1,%r23,$lcfu_zero_loop
+	stbs,ma     %r0,1(%r26)
+	b           $lcfu_done
+	nop
+
+	.section __ex_table,"a"
+#ifdef __LP64__
+	.dword      1b,(2b-1b)
+#else
+	.word       1b,(2b-1b)
+#endif
+	.previous
+
+	.procend
 
 	/*
 	 * long lstrncpy_from_user(char *dst, const char *src, long n)
@@ -68,7 +140,8 @@
 	 *         otherwise strlen (i.e. excludes zero byte)
 	 */
 
-ENTRY(lstrncpy_from_user)
+	.export lstrncpy_from_user,code
+lstrncpy_from_user:
 	.proc
 	.callinfo NO_CALLS
 	.entry
@@ -87,16 +160,18 @@ $lsfu_exit:
 	bv          %r0(%r2)
 	nop
 	.exit
-ENDPROC(lstrncpy_from_user)
 
-	.section .fixup,"ax"
-3:      fixup_branch $lsfu_exit
+3:      b           $lsfu_exit
 	ldi         -EFAULT,%r28
-	.previous
 
-	.section __ex_table,"aw"
-	ASM_ULONG_INSN 1b,3b
-	ASM_ULONG_INSN 2b,3b
+	.section __ex_table,"a"
+#ifdef __LP64__
+	.dword      1b,(3b-1b)
+	.dword      2b,(3b-2b)
+#else
+	.word       1b,(3b-1b)
+	.word       2b,(3b-2b)
+#endif
 	.previous
 
 	.procend
@@ -108,7 +183,8 @@ ENDPROC(lstrncpy_from_user)
 	 * otherwise, returns number of bytes not transferred.
 	 */
 
-ENTRY(lclear_user)
+	.export lclear_user,code
+lclear_user:
 	.proc
 	.callinfo NO_CALLS
 	.entry
@@ -122,15 +198,16 @@ $lclu_done:
 	bv          %r0(%r2)
 	copy        %r25,%r28
 	.exit
-ENDPROC(lclear_user)
 
-	.section .fixup,"ax"
-2:      fixup_branch $lclu_done
+2:      b $lclu_done
 	ldo        1(%r25),%r25
-	.previous
 
-	.section __ex_table,"aw"
-	ASM_ULONG_INSN 1b,2b
+	.section __ex_table,"a"
+#ifdef __LP64__
+	.dword      1b,(2b-1b)
+#else
+	.word       1b,(2b-1b)
+#endif
 	.previous
 
 	.procend
@@ -143,7 +220,8 @@ ENDPROC(lclear_user)
 	 *         else strlen + 1 (i.e. includes zero byte).
 	 */
 
-ENTRY(lstrnlen_user)
+	.export lstrnlen_user,code
+lstrnlen_user:
 	.proc
 	.callinfo NO_CALLS
 	.entry
@@ -163,16 +241,18 @@ $lslen_done:
 $lslen_nzero:
 	b           $lslen_done
 	ldo         1(%r26),%r26 /* special case for N == 0 */
-ENDPROC(lstrnlen_user)
 
-	.section .fixup,"ax"
-3:      fixup_branch $lslen_done
+3:      b           $lslen_done
 	copy        %r24,%r26    /* reset r26 so 0 is returned on fault */
-	.previous
 
-	.section __ex_table,"aw"
-	ASM_ULONG_INSN 1b,3b
-	ASM_ULONG_INSN 2b,3b
+	.section __ex_table,"a"
+#ifdef __LP64__
+	.dword      1b,(3b-1b)
+	.dword      2b,(3b-2b)
+#else
+	.word       1b,(3b-1b)
+	.word       2b,(3b-2b)
+#endif
 	.previous
 
 	.procend

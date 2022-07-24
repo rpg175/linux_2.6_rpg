@@ -27,6 +27,8 @@
  * SUCH DAMAGE.
  */
 
+#ident "$Id: vxfs_inode.c,v 1.42 2002/01/02 23:51:36 hch Exp hch $"
+
 /*
  * Veritas filesystem driver - inode routines.
  */
@@ -41,7 +43,21 @@
 #include "vxfs_extern.h"
 
 
-struct kmem_cache		*vxfs_inode_cachep;
+extern struct address_space_operations vxfs_aops;
+extern struct address_space_operations vxfs_immed_aops;
+
+extern struct inode_operations vxfs_immed_symlink_iops;
+
+static struct file_operations vxfs_file_operations = {
+	.open =			generic_file_open,
+	.llseek =		generic_file_llseek,
+	.read =			generic_file_read,
+	.mmap =			generic_file_mmap,
+	.sendfile =		generic_file_sendfile,
+};
+
+
+kmem_cache_t		*vxfs_inode_cachep;
 
 
 #ifdef DIAGNOSTIC
@@ -94,11 +110,11 @@ vxfs_blkiget(struct super_block *sbp, u_long extent, ino_t ino)
 	offset = ((ino % (sbp->s_blocksize / VXFS_ISIZE)) * VXFS_ISIZE);
 	bp = sb_bread(sbp, block);
 
-	if (bp && buffer_mapped(bp)) {
+	if (buffer_mapped(bp)) {
 		struct vxfs_inode_info	*vip;
 		struct vxfs_dinode	*dip;
 
-		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, GFP_KERNEL)))
+		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, SLAB_KERNEL)))
 			goto fail;
 		dip = (struct vxfs_dinode *)(bp->b_data + offset);
 		memcpy(vip, dip, sizeof(*vip));
@@ -124,7 +140,7 @@ fail:
  * Description:
  *  Search the for inode number @ino in the filesystem
  *  described by @sbp.  Use the specified inode table (@ilistp).
- *  Returns the matching VxFS inode on success, else an error code.
+ *  Returns the matching VxFS inode on success, else a NULL pointer.
  */
 static struct vxfs_inode_info *
 __vxfs_iget(ino_t ino, struct inode *ilistp)
@@ -140,7 +156,7 @@ __vxfs_iget(ino_t ino, struct inode *ilistp)
 		struct vxfs_dinode	*dip;
 		caddr_t			kaddr = (char *)page_address(pp);
 
-		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, GFP_KERNEL)))
+		if (!(vip = kmem_cache_alloc(vxfs_inode_cachep, SLAB_KERNEL)))
 			goto fail;
 		dip = (struct vxfs_dinode *)(kaddr + offset);
 		memcpy(vip, dip, sizeof(*vip));
@@ -152,12 +168,12 @@ __vxfs_iget(ino_t ino, struct inode *ilistp)
 	}
 
 	printk(KERN_WARNING "vxfs: error on page %p\n", pp);
-	return ERR_CAST(pp);
+	return NULL;
 
 fail:
 	printk(KERN_WARNING "vxfs: unable to read inode %ld\n", (unsigned long)ino);
 	vxfs_put_page(pp);
-	return ERR_PTR(-ENOMEM);
+	return NULL;
 }
 
 /**
@@ -173,10 +189,7 @@ fail:
 struct vxfs_inode_info *
 vxfs_stiget(struct super_block *sbp, ino_t ino)
 {
-	struct vxfs_inode_info *vip;
-
-	vip = __vxfs_iget(ino, VXFS_SBI(sbp)->vsi_stilist);
-	return IS_ERR(vip) ? NULL : vip;
+        return __vxfs_iget(ino, VXFS_SBI(sbp)->vsi_stilist);
 }
 
 /**
@@ -237,10 +250,11 @@ vxfs_iinit(struct inode *ip, struct vxfs_inode_info *vip)
 	ip->i_ctime.tv_nsec = 0;
 	ip->i_mtime.tv_nsec = 0;
 
+	ip->i_blksize = PAGE_SIZE;
 	ip->i_blocks = vip->vii_blocks;
 	ip->i_generation = vip->vii_gen;
 
-	ip->i_private = vip;
+	ip->u.generic_ip = (void *)vip;
 	
 }
 
@@ -260,7 +274,6 @@ vxfs_get_fake_inode(struct super_block *sbp, struct vxfs_inode_info *vip)
 	struct inode			*ip = NULL;
 
 	if ((ip = new_inode(sbp))) {
-		ip->i_ino = get_next_ino();
 		vxfs_iinit(ip, vip);
 		ip->i_mapping->a_ops = &vxfs_aops;
 	}
@@ -281,32 +294,23 @@ vxfs_put_fake_inode(struct inode *ip)
 }
 
 /**
- * vxfs_iget - get an inode
- * @sbp:	the superblock to get the inode for
- * @ino:	the number of the inode to get
+ * vxfs_read_inode - fill in inode information
+ * @ip:		inode pointer to fill
  *
  * Description:
- *  vxfs_read_inode creates an inode, reads the disk inode for @ino and fills
- *  in all relevant fields in the new inode.
+ *  vxfs_read_inode reads the disk inode for @ip and fills
+ *  in all relevant fields in @ip.
  */
-struct inode *
-vxfs_iget(struct super_block *sbp, ino_t ino)
+void
+vxfs_read_inode(struct inode *ip)
 {
+	struct super_block		*sbp = ip->i_sb;
 	struct vxfs_inode_info		*vip;
-	const struct address_space_operations	*aops;
-	struct inode *ip;
+	struct address_space_operations	*aops;
+	ino_t				ino = ip->i_ino;
 
-	ip = iget_locked(sbp, ino);
-	if (!ip)
-		return ERR_PTR(-ENOMEM);
-	if (!(ip->i_state & I_NEW))
-		return ip;
-
-	vip = __vxfs_iget(ino, VXFS_SBI(sbp)->vsi_ilist);
-	if (IS_ERR(vip)) {
-		iget_failed(ip);
-		return ERR_CAST(vip);
-	}
+	if (!(vip = __vxfs_iget(ino, VXFS_SBI(sbp)->vsi_ilist)))
+		return;
 
 	vxfs_iinit(ip, vip);
 
@@ -316,7 +320,7 @@ vxfs_iget(struct super_block *sbp, ino_t ino)
 		aops = &vxfs_aops;
 
 	if (S_ISREG(ip->i_mode)) {
-		ip->i_fop = &generic_ro_fops;
+		ip->i_fop = &vxfs_file_operations;
 		ip->i_mapping->a_ops = aops;
 	} else if (S_ISDIR(ip->i_mode)) {
 		ip->i_op = &vxfs_dir_inode_ops;
@@ -326,36 +330,25 @@ vxfs_iget(struct super_block *sbp, ino_t ino)
 		if (!VXFS_ISIMMED(vip)) {
 			ip->i_op = &page_symlink_inode_operations;
 			ip->i_mapping->a_ops = &vxfs_aops;
-		} else {
+		} else
 			ip->i_op = &vxfs_immed_symlink_iops;
-			vip->vii_immed.vi_immed[ip->i_size] = '\0';
-		}
 	} else
 		init_special_inode(ip, ip->i_mode, old_decode_dev(vip->vii_rdev));
 
-	unlock_new_inode(ip);
-	return ip;
-}
-
-static void vxfs_i_callback(struct rcu_head *head)
-{
-	struct inode *inode = container_of(head, struct inode, i_rcu);
-	INIT_LIST_HEAD(&inode->i_dentry);
-	kmem_cache_free(vxfs_inode_cachep, inode->i_private);
+	return;
 }
 
 /**
- * vxfs_evict_inode - remove inode from main memory
+ * vxfs_put_inode - remove inode from main memory
  * @ip:		inode to discard.
  *
  * Description:
- *  vxfs_evict_inode() is called on the final iput and frees the private
- *  inode area.
+ *  vxfs_put_inode() is called on each iput.  If we are the last
+ *  link in memory, free the fspriv inode area.
  */
 void
-vxfs_evict_inode(struct inode *ip)
+vxfs_put_inode(struct inode *ip)
 {
-	truncate_inode_pages(&ip->i_data, 0);
-	end_writeback(ip);
-	call_rcu(&ip->i_rcu, vxfs_i_callback);
+	if (atomic_read(&ip->i_count) == 1)
+		kmem_cache_free(vxfs_inode_cachep, ip->u.generic_ip);
 }

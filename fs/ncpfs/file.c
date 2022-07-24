@@ -15,12 +15,14 @@
 #include <linux/fcntl.h>
 #include <linux/stat.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/sched.h>
+#include <linux/smp_lock.h>
 
-#include "ncp_fs.h"
+#include <linux/ncp_fs.h>
+#include "ncplib_kernel.h"
 
-static int ncp_fsync(struct file *file, int datasync)
+static int ncp_fsync(struct file *file, struct dentry *dentry, int datasync)
 {
 	return 0;
 }
@@ -44,7 +46,7 @@ int ncp_make_open(struct inode *inode, int right)
 		NCP_FINFO(inode)->volNumber, 
 		NCP_FINFO(inode)->dirEntNum);
 	error = -EACCES;
-	mutex_lock(&NCP_FINFO(inode)->open_mutex);
+	down(&NCP_FINFO(inode)->open_sem);
 	if (!atomic_read(&NCP_FINFO(inode)->opened)) {
 		struct ncp_entry_info finfo;
 		int result;
@@ -91,15 +93,15 @@ int ncp_make_open(struct inode *inode, int right)
 	}
 
 out_unlock:
-	mutex_unlock(&NCP_FINFO(inode)->open_mutex);
+	up(&NCP_FINFO(inode)->open_sem);
 out:
 	return error;
 }
 
 static ssize_t
-ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+ncp_file_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
-	struct dentry *dentry = file->f_path.dentry;
+	struct dentry *dentry = file->f_dentry;
 	struct inode *inode = dentry->d_inode;
 	size_t already_read = 0;
 	off_t pos;
@@ -110,6 +112,14 @@ ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 
 	DPRINTK("ncp_file_read: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
+
+	if (!ncp_conn_valid(NCP_SERVER(inode)))
+		return -EIO;
+	if (!S_ISREG(inode->i_mode)) {
+		DPRINTK("ncp_file_read: read from non-file, mode %07o\n",
+			inode->i_mode);
+		return -EINVAL;
+	}
 
 	pos = *ppos;
 
@@ -165,8 +175,10 @@ ncp_file_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 
 	*ppos = pos;
 
-	file_accessed(file);
-
+	if (!IS_RDONLY(inode)) {
+		inode->i_atime = CURRENT_TIME;
+	}
+	
 	DPRINTK("ncp_file_read: exit %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 outrel:
@@ -175,9 +187,9 @@ outrel:
 }
 
 static ssize_t
-ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+ncp_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
-	struct dentry *dentry = file->f_path.dentry;
+	struct dentry *dentry = file->f_dentry;
 	struct inode *inode = dentry->d_inode;
 	size_t already_written = 0;
 	off_t pos;
@@ -187,15 +199,23 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 
 	DPRINTK("ncp_file_write: enter %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
+	if (!ncp_conn_valid(NCP_SERVER(inode)))
+		return -EIO;
+	if (!S_ISREG(inode->i_mode)) {
+		DPRINTK("ncp_file_write: write to non-file, mode %07o\n",
+			inode->i_mode);
+		return -EINVAL;
+	}
 	if ((ssize_t) count < 0)
 		return -EINVAL;
 	pos = *ppos;
 	if (file->f_flags & O_APPEND) {
-		pos = i_size_read(inode);
+		pos = inode->i_size;
 	}
 
 	if (pos + count > MAX_NON_LFS && !(file->f_flags&O_LARGEFILE)) {
 		if (pos >= MAX_NON_LFS) {
+			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
 		if (count > MAX_NON_LFS - (u32)pos) {
@@ -204,6 +224,7 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 	}
 	if (pos >= inode->i_sb->s_maxbytes) {
 		if (count || pos > inode->i_sb->s_maxbytes) {
+			send_sig(SIGXFSZ, current, 0);
 			return -EFBIG;
 		}
 	}
@@ -252,16 +273,12 @@ ncp_file_write(struct file *file, const char __user *buf, size_t count, loff_t *
 		}
 	}
 	vfree(bouncebuffer);
-
-	file_update_time(file);
-
+	inode->i_mtime = inode->i_atime = CURRENT_TIME;
+	
 	*ppos = pos;
 
-	if (pos > i_size_read(inode)) {
-		mutex_lock(&inode->i_mutex);
-		if (pos > i_size_read(inode))
-			i_size_write(inode, pos);
-		mutex_unlock(&inode->i_mutex);
+	if (pos > inode->i_size) {
+		inode->i_size = pos;
 	}
 	DPRINTK("ncp_file_write: exit %s/%s\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
@@ -277,21 +294,18 @@ static int ncp_release(struct inode *inode, struct file *file) {
 	return 0;
 }
 
-const struct file_operations ncp_file_operations =
+struct file_operations ncp_file_operations =
 {
-	.llseek		= generic_file_llseek,
+	.llseek		= remote_llseek,
 	.read		= ncp_file_read,
 	.write		= ncp_file_write,
-	.unlocked_ioctl	= ncp_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= ncp_compat_ioctl,
-#endif
+	.ioctl		= ncp_ioctl,
 	.mmap		= ncp_mmap,
 	.release	= ncp_release,
 	.fsync		= ncp_fsync,
 };
 
-const struct inode_operations ncp_file_inode_operations =
+struct inode_operations ncp_file_inode_operations =
 {
 	.setattr	= ncp_notify_change,
 };

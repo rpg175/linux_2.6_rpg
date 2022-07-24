@@ -1,15 +1,24 @@
-#
-# Copyright (C) 2002 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+# 
+# Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
 # Licensed under the GPL
 #
 
-obj-y := clone.o mmu.o process.o syscall.o uaccess.o
+obj-y = exec_kern.o exec_user.o mem.o mem_user.o mmu.o process.o \
+	process_kern.o syscall_kern.o syscall_user.o time.o tlb.o trap_user.o \
+	sys-$(SUBARCH)/
 
-# clone.o is in the stub, so it can't be built with profiling
-# GCC hardened also auto-enables -fpic, but we need %ebx so it can't work ->
-# disable it
+USER_OBJS = $(filter %_user.o,$(obj-y)) process.o time.o
+USER_OBJS := $(foreach file,$(USER_OBJS),$(obj)/$(file))
 
-CFLAGS_clone.o := $(CFLAGS_NO_HARDENING)
-UNPROFILE_OBJS := clone.o
+include/skas_ptregs.h : util/mk_ptregs
+	util/mk_ptregs > $@
 
-include arch/um/scripts/Makefile.rules
+util/mk_ptregs :
+	$(MAKE) -C util
+
+$(USER_OBJS) : %.o: %.c
+	$(CC) $(CFLAGS_$(notdir $@)) $(USER_CFLAGS) -c -o $@ $<
+
+clean :
+	$(MAKE) -C util clean
+	$(RM) -f include/skas_ptregs.h

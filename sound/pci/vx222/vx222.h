@@ -25,11 +25,11 @@
 
 struct snd_vx222 {
 
-	struct vx_core core;
+	vx_core_t core;
 
 	/* h/w config; for PLX and for DSP */
-	struct pci_dev *pci;
 	unsigned long port[2];
+	struct resource *port_res[2];
 
 	unsigned int regCDSP;	/* current CDSP register */
 	unsigned int regCFG;	/* current CFG register */

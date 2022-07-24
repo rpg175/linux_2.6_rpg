@@ -1,19 +1,33 @@
 /*
- * Copyright (c) 2000,2005 Silicon Graphics, Inc.
- * All Rights Reserved.
+ * Copyright (c) 2000 Silicon Graphics, Inc.  All Rights Reserved.
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of version 2 of the GNU General Public License as
  * published by the Free Software Foundation.
  *
- * This program is distributed in the hope that it would be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * This program is distributed in the hope that it would be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write the Free Software Foundation,
- * Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * Further, this software is distributed without any warranty that it is
+ * free of the rightful claim of any third person regarding infringement
+ * or the like.  Any license provided herein, whether implied or
+ * otherwise, applies only to this software file.  Patent licenses, if
+ * any, provided herein do not apply to combinations of this program with
+ * other software, or any other product whatsoever.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write the Free Software Foundation, Inc., 59
+ * Temple Place - Suite 330, Boston MA 02111-1307, USA.
+ *
+ * Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
+ * Mountain View, CA  94043, or:
+ *
+ * http://www.sgi.com
+ *
+ * For further information regarding this notice, see:
+ *
+ * http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
  */
 #ifndef	__XFS_EXTFREE_ITEM_H__
 #define	__XFS_EXTFREE_ITEM_H__
@@ -27,51 +41,17 @@ typedef struct xfs_extent {
 } xfs_extent_t;
 
 /*
- * Since an xfs_extent_t has types (start:64, len: 32)
- * there are different alignments on 32 bit and 64 bit kernels.
- * So we provide the different variants for use by a
- * conversion routine.
- */
-
-typedef struct xfs_extent_32 {
-	__uint64_t	ext_start;
-	__uint32_t	ext_len;
-} __attribute__((packed)) xfs_extent_32_t;
-
-typedef struct xfs_extent_64 {
-	__uint64_t	ext_start;
-	__uint32_t	ext_len;
-	__uint32_t	ext_pad;
-} xfs_extent_64_t;
-
-/*
  * This is the structure used to lay out an efi log item in the
  * log.  The efi_extents field is a variable size array whose
  * size is given by efi_nextents.
  */
 typedef struct xfs_efi_log_format {
-	__uint16_t		efi_type;	/* efi log item type */
-	__uint16_t		efi_size;	/* size of this item */
-	__uint32_t		efi_nextents;	/* # extents to free */
+	unsigned short		efi_type;	/* efi log item type */
+	unsigned short		efi_size;	/* size of this item */
+	uint			efi_nextents;	/* # extents to free */
 	__uint64_t		efi_id;		/* efi identifier */
 	xfs_extent_t		efi_extents[1];	/* array of extents to free */
 } xfs_efi_log_format_t;
-
-typedef struct xfs_efi_log_format_32 {
-	__uint16_t		efi_type;	/* efi log item type */
-	__uint16_t		efi_size;	/* size of this item */
-	__uint32_t		efi_nextents;	/* # extents to free */
-	__uint64_t		efi_id;		/* efi identifier */
-	xfs_extent_32_t		efi_extents[1];	/* array of extents to free */
-} __attribute__((packed)) xfs_efi_log_format_32_t;
-
-typedef struct xfs_efi_log_format_64 {
-	__uint16_t		efi_type;	/* efi log item type */
-	__uint16_t		efi_size;	/* size of this item */
-	__uint32_t		efi_nextents;	/* # extents to free */
-	__uint64_t		efi_id;		/* efi identifier */
-	xfs_extent_64_t		efi_extents[1];	/* array of extents to free */
-} xfs_efi_log_format_64_t;
 
 /*
  * This is the structure used to lay out an efd log item in the
@@ -79,28 +59,12 @@ typedef struct xfs_efi_log_format_64 {
  * size is given by efd_nextents;
  */
 typedef struct xfs_efd_log_format {
-	__uint16_t		efd_type;	/* efd log item type */
-	__uint16_t		efd_size;	/* size of this item */
-	__uint32_t		efd_nextents;	/* # of extents freed */
+	unsigned short		efd_type;	/* efd log item type */
+	unsigned short		efd_size;	/* size of this item */
+	uint			efd_nextents;	/* # of extents freed */
 	__uint64_t		efd_efi_id;	/* id of corresponding efi */
 	xfs_extent_t		efd_extents[1];	/* array of extents freed */
 } xfs_efd_log_format_t;
-
-typedef struct xfs_efd_log_format_32 {
-	__uint16_t		efd_type;	/* efd log item type */
-	__uint16_t		efd_size;	/* size of this item */
-	__uint32_t		efd_nextents;	/* # of extents freed */
-	__uint64_t		efd_efi_id;	/* id of corresponding efi */
-	xfs_extent_32_t		efd_extents[1];	/* array of extents freed */
-} __attribute__((packed)) xfs_efd_log_format_32_t;
-
-typedef struct xfs_efd_log_format_64 {
-	__uint16_t		efd_type;	/* efd log item type */
-	__uint16_t		efd_size;	/* size of this item */
-	__uint32_t		efd_nextents;	/* # of extents freed */
-	__uint64_t		efd_efi_id;	/* id of corresponding efi */
-	xfs_extent_64_t		efd_extents[1];	/* array of extents freed */
-} xfs_efd_log_format_64_t;
 
 
 #ifdef __KERNEL__
@@ -111,10 +75,11 @@ typedef struct xfs_efd_log_format_64 {
 #define	XFS_EFI_MAX_FAST_EXTENTS	16
 
 /*
- * Define EFI flag bits. Manipulated by set/clear/test_bit operators.
+ * Define EFI flags.
  */
-#define	XFS_EFI_RECOVERED	1
-#define	XFS_EFI_COMMITTED	2
+#define	XFS_EFI_RECOVERED	0x1
+#define	XFS_EFI_COMMITTED	0x2
+#define	XFS_EFI_CANCELED	0x4
 
 /*
  * This is the "extent free intention" log item.  It is used
@@ -124,8 +89,8 @@ typedef struct xfs_efd_log_format_64 {
  */
 typedef struct xfs_efi_log_item {
 	xfs_log_item_t		efi_item;
-	atomic_t		efi_next_extent;
-	unsigned long		efi_flags;	/* misc flags */
+	uint			efi_flags;	/* misc flags */
+	uint			efi_next_extent;
 	xfs_efi_log_format_t	efi_format;
 } xfs_efi_log_item_t;
 
@@ -152,9 +117,6 @@ extern struct kmem_zone	*xfs_efd_zone;
 xfs_efi_log_item_t	*xfs_efi_init(struct xfs_mount *, uint);
 xfs_efd_log_item_t	*xfs_efd_init(struct xfs_mount *, xfs_efi_log_item_t *,
 				      uint);
-int			xfs_efi_copy_format(xfs_log_iovec_t *buf,
-					    xfs_efi_log_format_t *dst_efi_fmt);
-void			xfs_efi_item_free(xfs_efi_log_item_t *);
 
 #endif	/* __KERNEL__ */
 

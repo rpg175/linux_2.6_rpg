@@ -1,4 +1,4 @@
-/* $Id: mntfunc.c,v 1.19.6.4 2005/01/31 12:22:20 armin Exp $
+/* $Id: mntfunc.c,v 1.16 2003/09/18 06:57:17 schindler Exp $
  *
  * Driver for Eicon DIVA Server ISDN cards.
  * Maint module
@@ -23,16 +23,21 @@ extern char *DRIVERRELEASE_MNT;
 
 extern void DIVA_DIDD_Read(void *, int);
 
+#define MAX_DESCRIPTORS  32
+
 static dword notify_handle;
 static DESCRIPTOR DAdapter;
 static DESCRIPTOR MAdapter;
 static DESCRIPTOR MaintDescriptor =
     { IDI_DIMAINT, 0, 0, (IDI_CALL) diva_maint_prtComp };
 
-extern int diva_os_copy_to_user(void *os_handle, void __user *dst,
+extern void *diva_os_malloc_tbuffer(unsigned long flags,
+				    unsigned long size);
+extern void diva_os_free_tbuffer(unsigned long flags, void *ptr);
+extern int diva_os_copy_to_user(void *os_handle, void *dst,
 				const void *src, int length);
 extern int diva_os_copy_from_user(void *os_handle, void *dst,
-				  const void __user *src, int length);
+				  const void *src, int length);
 
 static void no_printf(unsigned char *x, ...)
 {
@@ -40,6 +45,16 @@ static void no_printf(unsigned char *x, ...)
 }
 
 #include "debuglib.c"
+
+/*
+ * stop debug
+ */
+static void stop_dbg(void)
+{
+	DbgDeregister();
+	memset(&MAdapter, 0, sizeof(MAdapter));
+	dprintf = no_printf;
+}
 
 /*
  *  DIDD callback function
@@ -51,9 +66,7 @@ static void *didd_callback(void *context, DESCRIPTOR * adapter,
 		DBG_ERR(("cb: Change in DAdapter ? Oops ?."));
 	} else if (adapter->type == IDI_DIMAINT) {
 		if (removal) {
-			DbgDeregister();
-			memset(&MAdapter, 0, sizeof(MAdapter));
-			dprintf = no_printf;
+			stop_dbg();
 		} else {
 			memcpy(&MAdapter, adapter, sizeof(MAdapter));
 			dprintf = (DIVA_DI_PRINTF) MAdapter.request;
@@ -89,7 +102,7 @@ static int DIVA_INIT_FUNCTION connect_didd(void)
 			req.didd_notify.e.Rc =
 			    IDI_SYNC_REQ_DIDD_REGISTER_ADAPTER_NOTIFY;
 			req.didd_notify.info.callback = (void *)didd_callback;
-			req.didd_notify.info.context = NULL;
+			req.didd_notify.info.context = 0;
 			DAdapter.request((ENTITY *) & req);
 			if (req.didd_notify.e.Rc != 0xff)
 				return (0);
@@ -118,6 +131,8 @@ static void DIVA_EXIT_FUNCTION disconnect_didd(void)
 {
 	IDI_SYNC_REQ req;
 
+	stop_dbg();
+
 	req.didd_notify.e.Req = 0;
 	req.didd_notify.e.Rc = IDI_SYNC_REQ_DIDD_REMOVE_ADAPTER_NOTIFY;
 	req.didd_notify.info.handle = notify_handle;
@@ -133,14 +148,11 @@ static void DIVA_EXIT_FUNCTION disconnect_didd(void)
 /*
  * read/write maint
  */
-int maint_read_write(void __user *buf, int count)
+int maint_read_write(void *buf)
 {
 	byte data[128];
 	dword cmd, id, mask;
 	int ret = 0;
-
-	if (count < (3 * sizeof(dword)))
-		return (-EFAULT);
 
 	if (diva_os_copy_from_user(NULL, (void *) &data[0],
 				   buf, 3 * sizeof(dword))) {
@@ -154,7 +166,7 @@ int maint_read_write(void __user *buf, int count)
 	switch (cmd) {
 	case DITRACE_CMD_GET_DRIVER_INFO:
 		if ((ret = diva_get_driver_info(id, data, sizeof(data))) > 0) {
-			if ((count < ret) || diva_os_copy_to_user
+			if (diva_os_copy_to_user
 			    (NULL, buf, (void *) &data[0], ret))
 				ret = -EFAULT;
 		} else {
@@ -164,7 +176,7 @@ int maint_read_write(void __user *buf, int count)
 
 	case DITRACE_READ_DRIVER_DBG_MASK:
 		if ((ret = diva_get_driver_dbg_mask(id, (byte *) data)) > 0) {
-			if ((count < ret) || diva_os_copy_to_user
+			if (diva_os_copy_to_user
 			    (NULL, buf, (void *) &data[0], ret))
 				ret = -EFAULT;
 		} else {
@@ -178,63 +190,34 @@ int maint_read_write(void __user *buf, int count)
 		}
 		break;
 
-    /*
-       Filter commands will ignore the ID due to fact that filtering affects
-       the B- channel and Audio Tap trace levels only. Also MAINT driver will
-       select the right trace ID by itself
-       */
-	case DITRACE_WRITE_SELECTIVE_TRACE_FILTER:
-		if (!mask) {
-			ret = diva_set_trace_filter (1, "*");
-		} else if (mask < sizeof(data)) {
-			if (diva_os_copy_from_user(NULL, data, (char __user *)buf+12, mask)) {
-				ret = -EFAULT;
-			} else {
-				ret = diva_set_trace_filter ((int)mask, data);
-			}
-		} else {
-			ret = -EINVAL;
-		}
-		break;
-
-	case DITRACE_READ_SELECTIVE_TRACE_FILTER:
-		if ((ret = diva_get_trace_filter (sizeof(data), data)) > 0) {
-			if (diva_os_copy_to_user (NULL, buf, data, ret))
-				ret = -EFAULT;
-		} else {
-			ret = -ENODEV;
-		}
-		break;
-
 	case DITRACE_READ_TRACE_ENTRY:{
 			diva_os_spin_lock_magic_t old_irql;
 			word size;
 			diva_dbg_entry_head_t *pmsg;
 			byte *pbuf;
 
-			if (!(pbuf = diva_os_malloc(0, mask))) {
-				return (-ENOMEM);
-			}
-
-			for(;;) {
-				if (!(pmsg =
-				    diva_maint_get_message(&size, &old_irql))) {
-					break;
-				}
+			if ((pmsg = diva_maint_get_message(&size, &old_irql))) {
 				if (size > mask) {
 					diva_maint_ack_message(0, &old_irql);
 					ret = -EINVAL;
-					break;
-				}
-				ret = size;
-				memcpy(pbuf, pmsg, size);
-				diva_maint_ack_message(1, &old_irql);
-				if ((count < size) ||
-				     diva_os_copy_to_user (NULL, buf, (void *) pbuf, size))
+				} else {
+					if (!(pbuf = diva_os_malloc_tbuffer(0, size)))
+					{
+						diva_maint_ack_message(0, &old_irql);
+						ret = -ENOMEM;
+					} else {
+						ret = size;
+						memcpy(pbuf, pmsg, size);
+						diva_maint_ack_message(1, &old_irql);
+						if (diva_os_copy_to_user (NULL, buf,
+						     (void *) pbuf, size))
 							ret = -EFAULT;
-				break;
+						diva_os_free_tbuffer(0, pbuf);
+					}
+				}
+			} else {
+				ret = 0;
 			}
-			diva_os_free(0, pbuf);
 		}
 		break;
 
@@ -242,14 +225,14 @@ int maint_read_write(void __user *buf, int count)
 			diva_os_spin_lock_magic_t old_irql;
 			word size;
 			diva_dbg_entry_head_t *pmsg;
-			byte *pbuf = NULL;
+			byte *pbuf = 0;
 			int written = 0;
 
 			if (mask < 4096) {
 				ret = -EINVAL;
 				break;
 			}
-			if (!(pbuf = diva_os_malloc(0, mask))) {
+			if (!(pbuf = diva_os_malloc_tbuffer(0, mask))) {
 				return (-ENOMEM);
 			}
 
@@ -282,12 +265,12 @@ int maint_read_write(void __user *buf, int count)
 			pbuf[written++] = 0;
 			pbuf[written++] = 0;
 
-			if ((count < written) || diva_os_copy_to_user(NULL, buf, (void *) pbuf, written)) {
+			if (diva_os_copy_to_user(NULL, buf, (void *) pbuf, written)) {
 				ret = -EFAULT;
 			} else {
 				ret = written;
 			}
-			diva_os_free(0, pbuf);
+			diva_os_free_tbuffer(0, pbuf);
 		}
 		break;
 
@@ -316,7 +299,7 @@ int DIVA_INIT_FUNCTION mntfunc_init(int *buffer_length, void **buffer,
 	} else {
 		while ((*buffer_length >= (64 * 1024))
 		       &&
-		       (!(*buffer = diva_os_malloc (0, *buffer_length)))) {
+		       (!(*buffer = diva_os_malloc_tbuffer(0, *buffer_length)))) {
 			*buffer_length -= 1024;
 		}
 
@@ -328,7 +311,7 @@ int DIVA_INIT_FUNCTION mntfunc_init(int *buffer_length, void **buffer,
 
 	if (diva_maint_init(*buffer, *buffer_length, (diva_dbg_mem == 0))) {
 		if (!diva_dbg_mem) {
-			diva_os_free (0, *buffer);
+			diva_os_free_tbuffer(0, *buffer);
 		}
 		DBG_ERR(("init: maint init failed"));
 		return (0);
@@ -338,7 +321,7 @@ int DIVA_INIT_FUNCTION mntfunc_init(int *buffer_length, void **buffer,
 		DBG_ERR(("init: failed to connect to DIDD."));
 		diva_maint_finit();
 		if (!diva_dbg_mem) {
-			diva_os_free (0, *buffer);
+			diva_os_free_tbuffer(0, *buffer);
 		}
 		return (0);
 	}
@@ -353,8 +336,6 @@ void DIVA_EXIT_FUNCTION mntfunc_finit(void)
 	void *buffer;
 	int i = 100;
 
-	DbgDeregister();
-
 	while (diva_mnt_shutdown_xdi_adapters() && i--) {
 		diva_os_sleep(10);
 	}
@@ -362,9 +343,6 @@ void DIVA_EXIT_FUNCTION mntfunc_finit(void)
 	disconnect_didd();
 
 	if ((buffer = diva_maint_finit())) {
-		diva_os_free (0, buffer);
+		diva_os_free_tbuffer(0, buffer);
 	}
-
-	memset(&MAdapter, 0, sizeof(MAdapter));
-	dprintf = no_printf;
 }

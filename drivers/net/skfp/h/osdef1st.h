@@ -20,8 +20,6 @@
 // HWM (HardWare Module) Definitions
 // -----------------------
 
-#include <asm/byteorder.h>
-
 #ifdef __LITTLE_ENDIAN
 #define LITTLE_ENDIAN
 #else

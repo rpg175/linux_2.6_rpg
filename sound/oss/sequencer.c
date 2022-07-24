@@ -1,5 +1,5 @@
 /*
- * sound/oss/sequencer.c
+ * sound/sequencer.c
  *
  * The sequencer personality manager.
  */
@@ -16,6 +16,7 @@
  */
 #include <linux/kmod.h>
 #include <linux/spinlock.h>
+#define SEQUENCER_C
 #include "sound_config.h"
 
 #include "midi_ctrl.h"
@@ -27,7 +28,7 @@ static int      pending_timer = -1;	/* For timer change operation */
 extern unsigned long seq_time;
 
 static int      obsolete_api_used;
-static DEFINE_SPINLOCK(lock);
+static spinlock_t lock=SPIN_LOCK_UNLOCKED;
 
 /*
  * Local counts for number of synth and MIDI devices. These are initialized
@@ -81,7 +82,7 @@ static void     seq_reset(void);
 #error Too many synthesizer devices enabled.
 #endif
 
-int sequencer_read(int dev, struct file *file, char __user *buf, int count)
+int sequencer_read(int dev, struct file *file, char *buf, int count)
 {
 	int c = count, p = 0;
 	int ev_len;
@@ -156,7 +157,6 @@ void seq_copy_to_input(unsigned char *event_rec, int len)
 	wake_up(&midi_sleeper);
 	spin_unlock_irqrestore(&lock,flags);
 }
-EXPORT_SYMBOL(seq_copy_to_input);
 
 static void sequencer_midi_input(int dev, unsigned char data)
 {
@@ -206,12 +206,12 @@ void seq_input_event(unsigned char *event_rec, int len)
 	}
 	seq_copy_to_input(event_rec, len);
 }
-EXPORT_SYMBOL(seq_input_event);
 
-int sequencer_write(int dev, struct file *file, const char __user *buf, int count)
+int sequencer_write(int dev, struct file *file, const char *buf, int count)
 {
 	unsigned char event_rec[EV_SZ], ev_code;
 	int p = 0, c, ev_size;
+	int err;
 	int mode = translate_mode(file);
 
 	dev = dev >> 4;
@@ -241,7 +241,7 @@ int sequencer_write(int dev, struct file *file, const char __user *buf, int coun
 				return -ENXIO;
 
 			fmt = (*(short *) &event_rec[0]) & 0xffff;
-			err = synth_devs[dev]->load_patch(dev, fmt, buf + p, c, 0);
+			err = synth_devs[dev]->load_patch(dev, fmt, buf, p + 4, c, 0);
 			if (err < 0)
 				return err;
 
@@ -284,7 +284,7 @@ int sequencer_write(int dev, struct file *file, const char __user *buf, int coun
 		{
 			if (!midi_opened[event_rec[2]])
 			{
-				int err, mode;
+				int mode;
 				int dev = event_rec[2];
 
 				if (dev >= max_mididev || midi_devs[dev]==NULL)
@@ -709,11 +709,11 @@ static void seq_local_event(unsigned char *event_rec)
 
 static void seq_sysex_message(unsigned char *event_rec)
 {
-	unsigned int dev = event_rec[1];
+	int dev = event_rec[1];
 	int i, l = 0;
 	unsigned char  *buf = &event_rec[2];
 
-	if (dev > max_synthdev)
+	if ((int) dev > max_synthdev)
 		return;
 	if (!(synth_open_mask & (1 << dev)))
 		return;
@@ -1091,7 +1091,7 @@ int sequencer_open(int dev, struct file *file)
 	return 0;
 }
 
-static void seq_drain_midi_queues(void)
+void seq_drain_midi_queues(void)
 {
 	int i, n;
 
@@ -1320,14 +1320,13 @@ static void seq_panic(void)
 	 */
 }
 
-int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *arg)
+int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, caddr_t arg)
 {
 	int midi_dev, orig_dev, val, err;
 	int mode = translate_mode(file);
 	struct synth_info inf;
 	struct seq_event_rec event_rec;
 	unsigned long flags;
-	int __user *p = arg;
 
 	orig_dev = dev = dev >> 4;
 
@@ -1347,7 +1346,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 		case SNDCTL_TMR_SELECT:
 			if (seq_mode != SEQ_2)
 				return -EINVAL;
-			if (get_user(pending_timer, p))
+			if (get_user(pending_timer, (int *)arg))
 				return -EFAULT;
 			if (pending_timer < 0 || pending_timer >= num_sound_timers || sound_timer_devs[pending_timer] == NULL)
 			{
@@ -1373,7 +1372,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			return 0;
 
 		case SNDCTL_SEQ_TESTMIDI:
-			if (__get_user(midi_dev, p))
+			if (__get_user(midi_dev, (int *)arg))
 				return -EFAULT;
 			if (midi_dev < 0 || midi_dev >= max_mididev || !midi_devs[midi_dev])
 				return -ENXIO;
@@ -1410,7 +1409,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			if (seq_mode == SEQ_2)
 				return tmr->ioctl(tmr_no, cmd, arg);
 
-			if (get_user(val, p))
+			if (get_user(val, (int *)arg))
 				return -EFAULT;
 			if (val != 0)
 				return -EINVAL;
@@ -1420,7 +1419,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 		case SNDCTL_SEQ_RESETSAMPLES:
 		case SNDCTL_SYNTH_REMOVESAMPLE:
 		case SNDCTL_SYNTH_CONTROL:
-			if (get_user(dev, p))
+			if (get_user(dev, (int *)arg))
 				return -EFAULT;
 			if (dev < 0 || dev >= num_synths || synth_devs[dev] == NULL)
 				return -ENXIO;
@@ -1437,7 +1436,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			break;
 
 		case SNDCTL_SYNTH_MEMAVL:
-			if (get_user(dev, p))
+			if (get_user(dev, (int *)arg))
 				return -EFAULT;
 			if (dev < 0 || dev >= num_synths || synth_devs[dev] == NULL)
 				return -ENXIO;
@@ -1447,7 +1446,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			break;
 
 		case SNDCTL_FM_4OP_ENABLE:
-			if (get_user(dev, p))
+			if (get_user(dev, (int *)arg))
 				return -EFAULT;
 			if (dev < 0 || dev >= num_synths || synth_devs[dev] == NULL)
 				return -ENXIO;
@@ -1457,7 +1456,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			return 0;
 
 		case SNDCTL_SYNTH_INFO:
-			if (get_user(dev, &((struct synth_info __user *)arg)->device))
+			if (get_user(dev, (int *)(&(((struct synth_info *)arg)->device))))
 				return -EFAULT;
 			if (dev < 0 || dev >= max_synthdev)
 				return -ENXIO;
@@ -1467,7 +1466,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 
 		/* Like SYNTH_INFO but returns ID in the name field */
 		case SNDCTL_SYNTH_ID:
-			if (get_user(dev, &((struct synth_info __user *)arg)->device))
+			if (get_user(dev, (int *)(&(((struct synth_info *)arg)->device))))
 				return -EFAULT;
 			if (dev < 0 || dev >= max_synthdev)
 				return -ENXIO;
@@ -1487,7 +1486,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			return 0;
 
 		case SNDCTL_MIDI_INFO:
-			if (get_user(dev, &((struct midi_info __user *)arg)->device))
+			if (get_user(dev, (int *)(&(((struct midi_info *)arg)->device))))
 				return -EFAULT;
 			if (dev < 0 || dev >= max_mididev || !midi_devs[dev])
 				return -ENXIO;
@@ -1495,7 +1494,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			return copy_to_user(arg, &midi_devs[dev]->info, sizeof(struct midi_info))?-EFAULT:0;
 
 		case SNDCTL_SEQ_THRESHOLD:
-			if (get_user(val, p))
+			if (get_user(val, (int *)arg))
 				return -EFAULT;
 			if (val < 1)
 				val = 1;
@@ -1505,7 +1504,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 			return 0;
 
 		case SNDCTL_MIDI_PRETIME:
-			if (get_user(val, p))
+			if (get_user(val, (int *)arg))
 				return -EFAULT;
 			if (val < 0)
 				val = 0;
@@ -1524,7 +1523,7 @@ int sequencer_ioctl(int dev, struct file *file, unsigned int cmd, void __user *a
 				return -EINVAL;
 			return synth_devs[0]->ioctl(0, cmd, arg);
 	}
-	return put_user(val, p);
+	return put_user(val, (int *)arg);
 }
 
 /* No kernel lock - we're using the global irq lock here */
@@ -1554,7 +1553,6 @@ void sequencer_timer(unsigned long dummy)
 {
 	seq_startplay();
 }
-EXPORT_SYMBOL(sequencer_timer);
 
 int note_to_freq(int note_num)
 {
@@ -1588,7 +1586,6 @@ int note_to_freq(int note_num)
 
 	return note_freq;
 }
-EXPORT_SYMBOL(note_to_freq);
 
 unsigned long compute_finetune(unsigned long base_freq, int bend, int range,
 		 int vibrato_cents)
@@ -1631,6 +1628,8 @@ unsigned long compute_finetune(unsigned long base_freq, int bend, int range,
 	}
 
 	semitones = bend / 100;
+	if (semitones > 99)
+		semitones = 99;
 	cents = bend % 100;
 
 	amount = (int) (semitone_tuning[semitones] * multiplier * cent_tuning[cents]) / 10000;
@@ -1640,19 +1639,26 @@ unsigned long compute_finetune(unsigned long base_freq, int bend, int range,
 	else
 		return (base_freq * amount) / 10000;	/* Bend up */
 }
-EXPORT_SYMBOL(compute_finetune);
+
 
 void sequencer_init(void)
 {
+	/* drag in sequencer_syms.o */
+	{
+		extern char sequencer_syms_symbol;
+		sequencer_syms_symbol = 0;
+	}
+
 	if (sequencer_ok)
 		return;
-	queue = vmalloc(SEQ_MAX_QUEUE * EV_SZ);
+	MIDIbuf_init();
+	queue = (unsigned char *)vmalloc(SEQ_MAX_QUEUE * EV_SZ);
 	if (queue == NULL)
 	{
 		printk(KERN_ERR "sequencer: Can't allocate memory for sequencer output queue\n");
 		return;
 	}
-	iqueue = vmalloc(SEQ_MAX_QUEUE * IEV_SZ);
+	iqueue = (unsigned char *)vmalloc(SEQ_MAX_QUEUE * IEV_SZ);
 	if (iqueue == NULL)
 	{
 		printk(KERN_ERR "sequencer: Can't allocate memory for sequencer input queue\n");
@@ -1661,11 +1667,17 @@ void sequencer_init(void)
 	}
 	sequencer_ok = 1;
 }
-EXPORT_SYMBOL(sequencer_init);
 
 void sequencer_unload(void)
 {
-	vfree(queue);
-	vfree(iqueue);
-	queue = iqueue = NULL;
+	if(queue)
+	{
+		vfree(queue);
+		queue=NULL;
+	}
+	if(iqueue)
+	{
+		vfree(iqueue);
+		iqueue=NULL;
+	}
 }

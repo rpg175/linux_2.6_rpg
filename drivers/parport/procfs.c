@@ -1,6 +1,6 @@
 /* Sysctl interface for parport devices.
  * 
- * Authors: David Campbell
+ * Authors: David Campbell <campbell@torque.net>
  *          Tim Waugh <tim@cyberelk.demon.co.uk>
  *          Philip Blundell <philb@gnu.org>
  *          Andrea Arcangeli
@@ -13,8 +13,7 @@
  */
 
 #include <linux/string.h>
-#include <linux/init.h>
-#include <linux/module.h>
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -31,8 +30,8 @@
 #define PARPORT_MIN_SPINTIME_VALUE 1
 #define PARPORT_MAX_SPINTIME_VALUE 1000
 
-static int do_active_device(ctl_table *table, int write,
-		      void __user *result, size_t *lenp, loff_t *ppos)
+static int do_active_device(ctl_table *table, int write, struct file *filp,
+		      void *result, size_t *lenp)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[256];
@@ -42,7 +41,7 @@ static int do_active_device(ctl_table *table, int write,
 	if (write)		/* can't happen anyway */
 		return -EACCES;
 
-	if (*ppos) {
+	if (filp->f_pos) {
 		*lenp = 0;
 		return 0;
 	}
@@ -62,14 +61,14 @@ static int do_active_device(ctl_table *table, int write,
 	else
 		*lenp = len;
 
-	*ppos += len;
+	filp->f_pos += len;
 
 	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
 }
 
 #ifdef CONFIG_PARPORT_1284
-static int do_autoprobe(ctl_table *table, int write,
-			void __user *result, size_t *lenp, loff_t *ppos)
+static int do_autoprobe(ctl_table *table, int write, struct file *filp,
+			void *result, size_t *lenp)
 {
 	struct parport_device_info *info = table->extra2;
 	const char *str;
@@ -79,7 +78,7 @@ static int do_autoprobe(ctl_table *table, int write,
 	if (write) /* permissions stop this */
 		return -EACCES;
 
-	if (*ppos) {
+	if (filp->f_pos) {
 		*lenp = 0;
 		return 0;
 	}
@@ -104,21 +103,21 @@ static int do_autoprobe(ctl_table *table, int write,
 	else
 		*lenp = len;
 
-	*ppos += len;
+	filp->f_pos += len;
 
 	return copy_to_user (result, buffer, len) ? -EFAULT : 0;
 }
 #endif /* IEEE1284.3 support. */
 
 static int do_hardware_base_addr (ctl_table *table, int write,
-				  void __user *result,
-				  size_t *lenp, loff_t *ppos)
+				  struct file *filp, void *result,
+				  size_t *lenp)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[20];
 	int len = 0;
 
-	if (*ppos) {
+	if (filp->f_pos) {
 		*lenp = 0;
 		return 0;
 	}
@@ -133,20 +132,20 @@ static int do_hardware_base_addr (ctl_table *table, int write,
 	else
 		*lenp = len;
 
-	*ppos += len;
+	filp->f_pos += len;
 
 	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
 }
 
 static int do_hardware_irq (ctl_table *table, int write,
-			    void __user *result,
-			    size_t *lenp, loff_t *ppos)
+			    struct file *filp, void *result,
+			    size_t *lenp)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[20];
 	int len = 0;
 
-	if (*ppos) {
+	if (filp->f_pos) {
 		*lenp = 0;
 		return 0;
 	}
@@ -161,20 +160,20 @@ static int do_hardware_irq (ctl_table *table, int write,
 	else
 		*lenp = len;
 
-	*ppos += len;
+	filp->f_pos += len;
 
 	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
 }
 
 static int do_hardware_dma (ctl_table *table, int write,
-			    void __user *result,
-			    size_t *lenp, loff_t *ppos)
+			    struct file *filp, void *result,
+			    size_t *lenp)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[20];
 	int len = 0;
 
-	if (*ppos) {
+	if (filp->f_pos) {
 		*lenp = 0;
 		return 0;
 	}
@@ -189,20 +188,20 @@ static int do_hardware_dma (ctl_table *table, int write,
 	else
 		*lenp = len;
 
-	*ppos += len;
+	filp->f_pos += len;
 
 	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
 }
 
 static int do_hardware_modes (ctl_table *table, int write,
-			      void __user *result,
-			      size_t *lenp, loff_t *ppos)
+			      struct file *filp, void *result,
+			      size_t *lenp)
 {
 	struct parport *port = (struct parport *)table->extra1;
 	char buffer[40];
 	int len = 0;
 
-	if (*ppos) {
+	if (filp->f_pos) {
 		*lenp = 0;
 		return 0;
 	}
@@ -228,17 +227,17 @@ static int do_hardware_modes (ctl_table *table, int write,
 	else
 		*lenp = len;
 
-	*ppos += len;
+	filp->f_pos += len;
 
 	return copy_to_user(result, buffer, len) ? -EFAULT : 0;
 }
 
-#define PARPORT_PORT_DIR(CHILD) { .procname = NULL, .mode = 0555, .child = CHILD }
-#define PARPORT_PARPORT_DIR(CHILD) { .procname = "parport", \
-                                     .mode = 0555, .child = CHILD }
-#define PARPORT_DEV_DIR(CHILD) { .procname = "dev", .mode = 0555, .child = CHILD }
-#define PARPORT_DEVICES_ROOT_DIR  {  .procname = "devices", \
-                                    .mode = 0555, .child = NULL }
+#define PARPORT_PORT_DIR(child) { 0, NULL, NULL, 0, 0555, child }
+#define PARPORT_PARPORT_DIR(child) { DEV_PARPORT, "parport", \
+                                     NULL, 0, 0555, child }
+#define PARPORT_DEV_DIR(child) { CTL_DEV, "dev", NULL, 0, 0555, child }
+#define PARPORT_DEVICES_ROOT_DIR  { DEV_PARPORT_DEVICES, "devices", \
+                                    NULL, 0, 0555, NULL }
 
 static const unsigned long parport_min_timeslice_value =
 PARPORT_MIN_TIMESLICE_VALUE;
@@ -263,107 +262,50 @@ struct parport_sysctl_table {
 };
 
 static const struct parport_sysctl_table parport_sysctl_template = {
-	.sysctl_header = NULL,
+	NULL,
         {
-		{
-			.procname	= "spintime",
-			.data		= NULL,
-			.maxlen		= sizeof(int),
-			.mode		= 0644,
-			.proc_handler	= proc_dointvec_minmax,
-			.extra1		= (void*) &parport_min_spintime_value,
-			.extra2		= (void*) &parport_max_spintime_value
-		},
-		{
-			.procname	= "base-addr",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_hardware_base_addr
-		},
-		{
-			.procname	= "irq",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_hardware_irq
-		},
-		{
-			.procname	= "dma",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_hardware_dma
-		},
-		{
-			.procname	= "modes",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_hardware_modes
-		},
+		{ DEV_PARPORT_SPINTIME, "spintime",
+		  NULL, sizeof(int), 0644, NULL,
+		  &proc_dointvec_minmax, NULL, NULL,
+		  (void*) &parport_min_spintime_value,
+		  (void*) &parport_max_spintime_value },
+		{ DEV_PARPORT_BASE_ADDR, "base-addr",
+		  NULL, 0, 0444, NULL,
+		  &do_hardware_base_addr },
+		{ DEV_PARPORT_IRQ, "irq",
+		  NULL, 0, 0444, NULL,
+		  &do_hardware_irq },
+		{ DEV_PARPORT_DMA, "dma",
+		  NULL, 0, 0444, NULL,
+		  &do_hardware_dma },
+		{ DEV_PARPORT_MODES, "modes",
+		  NULL, 0, 0444, NULL,
+		  &do_hardware_modes },
 		PARPORT_DEVICES_ROOT_DIR,
 #ifdef CONFIG_PARPORT_1284
-		{
-			.procname	= "autoprobe",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_autoprobe
-		},
-		{
-			.procname	= "autoprobe0",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_autoprobe
-		},
-		{
-			.procname	= "autoprobe1",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_autoprobe
-		},
-		{
-			.procname	= "autoprobe2",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_autoprobe
-		},
-		{
-			.procname	= "autoprobe3",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_autoprobe
-		},
+		{ DEV_PARPORT_AUTOPROBE, "autoprobe",
+		  NULL, 0, 0444, NULL,
+		  &do_autoprobe },
+		{ DEV_PARPORT_AUTOPROBE + 1, "autoprobe0",
+		 NULL, 0, 0444, NULL,
+		 &do_autoprobe },
+		{ DEV_PARPORT_AUTOPROBE + 2, "autoprobe1",
+		  NULL, 0, 0444, NULL,
+		  &do_autoprobe },
+		{ DEV_PARPORT_AUTOPROBE + 3, "autoprobe2",
+		  NULL, 0, 0444, NULL,
+		  &do_autoprobe },
+		{ DEV_PARPORT_AUTOPROBE + 4, "autoprobe3",
+		  NULL, 0, 0444, NULL,
+		  &do_autoprobe },
 #endif /* IEEE 1284 support */
-		{}
+		{0}
 	},
-	{
-		{
-			.procname	= "active",
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0444,
-			.proc_handler	= do_active_device
-		},
-		{}
-	},
-	{
-		PARPORT_PORT_DIR(NULL),
-		{}
-	},
-	{
-		PARPORT_PARPORT_DIR(NULL),
-		{}
-	},
-	{
-		PARPORT_DEV_DIR(NULL),
-		{}
-	}
+	{ {DEV_PARPORT_DEVICES_ACTIVE, "active", NULL, 0, 0444, NULL,
+	  &do_active_device }, {0}},
+	{ PARPORT_PORT_DIR(NULL), {0}},
+	{ PARPORT_PARPORT_DIR(NULL), {0}},
+	{ PARPORT_DEV_DIR(NULL), {0}}
 };
 
 struct parport_device_sysctl_table
@@ -379,44 +321,19 @@ struct parport_device_sysctl_table
 
 static const struct parport_device_sysctl_table
 parport_device_sysctl_template = {
-	.sysctl_header = NULL,
+	NULL,
 	{
-		{
-			.procname 	= "timeslice",
-			.data		= NULL,
-			.maxlen		= sizeof(unsigned long),
-			.mode		= 0644,
-			.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
-			.extra1		= (void*) &parport_min_timeslice_value,
-			.extra2		= (void*) &parport_max_timeslice_value
-		},
+		{ DEV_PARPORT_DEVICE_TIMESLICE, "timeslice",
+		  NULL, sizeof(int), 0644, NULL,
+		  &proc_doulongvec_ms_jiffies_minmax, NULL, NULL,
+		  (void*) &parport_min_timeslice_value,
+		  (void*) &parport_max_timeslice_value },
 	},
-	{
-		{
-			.procname	= NULL,
-			.data		= NULL,
-			.maxlen		= 0,
-			.mode		= 0555,
-			.child		= NULL
-		},
-		{}
-	},
-	{
-		PARPORT_DEVICES_ROOT_DIR,
-		{}
-	},
-	{
-		PARPORT_PORT_DIR(NULL),
-		{}
-	},
-	{
-		PARPORT_PARPORT_DIR(NULL),
-		{}
-	},
-	{
-		PARPORT_DEV_DIR(NULL),
-		{}
-	}
+	{ {0, NULL, NULL, 0, 0555, NULL}, {0}},
+	{ PARPORT_DEVICES_ROOT_DIR, {0}},
+	{ PARPORT_PORT_DIR(NULL), {0}},
+	{ PARPORT_PARPORT_DIR(NULL), {0}},
+	{ PARPORT_DEV_DIR(NULL), {0}}
 };
 
 struct parport_default_sysctl_table
@@ -428,46 +345,33 @@ struct parport_default_sysctl_table
 	ctl_table dev_dir[2];
 };
 
+extern unsigned long parport_default_timeslice;
+extern int parport_default_spintime;
+
 static struct parport_default_sysctl_table
 parport_default_sysctl_table = {
-	.sysctl_header	= NULL,
+	NULL,
 	{
-		{
-			.procname	= "timeslice",
-			.data		= &parport_default_timeslice,
-			.maxlen		= sizeof(parport_default_timeslice),
-			.mode		= 0644,
-			.proc_handler	= proc_doulongvec_ms_jiffies_minmax,
-			.extra1		= (void*) &parport_min_timeslice_value,
-			.extra2		= (void*) &parport_max_timeslice_value
-		},
-		{
-			.procname	= "spintime",
-			.data		= &parport_default_spintime,
-			.maxlen		= sizeof(parport_default_spintime),
-			.mode		= 0644,
-			.proc_handler	= proc_dointvec_minmax,
-			.extra1		= (void*) &parport_min_spintime_value,
-			.extra2		= (void*) &parport_max_spintime_value
-		},
-		{}
+		{ DEV_PARPORT_DEFAULT_TIMESLICE, "timeslice",
+		  &parport_default_timeslice,
+		  sizeof(parport_default_timeslice), 0644, NULL,
+		  &proc_doulongvec_ms_jiffies_minmax, NULL, NULL,
+		  (void*) &parport_min_timeslice_value,
+		  (void*) &parport_max_timeslice_value },
+		{ DEV_PARPORT_DEFAULT_SPINTIME, "spintime",
+		  &parport_default_spintime,
+		  sizeof(parport_default_spintime), 0644, NULL,
+		  &proc_dointvec_minmax, NULL, NULL,
+		  (void*) &parport_min_spintime_value,
+		  (void*) &parport_max_spintime_value },
+		{0}
 	},
+	{ { DEV_PARPORT_DEFAULT, "default", NULL, 0, 0555,
+	    parport_default_sysctl_table.vars },{0}},
 	{
-		{
-			.procname	= "default",
-			.mode		= 0555,
-			.child		= parport_default_sysctl_table.vars
-		},
-		{}
-	},
-	{
-		PARPORT_PARPORT_DIR(parport_default_sysctl_table.default_dir),
-		{}
-	},
-	{
-		PARPORT_DEV_DIR(parport_default_sysctl_table.parport_dir),
-		{}
-	}
+	PARPORT_PARPORT_DIR(parport_default_sysctl_table.default_dir), 
+	{0}},
+	{ PARPORT_DEV_DIR(parport_default_sysctl_table.parport_dir), {0}}
 };
 
 
@@ -483,7 +387,7 @@ int parport_proc_register(struct parport *port)
 
 	t->device_dir[0].extra1 = port;
 
-	for (i = 0; i < 5; i++)
+	for (i = 0; i < 8; i++)
 		t->vars[i].extra1 = port;
 
 	t->vars[0].data = &port->spintime;
@@ -493,12 +397,13 @@ int parport_proc_register(struct parport *port)
 		t->vars[6 + i].extra2 = &port->probe_info[i];
 
 	t->port_dir[0].procname = port->name;
+	t->port_dir[0].ctl_name = port->number + 1; /* nb 0 isn't legal here */
 
 	t->port_dir[0].child = t->vars;
 	t->parport_dir[0].child = t->port_dir;
 	t->dev_dir[0].child = t->parport_dir;
 
-	t->sysctl_header = register_sysctl_table(t->dev_dir);
+	t->sysctl_header = register_sysctl_table(t->dev_dir, 0);
 	if (t->sysctl_header == NULL) {
 		kfree(t);
 		t = NULL;
@@ -531,14 +436,30 @@ int parport_device_proc_register(struct pardevice *device)
 	t->dev_dir[0].child = t->parport_dir;
 	t->parport_dir[0].child = t->port_dir;
 	t->port_dir[0].procname = port->name;
+	t->port_dir[0].ctl_name = port->number + 1; /* nb 0 isn't legal here */
 	t->port_dir[0].child = t->devices_root_dir;
 	t->devices_root_dir[0].child = t->device_dir;
 
+#ifdef CONFIG_PARPORT_1284
+
+	t->device_dir[0].ctl_name =
+		parport_device_num(port->number, port->muxport,
+				   device->daisy)
+		+ 1;  /* nb 0 isn't legal here */ 
+
+#else /* No IEEE 1284 support */
+
+	/* parport_device_num isn't available. */
+	t->device_dir[0].ctl_name = 1;
+	
+#endif /* IEEE 1284 support or not */
+
 	t->device_dir[0].procname = device->name;
+	t->device_dir[0].extra1 = device;
 	t->device_dir[0].child = t->vars;
 	t->vars[0].data = &device->timeslice;
 
-	t->sysctl_header = register_sysctl_table(t->dev_dir);
+	t->sysctl_header = register_sysctl_table(t->dev_dir, 0);
 	if (t->sysctl_header == NULL) {
 		kfree(t);
 		t = NULL;
@@ -558,20 +479,21 @@ int parport_device_proc_unregister(struct pardevice *device)
 	return 0;
 }
 
-static int __init parport_default_proc_register(void)
+int parport_default_proc_register(void)
 {
 	parport_default_sysctl_table.sysctl_header =
-		register_sysctl_table(parport_default_sysctl_table.dev_dir);
+		register_sysctl_table(parport_default_sysctl_table.dev_dir, 0);
 	return 0;
 }
 
-static void __exit parport_default_proc_unregister(void)
+int parport_default_proc_unregister(void)
 {
 	if (parport_default_sysctl_table.sysctl_header) {
 		unregister_sysctl_table(parport_default_sysctl_table.
 					sysctl_header);
 		parport_default_sysctl_table.sysctl_header = NULL;
 	}
+	return 0;
 }
 
 #else /* no sysctl or no procfs*/
@@ -596,15 +518,13 @@ int parport_device_proc_unregister(struct pardevice *device)
 	return 0;
 }
 
-static int __init parport_default_proc_register (void)
+int parport_default_proc_register (void)
 {
 	return 0;
 }
 
-static void __exit parport_default_proc_unregister (void)
+int parport_default_proc_unregister (void)
 {
+	return 0;
 }
 #endif
-
-module_init(parport_default_proc_register)
-module_exit(parport_default_proc_unregister)

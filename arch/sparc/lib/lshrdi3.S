@@ -1,6 +1,9 @@
+/* $Id: lshrdi3.S,v 1.1 1999/03/21 06:37:45 davem Exp $ */
 
-	.globl	__lshrdi3
-__lshrdi3:
+#include <asm/cprefix.h>
+
+	.globl	C_LABEL(__lshrdi3)
+C_LABEL(__lshrdi3):
 	cmp	%o2, 0
 	be	3f
 	 mov	0x20, %g2

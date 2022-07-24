@@ -1,4 +1,4 @@
-/* $Id: icc.h,v 1.4.2.2 2004/01/12 22:52:26 keil Exp $
+/* $Id: icc.h,v 1.2.6.3 2001/09/23 22:24:48 kai Exp $
  *
  * ICC specific routines
  *
@@ -65,8 +65,6 @@
 #define ICC_IND_AIL    0xE
 #define ICC_IND_DC     0xF
 
-extern void ICCVersion(struct IsdnCardState *cs, char *s);
+extern int  icc_setup(struct IsdnCardState *cs, struct dc_hw_ops *icc_ops);
 extern void initicc(struct IsdnCardState *cs);
-extern void icc_interrupt(struct IsdnCardState *cs, u_char val);
-extern void clear_pending_icc_ints(struct IsdnCardState *cs);
-extern void setup_icc(struct IsdnCardState *);
+extern void icc_interrupt(struct IsdnCardState *cs, u8 val);

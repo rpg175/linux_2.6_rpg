@@ -11,12 +11,12 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/interrupt.h>
-#include <linux/irq.h>
 #include <linux/ioport.h>
+#include <linux/ptrace.h>
 #include <linux/sysdev.h>
 
-#include <mach/hardware.h>
+#include <asm/hardware.h>
+#include <asm/irq.h>
 #include <asm/mach/irq.h>
 
 #include "generic.h"
@@ -37,26 +37,26 @@ static int GPIO_IRQ_mask = (1 << 11) - 1;
 #define GPIO_11_27_IRQ(i)	((i) - 21)
 #define GPIO11_27_MASK(irq)	(1 << GPIO_11_27_IRQ(irq))
 
-static int sa1100_gpio_type(struct irq_data *d, unsigned int type)
+static int sa1100_gpio_type(unsigned int irq, unsigned int type)
 {
 	unsigned int mask;
 
-	if (d->irq <= 10)
-		mask = 1 << d->irq;
+	if (irq <= 10)
+		mask = 1 << irq;
 	else
-		mask = GPIO11_27_MASK(d->irq);
+		mask = GPIO11_27_MASK(irq);
 
-	if (type == IRQ_TYPE_PROBE) {
+	if (type == IRQT_PROBE) {
 		if ((GPIO_IRQ_rising_edge | GPIO_IRQ_falling_edge) & mask)
 			return 0;
-		type = IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING;
+		type = __IRQT_RISEDGE | __IRQT_FALEDGE;
 	}
 
-	if (type & IRQ_TYPE_EDGE_RISING) {
+	if (type & __IRQT_RISEDGE) {
 		GPIO_IRQ_rising_edge |= mask;
 	} else
 		GPIO_IRQ_rising_edge &= ~mask;
-	if (type & IRQ_TYPE_EDGE_FALLING) {
+	if (type & __IRQT_FALEDGE) {
 		GPIO_IRQ_falling_edge |= mask;
 	} else
 		GPIO_IRQ_falling_edge &= ~mask;
@@ -70,37 +70,36 @@ static int sa1100_gpio_type(struct irq_data *d, unsigned int type)
 /*
  * GPIO IRQs must be acknowledged.  This is for IRQs from 0 to 10.
  */
-static void sa1100_low_gpio_ack(struct irq_data *d)
+static void sa1100_low_gpio_ack(unsigned int irq)
 {
-	GEDR = (1 << d->irq);
+	GEDR = (1 << irq);
 }
 
-static void sa1100_low_gpio_mask(struct irq_data *d)
+static void sa1100_low_gpio_mask(unsigned int irq)
 {
-	ICMR &= ~(1 << d->irq);
+	ICMR &= ~(1 << irq);
 }
 
-static void sa1100_low_gpio_unmask(struct irq_data *d)
+static void sa1100_low_gpio_unmask(unsigned int irq)
 {
-	ICMR |= 1 << d->irq;
+	ICMR |= 1 << irq;
 }
 
-static int sa1100_low_gpio_wake(struct irq_data *d, unsigned int on)
+static int sa1100_low_gpio_wake(unsigned int irq, unsigned int on)
 {
 	if (on)
-		PWER |= 1 << d->irq;
+		PWER |= 1 << irq;
 	else
-		PWER &= ~(1 << d->irq);
+		PWER &= ~(1 << irq);
 	return 0;
 }
 
-static struct irq_chip sa1100_low_gpio_chip = {
-	.name		= "GPIO-l",
-	.irq_ack	= sa1100_low_gpio_ack,
-	.irq_mask	= sa1100_low_gpio_mask,
-	.irq_unmask	= sa1100_low_gpio_unmask,
-	.irq_set_type	= sa1100_gpio_type,
-	.irq_set_wake	= sa1100_low_gpio_wake,
+static struct irqchip sa1100_low_gpio_chip = {
+	.ack		= sa1100_low_gpio_ack,
+	.mask		= sa1100_low_gpio_mask,
+	.unmask		= sa1100_low_gpio_unmask,
+	.type		= sa1100_gpio_type,
+	.wake		= sa1100_low_gpio_wake,
 };
 
 /*
@@ -109,7 +108,8 @@ static struct irq_chip sa1100_low_gpio_chip = {
  * and call the handler.
  */
 static void
-sa1100_high_gpio_handler(unsigned int irq, struct irq_desc *desc)
+sa1100_high_gpio_handler(unsigned int irq, struct irqdesc *desc,
+			 struct pt_regs *regs)
 {
 	unsigned int mask;
 
@@ -122,12 +122,14 @@ sa1100_high_gpio_handler(unsigned int irq, struct irq_desc *desc)
 		GEDR = mask;
 
 		irq = IRQ_GPIO11;
+		desc = irq_desc + irq;
 		mask >>= 11;
 		do {
 			if (mask & 1)
-				generic_handle_irq(irq);
+				desc->handle(irq, desc, regs);
 			mask >>= 1;
 			irq++;
+			desc++;
 		} while (mask);
 
 		mask = GEDR & 0xfffff800;
@@ -139,16 +141,16 @@ sa1100_high_gpio_handler(unsigned int irq, struct irq_desc *desc)
  * In addition, the IRQs are all collected up into one bit in the
  * interrupt controller registers.
  */
-static void sa1100_high_gpio_ack(struct irq_data *d)
+static void sa1100_high_gpio_ack(unsigned int irq)
 {
-	unsigned int mask = GPIO11_27_MASK(d->irq);
+	unsigned int mask = GPIO11_27_MASK(irq);
 
 	GEDR = mask;
 }
 
-static void sa1100_high_gpio_mask(struct irq_data *d)
+static void sa1100_high_gpio_mask(unsigned int irq)
 {
-	unsigned int mask = GPIO11_27_MASK(d->irq);
+	unsigned int mask = GPIO11_27_MASK(irq);
 
 	GPIO_IRQ_mask &= ~mask;
 
@@ -156,9 +158,9 @@ static void sa1100_high_gpio_mask(struct irq_data *d)
 	GFER &= ~mask;
 }
 
-static void sa1100_high_gpio_unmask(struct irq_data *d)
+static void sa1100_high_gpio_unmask(unsigned int irq)
 {
-	unsigned int mask = GPIO11_27_MASK(d->irq);
+	unsigned int mask = GPIO11_27_MASK(irq);
 
 	GPIO_IRQ_mask |= mask;
 
@@ -166,59 +168,41 @@ static void sa1100_high_gpio_unmask(struct irq_data *d)
 	GFER = GPIO_IRQ_falling_edge & GPIO_IRQ_mask;
 }
 
-static int sa1100_high_gpio_wake(struct irq_data *d, unsigned int on)
+static int sa1100_high_gpio_wake(unsigned int irq, unsigned int on)
 {
 	if (on)
-		PWER |= GPIO11_27_MASK(d->irq);
+		PWER |= GPIO11_27_MASK(irq);
 	else
-		PWER &= ~GPIO11_27_MASK(d->irq);
+		PWER &= ~GPIO11_27_MASK(irq);
 	return 0;
 }
 
-static struct irq_chip sa1100_high_gpio_chip = {
-	.name		= "GPIO-h",
-	.irq_ack	= sa1100_high_gpio_ack,
-	.irq_mask	= sa1100_high_gpio_mask,
-	.irq_unmask	= sa1100_high_gpio_unmask,
-	.irq_set_type	= sa1100_gpio_type,
-	.irq_set_wake	= sa1100_high_gpio_wake,
+static struct irqchip sa1100_high_gpio_chip = {
+	.ack		= sa1100_high_gpio_ack,
+	.mask		= sa1100_high_gpio_mask,
+	.unmask		= sa1100_high_gpio_unmask,
+	.type		= sa1100_gpio_type,
+	.wake		= sa1100_high_gpio_wake,
 };
 
 /*
  * We don't need to ACK IRQs on the SA1100 unless they're GPIOs
  * this is for internal IRQs i.e. from 11 to 31.
  */
-static void sa1100_mask_irq(struct irq_data *d)
+static void sa1100_mask_irq(unsigned int irq)
 {
-	ICMR &= ~(1 << d->irq);
+	ICMR &= ~(1 << irq);
 }
 
-static void sa1100_unmask_irq(struct irq_data *d)
+static void sa1100_unmask_irq(unsigned int irq)
 {
-	ICMR |= (1 << d->irq);
+	ICMR |= (1 << irq);
 }
 
-/*
- * Apart form GPIOs, only the RTC alarm can be a wakeup event.
- */
-static int sa1100_set_wake(struct irq_data *d, unsigned int on)
-{
-	if (d->irq == IRQ_RTCAlrm) {
-		if (on)
-			PWER |= PWER_RTC;
-		else
-			PWER &= ~PWER_RTC;
-		return 0;
-	}
-	return -EINVAL;
-}
-
-static struct irq_chip sa1100_normal_chip = {
-	.name		= "SC",
-	.irq_ack	= sa1100_mask_irq,
-	.irq_mask	= sa1100_mask_irq,
-	.irq_unmask	= sa1100_unmask_irq,
-	.irq_set_wake	= sa1100_set_wake,
+static struct irqchip sa1100_normal_chip = {
+	.ack		= sa1100_mask_irq,
+	.mask		= sa1100_mask_irq,
+	.unmask		= sa1100_unmask_irq,
 };
 
 static struct resource irq_resource = {
@@ -234,7 +218,7 @@ static struct sa1100irq_state {
 	unsigned int	iccr;
 } sa1100irq_state;
 
-static int sa1100irq_suspend(struct sys_device *dev, pm_message_t state)
+static int sa1100irq_suspend(struct sys_device *dev, u32 state)
 {
 	struct sa1100irq_state *st = &sa1100irq_state;
 
@@ -281,7 +265,7 @@ static int sa1100irq_resume(struct sys_device *dev)
 }
 
 static struct sysdev_class sa1100irq_sysclass = {
-	.name		= "sa11x0-irq",
+	set_kset_name("sa11x0-irq"),
 	.suspend	= sa1100irq_suspend,
 	.resume		= sa1100irq_resume,
 };
@@ -294,7 +278,7 @@ static struct sys_device sa1100irq_device = {
 static int __init sa1100irq_init_devicefs(void)
 {
 	sysdev_class_register(&sa1100irq_sysclass);
-	return sysdev_register(&sa1100irq_device);
+	return sys_device_register(&sa1100irq_device);
 }
 
 device_initcall(sa1100irq_init_devicefs);
@@ -323,28 +307,26 @@ void __init sa1100_init_irq(void)
 	ICCR = 1;
 
 	for (irq = 0; irq <= 10; irq++) {
-		irq_set_chip_and_handler(irq, &sa1100_low_gpio_chip,
-					 handle_edge_irq);
+		set_irq_chip(irq, &sa1100_low_gpio_chip);
+		set_irq_handler(irq, do_edge_IRQ);
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 	}
 
 	for (irq = 12; irq <= 31; irq++) {
-		irq_set_chip_and_handler(irq, &sa1100_normal_chip,
-					 handle_level_irq);
+		set_irq_chip(irq, &sa1100_normal_chip);
+		set_irq_handler(irq, do_level_IRQ);
 		set_irq_flags(irq, IRQF_VALID);
 	}
 
 	for (irq = 32; irq <= 48; irq++) {
-		irq_set_chip_and_handler(irq, &sa1100_high_gpio_chip,
-					 handle_edge_irq);
+		set_irq_chip(irq, &sa1100_high_gpio_chip);
+		set_irq_handler(irq, do_edge_IRQ);
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 	}
 
 	/*
 	 * Install handler for GPIO 11-27 edge detect interrupts
 	 */
-	irq_set_chip(IRQ_GPIO11_27, &sa1100_normal_chip);
-	irq_set_chained_handler(IRQ_GPIO11_27, sa1100_high_gpio_handler);
-
-	sa1100_init_gpio();
+	set_irq_chip(IRQ_GPIO11_27, &sa1100_normal_chip);
+	set_irq_chained_handler(IRQ_GPIO11_27, sa1100_high_gpio_handler);
 }

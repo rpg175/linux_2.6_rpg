@@ -18,20 +18,21 @@
 |	to handle the exception.
 |
 |	If the exception was completely handled by the package, then
-|	the return will be via a 'jmp fpsp_done'.  Unless there is
+|	the return will be via a 'jmp fpsp_done'.  Unless there is 
 |	OS specific work to be done (such as handling a context switch or
 |	interrupt) the user program can be resumed via 'rte'.
 |
 |	In the following skeleton code, some typical 'real_xxxx' handling
 |	code is shown.  This code may need to be moved to an appropriate
 |	place in the target system, or rewritten.
-|
+|	
 
 |		Copyright (C) Motorola, Inc. 1990
 |			All Rights Reserved
 |
-|       For details on the license for this file, please see the
-|       file, README, in this same directory.
+|	THIS IS UNPUBLISHED PROPRIETARY SOURCE CODE OF MOTOROLA 
+|	The copyright notice above does not evidence any  
+|	actual or intended publication of such source code.
 
 |
 |	Modified for Linux-1.3.x by Jes Sorensen (jds@kom.auc.dk)
@@ -39,7 +40,7 @@
 
 #include <linux/linkage.h>
 #include <asm/entry.h>
-#include <asm/asm-offsets.h>
+#include "../kernel/m68k_defs.h"
 
 |SKELETON	idnt    2,1 | Motorola 040 Floating Point Software Package
 
@@ -49,7 +50,7 @@
 |
 
 	|section 8
-
+ 
 #include "fpsp.h"
 
 	|xref	b1238_fix
@@ -71,7 +72,7 @@ real_dz:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
@@ -81,7 +82,7 @@ real_dz:
 |
 |	All inexact exceptions are real, but the 'real' handler
 |	will probably want to clear the pending exception.
-|	The provided code will clear the E3 exception (if pending),
+|	The provided code will clear the E3 exception (if pending), 
 |	otherwise clear the E1 exception.  The frestore is not really
 |	necessary for E1 exceptions.
 |
@@ -95,7 +96,7 @@ real_dz:
 | to the appropriate  handler for the exception in the fpsr.  Note
 | that this fix is only for d43b parts, and is skipped if the
 | version number is not $40.
-|
+| 
 |
 	.global	real_inex
 	.global	inex
@@ -115,7 +116,7 @@ inex:
 	bra		snan
 inex_ckofl:
 	btstb		#ovfl_bit,2(%sp) |test for ovfl
-	beq		inex_ckufl
+	beq		inex_ckufl 
 	addl		#4,%sp
 	frestore	(%sp)+
 	unlk		%a6
@@ -162,11 +163,11 @@ inex_done:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
-
+	
 |
 |	Overflow exception
 |
@@ -188,11 +189,11 @@ ovfl_done:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
-
+	
 |
 |	Underflow exception
 |
@@ -214,11 +215,11 @@ unfl_done:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
-
+	
 |
 |	Signalling NAN exception
 |
@@ -236,11 +237,11 @@ real_snan:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
-
+	
 |
 |	Operand Error exception
 |
@@ -258,12 +259,12 @@ real_operr:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
 
-
+	
 |
 |	BSUN exception
 |
@@ -286,7 +287,7 @@ real_bsun:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
@@ -294,7 +295,7 @@ real_bsun:
 |
 |	F-line exception
 |
-|	A 'real' F-line exception is one that the FPSP isn't supposed to
+|	A 'real' F-line exception is one that the FPSP isn't supposed to 
 |	handle. E.g. an instruction with a co-processor ID that is not 1.
 |
 |
@@ -307,7 +308,7 @@ real_fline:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
@@ -329,7 +330,7 @@ real_unsupp:
 
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	movel	%sp,%sp@-		| stack frame pointer argument
+	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	trap_c
 	addql	#4,%sp
 	bral	ret_from_exception
@@ -354,14 +355,14 @@ real_trace:
 |	{4028, 4130} - unimp frame
 |	{4000, 4100} - idle frame
 |
-|	This entry point simply holds an f-line illegal value.
+|	This entry point simply holds an f-line illegal value.  
 |	Replace this with a call to your kernel panic code or
 |	code to handle future revisions of the fpu.
 |
 	.global	fpsp_fmt_error
 fpsp_fmt_error:
 
-	.long	0xf27f0000	|f-line illegal
+	.long	0xf27f0000	|f-line illegal 
 
 |
 |	fpsp_done --- FPSP exit point
@@ -380,8 +381,10 @@ fpsp_done:
 .Lnotkern:
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	| deliver signals, reschedule etc..
-	jra	ret_from_exception
+	tstb	%curptr@(TASK_NEEDRESCHED)
+	jne	ret_from_exception	| deliver signals,
+					| reschedule etc..
+	RESTORE_ALL
 
 |
 |	mem_write --- write to user or supervisor address space
@@ -439,7 +442,7 @@ user_write:
 |	a1 - supervisor destination address
 |	d0 - number of bytes to read (maximum count is 12)
 |
-| Like mem_write, mem_read always reads with a supervisor
+| Like mem_write, mem_read always reads with a supervisor 
 | destination address on the supervisor stack.  Also like mem_write,
 | the EXC_SR is checked and a simple memory copy is done if reading
 | from supervisor space is indicated.

@@ -6,9 +6,10 @@
  */
 
 #include <linux/module.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/posix_acl_xattr.h>
-#include <linux/gfp.h>
 
 
 /*
@@ -28,7 +29,7 @@ posix_acl_from_xattr(const void *value, size_t size)
 	if (size < sizeof(posix_acl_xattr_header))
 		 return ERR_PTR(-EINVAL);
 	if (header->a_version != cpu_to_le32(POSIX_ACL_XATTR_VERSION))
-		return ERR_PTR(-EOPNOTSUPP);
+		return ERR_PTR(-EINVAL);
 
 	count = posix_acl_xattr_count(size);
 	if (count < 0)
@@ -36,7 +37,7 @@ posix_acl_from_xattr(const void *value, size_t size)
 	if (count == 0)
 		return NULL;
 	
-	acl = posix_acl_alloc(count, GFP_NOFS);
+	acl = posix_acl_alloc(count, GFP_KERNEL);
 	if (!acl)
 		return ERR_PTR(-ENOMEM);
 	acl_e = acl->a_entries;

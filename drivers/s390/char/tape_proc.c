@@ -11,17 +11,14 @@
  * PROCFS Functions
  */
 
-#define KMSG_COMPONENT "tape"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
-
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <linux/seq_file.h>
-#include <linux/proc_fs.h>
-
-#define TAPE_DBF_AREA	tape_core_dbf
 
 #include "tape.h"
+
+#define PRINTK_HEADER "T390:"
 
 static const char *tape_med_st_verbose[MS_SIZE] =
 {
@@ -45,19 +42,19 @@ static int tape_proc_show(struct seq_file *m, void *v)
 
 	n = (unsigned long) v - 1;
 	if (!n) {
-		seq_printf(m, "TapeNo\tBusID      CuType/Model\t"
-			"DevType/Model\tBlkSize\tState\tOp\tMedState\n");
+		seq_printf(m, "TapeNo\tDevNo\tCuType\tCuModel\tDevType\t"
+			   "DevMod\tBlkSize\tState\tOp\tMedState\n");
 	}
-	device = tape_find_device(n);
+	device = tape_get_device(n);
 	if (IS_ERR(device))
 		return 0;
 	spin_lock_irq(get_ccwdev_lock(device->cdev));
 	seq_printf(m, "%d\t", (int) n);
-	seq_printf(m, "%-10.10s ", dev_name(&device->cdev->dev));
-	seq_printf(m, "%04X/", device->cdev->id.cu_type);
+	seq_printf(m, "%s\t", device->cdev->dev.bus_id);
+	seq_printf(m, "%04X\t", device->cdev->id.cu_type);
 	seq_printf(m, "%02X\t", device->cdev->id.cu_model);
-	seq_printf(m, "%04X/", device->cdev->id.dev_type);
-	seq_printf(m, "%02X\t\t", device->cdev->id.dev_model);
+	seq_printf(m, "%04X\t", device->cdev->id.dev_type);
+	seq_printf(m, "%02X\t", device->cdev->id.dev_model);
 	if (device->char_data.block_size == 0)
 		seq_printf(m, "auto\t");
 	else
@@ -98,7 +95,7 @@ static void tape_proc_stop(struct seq_file *m, void *v)
 {
 }
 
-static const struct seq_operations tape_proc_seq = {
+static struct seq_operations tape_proc_seq = {
 	.start		= tape_proc_start,
 	.next		= tape_proc_next,
 	.stop		= tape_proc_stop,
@@ -110,9 +107,8 @@ static int tape_proc_open(struct inode *inode, struct file *file)
 	return seq_open(file, &tape_proc_seq);
 }
 
-static const struct file_operations tape_proc_ops =
+static struct file_operations tape_proc_ops =
 {
-	.owner		= THIS_MODULE,
 	.open		= tape_proc_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -126,11 +122,14 @@ void
 tape_proc_init(void)
 {
 	tape_proc_devices =
-		proc_create("tapedevices", S_IFREG | S_IRUGO | S_IWUSR, NULL,
-			    &tape_proc_ops);
+		create_proc_entry ("tapedevices", S_IFREG | S_IRUGO | S_IWUSR,
+				   &proc_root);
 	if (tape_proc_devices == NULL) {
+		PRINT_WARN("tape: Cannot register procfs entry tapedevices\n");
 		return;
 	}
+	tape_proc_devices->proc_fops = &tape_proc_ops;
+	tape_proc_devices->owner = THIS_MODULE;
 }
 
 /*
@@ -140,5 +139,5 @@ void
 tape_proc_cleanup(void)
 {
 	if (tape_proc_devices != NULL)
-		remove_proc_entry ("tapedevices", NULL);
+		remove_proc_entry ("tapedevices", &proc_root);
 }

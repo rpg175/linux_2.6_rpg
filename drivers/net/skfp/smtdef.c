@@ -72,14 +72,23 @@ static const char ID_sccs[] = "@(#)smtdef.c	2.53 99/08/11 (C) SK " ;
 #define DEFAULT_LCT_EXTEND	50
 
 /* Forward declarations */
-void smt_reset_defaults(struct s_smc *smc, int level);
-static void smt_init_mib(struct s_smc *smc, int level);
-static int set_min_max(int maxflag, u_long mib, u_long limit, u_long *oper);
+extern  void	smt_reset_defaults ();
+static	void	smt_init_mib ();
+
+static int set_min_max() ;
+
+void smt_set_defaults(smc)
+struct s_smc *smc ;
+{
+	smt_reset_defaults(smc,0) ;
+}
 
 #define MS2BCLK(x)	((x)*12500L)
 #define US2BCLK(x)	((x)*1250L)
 
-void smt_reset_defaults(struct s_smc *smc, int level)
+void smt_reset_defaults(smc,level)
+struct s_smc *smc ;
+int level ;
 {
 	struct smt_config	*smt ;
 	int			i ;
@@ -161,7 +170,9 @@ static const char man_data[32] =
 /*	 01234567890123456789012345678901	*/
 	"xxxSK-NET FDDI SMT 7.3 - V2.8.8" ;
 
-static void smt_init_mib(struct s_smc *smc, int level)
+static void smt_init_mib(smc,level)
+struct s_smc *smc ;
+int level ;
 {
 	struct fddi_mib		*mib ;
 	struct fddi_mib_p	*pm ;
@@ -257,7 +268,7 @@ static void smt_init_mib(struct s_smc *smc, int level)
 		 */
 		/* Attention: don't initialize mib pointer here! */
 		/*  It must be initialized during phase 2 */
-		smc->y[port].mib = NULL;
+		smc->y[port].mib = 0 ;
 		mib->fddiSMTPORTIndexes[port] = port+INDEX_PORT ;
 
 		pm->fddiPORTIndex = port+INDEX_PORT ;
@@ -281,7 +292,8 @@ static void smt_init_mib(struct s_smc *smc, int level)
 	(void) smt_set_mac_opvalues(smc) ;
 }
 
-int smt_set_mac_opvalues(struct s_smc *smc)
+int smt_set_mac_opvalues(smc)
+struct s_smc *smc ;
 {
 	int	st ;
 	int	st2 ;
@@ -303,10 +315,11 @@ int smt_set_mac_opvalues(struct s_smc *smc)
 			FDDI_SMT_EVENT, (u_long) FDDI_REMOTE_T_REQ,
 			smt_get_event_word(smc));
 	}
-	return st;
+	return(st) ;
 }
 
-void smt_fixup_mib(struct s_smc *smc)
+void smt_fixup_mib(smc)
+struct s_smc *smc ;
 {
 #ifdef	CONCENTRATOR
 	switch (smc->s.sas) {
@@ -342,7 +355,11 @@ void smt_fixup_mib(struct s_smc *smc)
  *	use mib
  * NOTE : numbers are negative, negate comparison !
  */
-static int set_min_max(int maxflag, u_long mib, u_long limit, u_long *oper)
+static int set_min_max(maxflag,mib,limit,oper)
+int maxflag ;
+u_long mib ;
+u_long limit ;
+u_long *oper ;
 {
 	u_long	old ;
 	old = *oper ;
@@ -350,6 +367,5 @@ static int set_min_max(int maxflag, u_long mib, u_long limit, u_long *oper)
 		*oper = limit ;
 	else
 		*oper = mib ;
-	return old != *oper;
+	return(old != *oper) ;
 }
-

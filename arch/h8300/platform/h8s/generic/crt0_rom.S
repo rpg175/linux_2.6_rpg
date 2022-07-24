@@ -10,6 +10,7 @@
 
 #define ASSEMBLY
 
+#include <linux/config.h>
 #include <asm/linkage.h>
 #include <asm/regs267x.h>
 	
@@ -109,7 +110,6 @@ gpio_table:
 	;; PHDDR
 	.byte	0x00,0x00
 
-	.section .rodata
 __target_name:	
 	.asciz	"generic"
 	

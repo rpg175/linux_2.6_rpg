@@ -24,6 +24,7 @@
 * 1998/08/08	acme		Version 0.0.1
 */
 
+#include <linux/config.h>
 #include <linux/wanrouter.h>
 #include <linux/spinlock.h>
 
@@ -35,6 +36,8 @@
 #ifdef CONFIG_CYCLOMX_X25
 #include <linux/cycx_x25.h>
 #endif
+
+#define	is_digit(ch) (((ch)>=(unsigned)'0'&&(ch)<=(unsigned)'9')?1:0)
 
 /* Adapter Data Space.
  * This structure is needed because we handle multiple cards, otherwise
@@ -49,7 +52,7 @@ struct cycx_device {
 	char in_isr;			/* interrupt-in-service flag */
 	char buff_int_mode_unbusy;      /* flag for carrying out dev_tint */
 	wait_queue_head_t wait_stats;  /* to wait for the STATS indication */
-	void __iomem *mbox;			/* -> mailbox */
+	void *mbox;			/* -> mailbox */
 	void (*isr)(struct cycx_device* card);	/* interrupt service routine */
 	int (*exec)(struct cycx_device* card, void* u_cmd, void* u_data);
 	union {

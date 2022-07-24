@@ -1,4 +1,4 @@
-/*
+/* $Id: dma.c,v 1.7 1994/12/28 03:35:33 root Exp root $
  * linux/kernel/dma.c: A DMA channel allocator. Inspired by linux/kernel/irq.c.
  *
  * Written by Hennus Bergman, 1992.
@@ -20,7 +20,7 @@
 #include <asm/dma.h>
 #include <asm/system.h>
 
-
+ 
 
 /* A note on resource allocation:
  *
@@ -38,7 +38,7 @@
  */
 
 
-DEFINE_SPINLOCK(dma_spin_lock);
+spinlock_t dma_spin_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  *	If our port doesn't define this it has no PC like DMA
@@ -58,15 +58,17 @@ struct dma_chan {
 };
 
 static struct dma_chan dma_chan_busy[MAX_DMA_CHANNELS] = {
-	[4] = { 1, "cascade" },
+	{ 0, 0 },
+	{ 0, 0 },
+	{ 0, 0 },
+	{ 0, 0 },
+	{ 1, "cascade" },
+	{ 0, 0 },
+	{ 0, 0 },
+	{ 0, 0 }
 };
 
 
-/**
- * request_dma - request and reserve a system DMA channel
- * @dmanr: DMA channel number
- * @device_id: reserving device ID string, used in /proc/dma
- */
 int request_dma(unsigned int dmanr, const char * device_id)
 {
 	if (dmanr >= MAX_DMA_CHANNELS)
@@ -81,10 +83,7 @@ int request_dma(unsigned int dmanr, const char * device_id)
 	return 0;
 } /* request_dma */
 
-/**
- * free_dma - free a reserved system DMA channel
- * @dmanr: DMA channel number
- */
+
 void free_dma(unsigned int dmanr)
 {
 	if (dmanr >= MAX_DMA_CHANNELS) {
@@ -95,7 +94,7 @@ void free_dma(unsigned int dmanr)
 	if (xchg(&dma_chan_busy[dmanr].lock, 0) == 0) {
 		printk(KERN_WARNING "Trying to free free DMA%d\n", dmanr);
 		return;
-	}
+	}	
 
 } /* free_dma */
 
@@ -121,8 +120,8 @@ static int proc_dma_show(struct seq_file *m, void *v)
 
 	for (i = 0 ; i < MAX_DMA_CHANNELS ; i++) {
 		if (dma_chan_busy[i].lock) {
-			seq_printf(m, "%2d: %s\n", i,
-				   dma_chan_busy[i].device_id);
+		    seq_printf(m, "%2d: %s\n", i,
+			       dma_chan_busy[i].device_id);
 		}
 	}
 	return 0;
@@ -137,10 +136,23 @@ static int proc_dma_show(struct seq_file *m, void *v)
 
 static int proc_dma_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, proc_dma_show, NULL);
+	char *buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	struct seq_file *m;
+	int res;
+
+	if (!buf)
+		return -ENOMEM;
+	res = single_open(file, proc_dma_show, NULL);
+	if (!res) {
+		m = file->private_data;
+		m->buf = buf;
+		m->size = PAGE_SIZE;
+	} else
+		kfree(buf);
+	return res;
 }
 
-static const struct file_operations proc_dma_operations = {
+static struct file_operations proc_dma_operations = {
 	.open		= proc_dma_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
@@ -149,7 +161,12 @@ static const struct file_operations proc_dma_operations = {
 
 static int __init proc_dma_init(void)
 {
-	proc_create("dma", 0, NULL, &proc_dma_operations);
+	struct proc_dir_entry *e;
+
+	e = create_proc_entry("dma", 0, NULL);
+	if (e)
+		e->proc_fops = &proc_dma_operations;
+
 	return 0;
 }
 

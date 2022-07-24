@@ -38,9 +38,9 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/pci.h>
-#include <linux/gfp.h>
 
 #include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 
 #include <asm/io.h>
 #include <asm/hardware.h>
@@ -151,10 +151,8 @@ static struct pci_dma_ops ccio_ops = {
 	ccio_unmap_single,
 	ccio_map_sg,
 	ccio_unmap_sg,
-	NULL,                   /* dma_sync_single_for_cpu : NOP for U2 */
-	NULL,                   /* dma_sync_single_for_device : NOP for U2 */
-	NULL,                   /* dma_sync_sg_for_cpu     : ditto */
-	NULL,                   /* dma_sync_sg_for_device     : ditto */
+	NULL,                   /* dma_sync_single : NOP for U2 */
+	NULL,                   /* dma_sync_sg     : ditto */
 };
 
 
@@ -168,7 +166,7 @@ ccio_probe(struct parisc_device *dev)
 {
 	printk(KERN_INFO "%s found %s at 0x%lx\n", MODULE_NAME,
 			dev->id.hversion == U2_BC_GSC ? "U2" : "UTurn",
-			dev->hpa.start);
+			dev->hpa);
 
 /*
 ** FIXME - should check U2 registers to verify it's really running

@@ -34,7 +34,7 @@ struct sonet_stats {
 					/* clear error insertion */
 #define SONET_GETDIAG	_IOR('a',ATMIOC_PHYTYP+4,int)
 					/* query error insertion */
-#define SONET_SETFRAMING _IOW('a',ATMIOC_PHYTYP+5,int)
+#define SONET_SETFRAMING _IO('a',ATMIOC_PHYTYP+5)
 					/* set framing mode (SONET/SDH) */
 #define SONET_GETFRAMING _IOR('a',ATMIOC_PHYTYP+6,int)
 					/* get framing mode */
@@ -56,7 +56,9 @@ struct sonet_stats {
 #define SONET_FRSENSE_SIZE 6		/* C1[3],H1[3] (0xff for unknown) */
 
 
-#ifdef __KERNEL__
+#ifndef __KERNEL__
+#undef __SONET_ITEMS
+#else
 
 #include <asm/atomic.h>
 

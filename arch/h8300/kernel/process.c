@@ -22,20 +22,22 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
+#include <linux/slab.h>
 #include <linux/user.h>
+#include <linux/a.out.h>
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
-#include <linux/fs.h>
-#include <linux/slab.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -43,29 +45,30 @@
 #include <asm/setup.h>
 #include <asm/pgtable.h>
 
-void (*pm_power_off)(void) = NULL;
-EXPORT_SYMBOL(pm_power_off);
-
 asmlinkage void ret_from_fork(void);
 
 /*
  * The idle loop on an H8/300..
  */
 #if !defined(CONFIG_H8300H_SIM) && !defined(CONFIG_H8S_SIM)
-static void default_idle(void)
+void default_idle(void)
 {
-	local_irq_disable();
-	if (!need_resched()) {
-		local_irq_enable();
-		/* XXX: race here! What if need_resched() gets set now? */
-		__asm__("sleep");
-	} else
-		local_irq_enable();
+	while(1) {
+		if (need_resched()) {
+			sti();
+			__asm__("sleep");
+			cli();
+		}
+		schedule();
+	}
 }
 #else
-static void default_idle(void)
+void default_idle(void)
 {
-	cpu_relax();
+	while(1) {
+		if (need_resched())
+			schedule();
+	}
 }
 #endif
 void (*idle)(void) = default_idle;
@@ -78,13 +81,7 @@ void (*idle)(void) = default_idle;
  */
 void cpu_idle(void)
 {
-	while (1) {
-		while (!need_resched())
-			idle();
-		preempt_enable_no_resched();
-		schedule();
-		preempt_disable();
-	}
+	idle();
 }
 
 void machine_restart(char * __unused)
@@ -93,12 +90,16 @@ void machine_restart(char * __unused)
 	__asm__("jmp @@0"); 
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void machine_halt(void)
 {
 	local_irq_disable();
 	__asm__("sleep");
 	for (;;);
 }
+
+EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
@@ -107,15 +108,18 @@ void machine_power_off(void)
 	for (;;);
 }
 
+EXPORT_SYMBOL(machine_power_off);
+
 void show_regs(struct pt_regs * regs)
 {
-	printk("\nPC: %08lx  Status: %02x",
+	printk("\n");
+	printk("PC: %08lx  Status: %02x\n",
 	       regs->pc, regs->ccr);
-	printk("\nORIG_ER0: %08lx ER0: %08lx ER1: %08lx",
+	printk("ORIG_ER0: %08lx ER0: %08lx ER1: %08lx\n",
 	       regs->orig_er0, regs->er0, regs->er1);
-	printk("\nER2: %08lx ER3: %08lx ER4: %08lx ER5: %08lx",
+	printk("ER2: %08lx ER3: %08lx ER4: %08lx ER5: %08lx\n",
 	       regs->er2, regs->er3, regs->er4, regs->er5);
-	printk("\nER6' %08lx ",regs->er6);
+	printk("ER6' %08lx ",regs->er6);
 	if (user_mode(regs))
 		printk("USP: %08lx\n", rdusp());
 	else
@@ -186,17 +190,17 @@ asmlinkage int h8300_clone(struct pt_regs *regs)
 	newsp = regs->er2;
 	if (!newsp)
 		newsp  = rdusp();
-	return do_fork(clone_flags, newsp, regs, 0, NULL, NULL);
+	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, regs, 0, NULL, NULL);
 
 }
 
-int copy_thread(unsigned long clone_flags,
+int copy_thread(int nr, unsigned long clone_flags,
                 unsigned long usp, unsigned long topstk,
 		 struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
 
-	childregs = (struct pt_regs *) (THREAD_SIZE + task_stack_page(p)) - 1;
+	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p->thread_info)) - 1;
 
 	*childregs = *regs;
 	childregs->retpc = (unsigned long) ret_from_fork;
@@ -209,25 +213,61 @@ int copy_thread(unsigned long clone_flags,
 }
 
 /*
+ * fill in the user structure for a core dump..
+ */
+void dump_thread(struct pt_regs * regs, struct user * dump)
+{
+/* changed the size calculations - should hopefully work better. lbt */
+	dump->magic = CMAGIC;
+	dump->start_code = 0;
+	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
+	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
+	dump->u_dsize = ((unsigned long) (current->mm->brk +
+					  (PAGE_SIZE-1))) >> PAGE_SHIFT;
+	dump->u_dsize -= dump->u_tsize;
+	dump->u_ssize = 0;
+
+	dump->u_ar0 = (struct user_regs_struct *)(((int)(&dump->regs)) -((int)(dump)));
+	dump->regs.er0 = regs->er0;
+	dump->regs.er1 = regs->er1;
+	dump->regs.er2 = regs->er2;
+	dump->regs.er3 = regs->er3;
+	dump->regs.er4 = regs->er4;
+	dump->regs.er5 = regs->er5;
+	dump->regs.er6 = regs->er6;
+	dump->regs.orig_er0 = regs->orig_er0;
+	dump->regs.ccr = regs->ccr;
+	dump->regs.pc  = regs->pc;
+}
+
+/*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(const char *name,
-			  const char *const *argv,
-			  const char *const *envp,
-			  int dummy, ...)
+asmlinkage int sys_execve(char *name, char **argv, char **envp,int dummy,...)
 {
 	int error;
 	char * filename;
 	struct pt_regs *regs = (struct pt_regs *) ((unsigned char *)&dummy-4);
 
+	lock_kernel();
 	filename = getname(name);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
-		return error;
+		goto out;
 	error = do_execve(filename, argv, envp, regs);
 	putname(filename);
+out:
+	unlock_kernel();
 	return error;
 }
+
+/*
+ * These bracket the sleeping functions..
+ */
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+#define first_sched	((unsigned long) scheduling_functions_start_here)
+#define last_sched	((unsigned long) scheduling_functions_end_here)
 
 unsigned long thread_saved_pc(struct task_struct *tsk)
 {
@@ -245,11 +285,12 @@ unsigned long get_wchan(struct task_struct *p)
 	stack_page = (unsigned long)p;
 	fp = ((struct pt_regs *)p->thread.ksp)->er6;
 	do {
-		if (fp < stack_page+sizeof(struct thread_info) ||
+		if (fp < stack_page+sizeof(struct task_struct) ||
 		    fp >= 8184+stack_page)
 			return 0;
 		pc = ((unsigned long *)fp)[1];
-		if (!in_sched_functions(pc))
+		/* FIXME: This depends on the order of these functions. */
+		if (pc < first_sched || pc >= last_sched)
 			return pc;
 		fp = *(unsigned long *) fp;
 	} while (count++ < 16);

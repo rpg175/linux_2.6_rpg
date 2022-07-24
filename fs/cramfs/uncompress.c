@@ -19,7 +19,6 @@
 #include <linux/errno.h>
 #include <linux/vmalloc.h>
 #include <linux/zlib.h>
-#include <linux/cramfs_fs.h>
 
 static z_stream stream;
 static int initialized;
@@ -50,7 +49,7 @@ int cramfs_uncompress_block(void *dst, int dstlen, void *src, int srclen)
 err:
 	printk("Error %d while decompressing!\n", err);
 	printk("%p(%d)->%p(%d)\n", src, srclen, dst, dstlen);
-	return -EIO;
+	return 0;
 }
 
 int cramfs_uncompress_init(void)
@@ -68,10 +67,11 @@ int cramfs_uncompress_init(void)
 	return 0;
 }
 
-void cramfs_uncompress_exit(void)
+int cramfs_uncompress_exit(void)
 {
 	if (!--initialized) {
 		zlib_inflateEnd(&stream);
 		vfree(stream.workspace);
 	}
+	return 0;
 }

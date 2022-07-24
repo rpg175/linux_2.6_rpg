@@ -16,6 +16,7 @@
  * handle GCR disks
  */
 
+#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -23,11 +24,7 @@
 #include <linux/delay.h>
 #include <linux/fd.h>
 #include <linux/ioctl.h>
-#include <linux/blkdev.h>
-#include <linux/interrupt.h>
-#include <linux/mutex.h>
-#include <linux/module.h>
-#include <linux/spinlock.h>
+#include <linux/devfs_fs_kernel.h>
 #include <asm/io.h>
 #include <asm/dbdma.h>
 #include <asm/prom.h>
@@ -36,7 +33,6 @@
 #include <asm/machdep.h>
 #include <asm/pmac_feature.h>
 
-static DEFINE_MUTEX(swim3_mutex);
 static struct request_queue *swim3_queue;
 static struct gendisk *disks[2];
 static struct request *fd_req;
@@ -148,7 +144,7 @@ struct swim3 {
 #define RELAX		3	/* also eject in progress */
 #define READ_DATA_0	4
 #define TWOMEG_DRIVE	5
-#define SINGLE_SIDED	6	/* drive or diskette is 4MB type? */
+#define SINGLE_SIDED	6
 #define DRIVE_PRESENT	7
 #define DISK_IN		8
 #define WRITE_PROT	9
@@ -177,9 +173,8 @@ struct swim3 {
 
 struct floppy_state {
 	enum swim_state	state;
-	spinlock_t lock;
-	struct swim3 __iomem *swim3;	/* hardware registers */
-	struct dbdma_regs __iomem *dma;	/* DMA controller registers */
+	volatile struct swim3 *swim3;	/* hardware registers */
+	struct dbdma_regs *dma;	/* DMA controller registers */
 	int	swim3_intr;	/* interrupt number for SWIM3 */
 	int	dma_intr;	/* interrupt number for DMA channel */
 	int	cur_cyl;	/* cylinder head is on, or -1 */
@@ -189,7 +184,6 @@ struct floppy_state {
 	int	req_sector;	/* sector number ditto */
 	int	scount;		/* # sectors we're transferring at present */
 	int	retries;
-	int	settle_time;
 	int	secpercyl;	/* disk geometry information */
 	int	secpertrack;
 	int	total_secs;
@@ -202,13 +196,13 @@ struct floppy_state {
 	int	ejected;
 	wait_queue_head_t wait;
 	int	wanted;
-	struct macio_dev *mdev;
+	struct device_node*	media_bay; /* NULL when not in bay */
 	char	dbdma_cmd_space[5 * sizeof(struct dbdma_cmd)];
 };
 
 static struct floppy_state floppy_states[MAX_FLOPPIES];
 static int floppy_count = 0;
-static DEFINE_SPINLOCK(swim3_lock);
+static spinlock_t swim3_lock = SPIN_LOCK_UNLOCKED;
 
 static unsigned short write_preamble[] = {
 	0x4e4e, 0x4e4e, 0x4e4e, 0x4e4e, 0x4e4e,	/* gap field */
@@ -227,7 +221,7 @@ static unsigned short write_postamble[] = {
 static void swim3_select(struct floppy_state *fs, int sel);
 static void swim3_action(struct floppy_state *fs, int action);
 static int swim3_readbit(struct floppy_state *fs, int bit);
-static void do_fd_request(struct request_queue * q);
+static void do_fd_request(request_queue_t * q);
 static void start_request(struct floppy_state *fs);
 static void set_timeout(struct floppy_state *fs, int nticks,
 			void (*proc)(unsigned long));
@@ -238,39 +232,29 @@ static void setup_transfer(struct floppy_state *fs);
 static void act(struct floppy_state *fs);
 static void scan_timeout(unsigned long data);
 static void seek_timeout(unsigned long data);
-static void settle_timeout(unsigned long data);
 static void xfer_timeout(unsigned long data);
-static irqreturn_t swim3_interrupt(int irq, void *dev_id);
-/*static void fd_dma_interrupt(int irq, void *dev_id);*/
+static void swim3_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+/*static void fd_dma_interrupt(int irq, void *dev_id, struct pt_regs *regs);*/
 static int grab_drive(struct floppy_state *fs, enum swim_state state,
 		      int interruptible);
 static void release_drive(struct floppy_state *fs);
 static int fd_eject(struct floppy_state *fs);
-static int floppy_ioctl(struct block_device *bdev, fmode_t mode,
+static int floppy_ioctl(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long param);
-static int floppy_open(struct block_device *bdev, fmode_t mode);
-static int floppy_release(struct gendisk *disk, fmode_t mode);
-static unsigned int floppy_check_events(struct gendisk *disk,
-					unsigned int clearing);
+static int floppy_open(struct inode *inode, struct file *filp);
+static int floppy_release(struct inode *inode, struct file *filp);
+static int floppy_check_change(struct gendisk *disk);
 static int floppy_revalidate(struct gendisk *disk);
+static int swim3_add_device(struct device_node *swims);
+int swim3_init(void);
 
-static bool swim3_end_request(int err, unsigned int nr_bytes)
-{
-	if (__blk_end_request(fd_req, err, nr_bytes))
-		return true;
-
-	fd_req = NULL;
-	return false;
-}
-
-static bool swim3_end_request_cur(int err)
-{
-	return swim3_end_request(err, blk_rq_cur_bytes(fd_req));
-}
+#ifndef CONFIG_PMAC_PBOOK
+#define check_media_bay(which, what)	1
+#endif
 
 static void swim3_select(struct floppy_state *fs, int sel)
 {
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 
 	out_8(&sw->select, RELAX);
 	if (sel & 8)
@@ -282,7 +266,7 @@ static void swim3_select(struct floppy_state *fs, int sel)
 
 static void swim3_action(struct floppy_state *fs, int action)
 {
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 
 	swim3_select(fs, action);
 	udelay(1);
@@ -290,30 +274,32 @@ static void swim3_action(struct floppy_state *fs, int action)
 	udelay(2);
 	out_8(&sw->select, sw->select & ~LSTRB);
 	udelay(1);
+	out_8(&sw->select, RELAX);
 }
 
 static int swim3_readbit(struct floppy_state *fs, int bit)
 {
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 	int stat;
 
 	swim3_select(fs, bit);
-	udelay(1);
+	udelay(10);
 	stat = in_8(&sw->status);
+	out_8(&sw->select, RELAX);
 	return (stat & DATA) == 0;
 }
 
-static void do_fd_request(struct request_queue * q)
+static void do_fd_request(request_queue_t * q)
 {
 	int i;
-
-	for(i=0; i<floppy_count; i++) {
-		struct floppy_state *fs = &floppy_states[i];
-		if (fs->mdev->media_bay &&
-		    check_media_bay(fs->mdev->media_bay) != MB_FD)
+	for(i=0;i<floppy_count;i++)
+	{
+		if (floppy_states[i].media_bay &&
+			check_media_bay(floppy_states[i].media_bay, MB_FD))
 			continue;
-		start_request(fs);
+		start_request(&floppy_states[i]);
 	}
+	sti();
 }
 
 static void start_request(struct floppy_state *fs)
@@ -326,27 +312,25 @@ static void start_request(struct floppy_state *fs)
 		wake_up(&fs->wait);
 		return;
 	}
-	while (fs->state == idle) {
-		if (!fd_req) {
-			fd_req = blk_fetch_request(swim3_queue);
-			if (!fd_req)
-				break;
-		}
-		req = fd_req;
+	while (fs->state == idle && (req = elv_next_request(swim3_queue))) {
 #if 0
-		printk("do_fd_req: dev=%s cmd=%d sec=%ld nr_sec=%u buf=%p\n",
+		printk("do_fd_req: dev=%s cmd=%d sec=%ld nr_sec=%ld buf=%p\n",
 		       req->rq_disk->disk_name, req->cmd,
-		       (long)blk_rq_pos(req), blk_rq_sectors(req), req->buffer);
-		printk("           errors=%d current_nr_sectors=%u\n",
-		       req->errors, blk_rq_cur_sectors(req));
+		       req->sector, req->nr_sectors, req->buffer);
+		printk("           rq_status=%d errors=%d current_nr_sectors=%ld\n",
+		       req->rq_status, req->errors, req->current_nr_sectors);
 #endif
 
-		if (blk_rq_pos(req) >= fs->total_secs) {
-			swim3_end_request_cur(-EIO);
+		if (req->sector < 0 || req->sector >= fs->total_secs) {
+			end_request(req, 0);
+			continue;
+		}
+		if (req->current_nr_sectors == 0) {
+			end_request(req, 1);
 			continue;
 		}
 		if (fs->ejected) {
-			swim3_end_request_cur(-EIO);
+			end_request(req, 0);
 			continue;
 		}
 
@@ -354,19 +338,13 @@ static void start_request(struct floppy_state *fs)
 			if (fs->write_prot < 0)
 				fs->write_prot = swim3_readbit(fs, WRITE_PROT);
 			if (fs->write_prot) {
-				swim3_end_request_cur(-EIO);
+				end_request(req, 0);
 				continue;
 			}
 		}
 
-		/* Do not remove the cast. blk_rq_pos(req) is now a
-		 * sector_t and can be 64 bits, but it will never go
-		 * past 32 bits for this driver anyway, so we can
-		 * safely cast it down and not have to do a 64/32
-		 * division
-		 */
-		fs->req_cyl = ((long)blk_rq_pos(req)) / fs->secpercyl;
-		x = ((long)blk_rq_pos(req)) % fs->secpercyl;
+		fs->req_cyl = req->sector / fs->secpercyl;
+		x = req->sector % fs->secpercyl;
 		fs->head = x / fs->secpertrack;
 		fs->req_sector = x % fs->secpertrack + 1;
 		fd_req = req;
@@ -382,7 +360,7 @@ static void set_timeout(struct floppy_state *fs, int nticks,
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&fs->lock, flags);
+	save_flags(flags); cli();
 	if (fs->timeout_pending)
 		del_timer(&fs->timeout);
 	fs->timeout.expires = jiffies + nticks;
@@ -390,25 +368,25 @@ static void set_timeout(struct floppy_state *fs, int nticks,
 	fs->timeout.data = (unsigned long) fs;
 	add_timer(&fs->timeout);
 	fs->timeout_pending = 1;
-	spin_unlock_irqrestore(&fs->lock, flags);
+	restore_flags(flags);
 }
 
 static inline void scan_track(struct floppy_state *fs)
 {
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
+	int xx;
 
 	swim3_select(fs, READ_DATA_0);
-	in_8(&sw->intr);		/* clear SEEN_SECTOR bit */
-	in_8(&sw->error);
-	out_8(&sw->intr_enable, SEEN_SECTOR);
+	xx = sw->intr;		/* clear SEEN_SECTOR bit */
 	out_8(&sw->control_bis, DO_ACTION);
 	/* enable intr when track found */
+	out_8(&sw->intr_enable, ERROR_INTR | SEEN_SECTOR);
 	set_timeout(fs, HZ, scan_timeout);	/* enable timeout */
 }
 
 static inline void seek_track(struct floppy_state *fs, int n)
 {
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 
 	if (n >= 0) {
 		swim3_action(fs, SEEK_POSITIVE);
@@ -417,14 +395,12 @@ static inline void seek_track(struct floppy_state *fs, int n)
 		swim3_action(fs, SEEK_NEGATIVE);
 		sw->nseek = -n;
 	}
-	fs->expect_cyl = (fs->cur_cyl >= 0)? fs->cur_cyl + n: -1;
+	fs->expect_cyl = (fs->cur_cyl > 0)? fs->cur_cyl + n: -1;
 	swim3_select(fs, STEP);
-	in_8(&sw->error);
-	/* enable intr when seek finished */
-	out_8(&sw->intr_enable, SEEK_DONE);
 	out_8(&sw->control_bis, DO_SEEK);
-	set_timeout(fs, 3*HZ, seek_timeout);	/* enable timeout */
-	fs->settle_time = 0;
+	/* enable intr when seek finished */
+	out_8(&sw->intr_enable, ERROR_INTR | SEEK_DONE);
+	set_timeout(fs, HZ/2, seek_timeout);	/* enable timeout */
 }
 
 static inline void init_dma(struct dbdma_cmd *cp, int cmd,
@@ -439,11 +415,11 @@ static inline void init_dma(struct dbdma_cmd *cp, int cmd,
 static inline void setup_transfer(struct floppy_state *fs)
 {
 	int n;
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 	struct dbdma_cmd *cp = fs->dma_cmd;
-	struct dbdma_regs __iomem *dr = fs->dma;
+	struct dbdma_regs *dr = fs->dma;
 
-	if (blk_rq_cur_sectors(fd_req) <= 0) {
+	if (fd_req->current_nr_sectors <= 0) {
 		printk(KERN_ERR "swim3: transfer 0 sectors?\n");
 		return;
 	}
@@ -451,15 +427,15 @@ static inline void setup_transfer(struct floppy_state *fs)
 		n = 1;
 	else {
 		n = fs->secpertrack - fs->req_sector + 1;
-		if (n > blk_rq_cur_sectors(fd_req))
-			n = blk_rq_cur_sectors(fd_req);
+		if (n > fd_req->current_nr_sectors)
+			n = fd_req->current_nr_sectors;
 	}
 	fs->scount = n;
 	swim3_select(fs, fs->head? READ_DATA_1: READ_DATA_0);
 	out_8(&sw->sector, fs->req_sector);
 	out_8(&sw->nsect, n);
 	out_8(&sw->gap3, 0);
-	out_le32(&dr->cmdptr, virt_to_bus(cp));
+	st_le32(&dr->cmdptr, virt_to_bus(cp));
 	if (rq_data_dir(fd_req) == WRITE) {
 		/* Set up 3 dma commands: write preamble, data, postamble */
 		init_dma(cp, OUTPUT_MORE, write_preamble, sizeof(write_preamble));
@@ -472,21 +448,18 @@ static inline void setup_transfer(struct floppy_state *fs)
 	}
 	++cp;
 	out_le16(&cp->command, DBDMA_STOP);
-	out_8(&sw->control_bic, DO_ACTION | WRITE_SECTORS);
-	in_8(&sw->error);
-	out_8(&sw->control_bic, DO_ACTION | WRITE_SECTORS);
-	if (rq_data_dir(fd_req) == WRITE)
-		out_8(&sw->control_bis, WRITE_SECTORS);
-	in_8(&sw->intr);
 	out_le32(&dr->control, (RUN << 16) | RUN);
+	out_8(&sw->control_bis,
+	      (rq_data_dir(fd_req) == WRITE? WRITE_SECTORS: 0) | DO_ACTION);
 	/* enable intr when transfer complete */
-	out_8(&sw->intr_enable, TRANSFER_DONE);
-	out_8(&sw->control_bis, DO_ACTION);
+	out_8(&sw->intr_enable, ERROR_INTR | TRANSFER_DONE);
 	set_timeout(fs, 2*HZ, xfer_timeout);	/* enable timeout */
 }
 
 static void act(struct floppy_state *fs)
 {
+	volatile struct swim3 *sw = fs->swim3;
+
 	for (;;) {
 		switch (fs->state) {
 		case idle:
@@ -519,15 +492,25 @@ static void act(struct floppy_state *fs)
 			return;
 
 		case settling:
-			/* check for SEEK_COMPLETE after 30ms */
-			fs->settle_time = (HZ + 32) / 33;
-			set_timeout(fs, fs->settle_time, settle_timeout);
-			return;
+			/* wait for SEEK_COMPLETE to become true */
+			swim3_select(fs, SEEK_COMPLETE);
+			udelay(10);
+			out_8(&sw->intr_enable, ERROR_INTR | DATA_CHANGED);
+			in_8(&sw->intr);	/* clear DATA_CHANGED */
+			if (in_8(&sw->status) & DATA) {
+				/* seek_complete is not yet true */
+				set_timeout(fs, HZ/2, seek_timeout);
+				return;
+			}
+			out_8(&sw->intr_enable, 0);
+			in_8(&sw->intr);
+			fs->state = locating;
+			break;
 
 		case do_transfer:
 			if (fs->cur_cyl != fs->req_cyl) {
 				if (fs->retries > 5) {
-					swim3_end_request_cur(-EIO);
+					end_request(fd_req, 0);
 					fs->state = idle;
 					return;
 				}
@@ -551,15 +534,15 @@ static void act(struct floppy_state *fs)
 static void scan_timeout(unsigned long data)
 {
 	struct floppy_state *fs = (struct floppy_state *) data;
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 
 	fs->timeout_pending = 0;
-	out_8(&sw->control_bic, DO_ACTION | WRITE_SECTORS);
+	out_8(&sw->control_bic, DO_ACTION);
 	out_8(&sw->select, RELAX);
 	out_8(&sw->intr_enable, 0);
 	fs->cur_cyl = -1;
 	if (fs->retries > 5) {
-		swim3_end_request_cur(-EIO);
+		end_request(fd_req, 0);
 		fs->state = idle;
 		start_request(fs);
 	} else {
@@ -571,38 +554,24 @@ static void scan_timeout(unsigned long data)
 static void seek_timeout(unsigned long data)
 {
 	struct floppy_state *fs = (struct floppy_state *) data;
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 
 	fs->timeout_pending = 0;
+	if (fs->state == settling) {
+		printk(KERN_ERR "swim3: MSI sel=%x ctrl=%x stat=%x intr=%x ie=%x\n",
+		       sw->select, sw->control, sw->status, sw->intr, sw->intr_enable);
+	}
 	out_8(&sw->control_bic, DO_SEEK);
 	out_8(&sw->select, RELAX);
 	out_8(&sw->intr_enable, 0);
-	printk(KERN_ERR "swim3: seek timeout\n");
-	swim3_end_request_cur(-EIO);
-	fs->state = idle;
-	start_request(fs);
-}
-
-static void settle_timeout(unsigned long data)
-{
-	struct floppy_state *fs = (struct floppy_state *) data;
-	struct swim3 __iomem *sw = fs->swim3;
-
-	fs->timeout_pending = 0;
-	if (swim3_readbit(fs, SEEK_COMPLETE)) {
-		out_8(&sw->select, RELAX);
+	if (fs->state == settling && swim3_readbit(fs, SEEK_COMPLETE)) {
+		/* printk(KERN_DEBUG "swim3: missed settling interrupt\n"); */
 		fs->state = locating;
 		act(fs);
 		return;
 	}
-	out_8(&sw->select, RELAX);
-	if (fs->settle_time < 2*HZ) {
-		++fs->settle_time;
-		set_timeout(fs, 1, settle_timeout);
-		return;
-	}
-	printk(KERN_ERR "swim3: seek settle timeout\n");
-	swim3_end_request_cur(-EIO);
+	printk(KERN_ERR "swim3: seek timeout\n");
+	end_request(fd_req, 0);
 	fs->state = idle;
 	start_request(fs);
 }
@@ -610,44 +579,52 @@ static void settle_timeout(unsigned long data)
 static void xfer_timeout(unsigned long data)
 {
 	struct floppy_state *fs = (struct floppy_state *) data;
-	struct swim3 __iomem *sw = fs->swim3;
-	struct dbdma_regs __iomem *dr = fs->dma;
-	int n;
+	volatile struct swim3 *sw = fs->swim3;
+	struct dbdma_regs *dr = fs->dma;
+	struct dbdma_cmd *cp = fs->dma_cmd;
+	unsigned long s;
 
 	fs->timeout_pending = 0;
-	out_le32(&dr->control, RUN << 16);
-	/* We must wait a bit for dbdma to stop */
-	for (n = 0; (in_le32(&dr->status) & ACTIVE) && n < 1000; n++)
-		udelay(1);
+	st_le32(&dr->control, RUN << 16);
 	out_8(&sw->intr_enable, 0);
 	out_8(&sw->control_bic, WRITE_SECTORS | DO_ACTION);
 	out_8(&sw->select, RELAX);
+	if (rq_data_dir(fd_req) == WRITE)
+		++cp;
+	if (ld_le16(&cp->xfer_status) != 0)
+		s = fs->scount - ((ld_le16(&cp->res_count) + 511) >> 9);
+	else
+		s = 0;
+	fd_req->sector += s;
+	fd_req->current_nr_sectors -= s;
 	printk(KERN_ERR "swim3: timeout %sing sector %ld\n",
-	       (rq_data_dir(fd_req)==WRITE? "writ": "read"),
-	       (long)blk_rq_pos(fd_req));
-	swim3_end_request_cur(-EIO);
+	       (rq_data_dir(fd_req)==WRITE? "writ": "read"), fd_req->sector);
+	end_request(fd_req, 0);
 	fs->state = idle;
 	start_request(fs);
 }
 
-static irqreturn_t swim3_interrupt(int irq, void *dev_id)
+static void swim3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct floppy_state *fs = (struct floppy_state *) dev_id;
-	struct swim3 __iomem *sw = fs->swim3;
+	volatile struct swim3 *sw = fs->swim3;
 	int intr, err, n;
 	int stat, resid;
-	struct dbdma_regs __iomem *dr;
+	struct dbdma_regs *dr;
 	struct dbdma_cmd *cp;
 
+	err = in_8(&sw->error);
 	intr = in_8(&sw->intr);
-	err = (intr & ERROR_INTR)? in_8(&sw->error): 0;
+#if 0
+	printk("swim3 intr state=%d intr=%x err=%x\n", fs->state, intr, err);
+#endif
 	if ((intr & ERROR_INTR) && fs->state != do_transfer)
-		printk(KERN_ERR "swim3_interrupt, state=%d, dir=%x, intr=%x, err=%x\n",
+		printk(KERN_ERR "swim3_interrupt, state=%d, dir=%lx, intr=%x, err=%x\n",
 		       fs->state, rq_data_dir(fd_req), intr, err);
 	switch (fs->state) {
 	case locating:
 		if (intr & SEEN_SECTOR) {
-			out_8(&sw->control_bic, DO_ACTION | WRITE_SECTORS);
+			out_8(&sw->control_bic, DO_ACTION);
 			out_8(&sw->select, RELAX);
 			out_8(&sw->intr_enable, 0);
 			del_timer(&fs->timeout);
@@ -656,7 +633,7 @@ static irqreturn_t swim3_interrupt(int irq, void *dev_id)
 				printk(KERN_ERR "swim3: seen sector but cyl=ff?\n");
 				fs->cur_cyl = -1;
 				if (fs->retries > 5) {
-					swim3_end_request_cur(-EIO);
+					end_request(fd_req, 0);
 					fs->state = idle;
 					start_request(fs);
 				} else {
@@ -697,39 +674,27 @@ static irqreturn_t swim3_interrupt(int irq, void *dev_id)
 	case do_transfer:
 		if ((intr & (ERROR_INTR | TRANSFER_DONE)) == 0)
 			break;
+		dr = fs->dma;
+		cp = fs->dma_cmd;
+		/* We must wait a bit for dbdma to complete */
+		for (n=0; (in_le32(&dr->status) & ACTIVE) && n < 1000; n++)
+			udelay(10);
+		DBDMA_DO_STOP(dr);
 		out_8(&sw->intr_enable, 0);
 		out_8(&sw->control_bic, WRITE_SECTORS | DO_ACTION);
 		out_8(&sw->select, RELAX);
 		del_timer(&fs->timeout);
 		fs->timeout_pending = 0;
-		dr = fs->dma;
-		cp = fs->dma_cmd;
 		if (rq_data_dir(fd_req) == WRITE)
 			++cp;
-		/*
-		 * Check that the main data transfer has finished.
-		 * On writing, the swim3 sometimes doesn't use
-		 * up all the bytes of the postamble, so we can still
-		 * see DMA active here.  That doesn't matter as long
-		 * as all the sector data has been transferred.
-		 */
-		if ((intr & ERROR_INTR) == 0 && cp->xfer_status == 0) {
-			/* wait a little while for DMA to complete */
-			for (n = 0; n < 100; ++n) {
-				if (cp->xfer_status != 0)
-					break;
-				udelay(1);
-				barrier();
-			}
-		}
-		/* turn off DMA */
-		out_le32(&dr->control, (RUN | PAUSE) << 16);
 		stat = ld_le16(&cp->xfer_status);
 		resid = ld_le16(&cp->res_count);
 		if (intr & ERROR_INTR) {
 			n = fs->scount - 1 - resid / 512;
 			if (n > 0) {
-				blk_update_request(fd_req, 0, n << 9);
+				fd_req->sector += n;
+				fd_req->current_nr_sectors -= n;
+				fd_req->buffer += n * 512;
 				fs->req_sector += n;
 			}
 			if (fs->retries < 5) {
@@ -738,22 +703,28 @@ static irqreturn_t swim3_interrupt(int irq, void *dev_id)
 			} else {
 				printk("swim3: error %sing block %ld (err=%x)\n",
 				       rq_data_dir(fd_req) == WRITE? "writ": "read",
-				       (long)blk_rq_pos(fd_req), err);
-				swim3_end_request_cur(-EIO);
+				       fd_req->sector, err);
+				end_request(fd_req, 0);
 				fs->state = idle;
 			}
 		} else {
 			if ((stat & ACTIVE) == 0 || resid != 0) {
 				/* musta been an error */
 				printk(KERN_ERR "swim3: fd dma: stat=%x resid=%d\n", stat, resid);
-				printk(KERN_ERR "  state=%d, dir=%x, intr=%x, err=%x\n",
+				printk(KERN_ERR "  state=%d, dir=%lx, intr=%x, err=%x\n",
 				       fs->state, rq_data_dir(fd_req), intr, err);
-				swim3_end_request_cur(-EIO);
+				end_request(fd_req, 0);
 				fs->state = idle;
 				start_request(fs);
 				break;
 			}
-			if (swim3_end_request(0, fs->scount << 9)) {
+			fd_req->sector += fs->scount;
+			fd_req->current_nr_sectors -= fs->scount;
+			fd_req->buffer += fs->scount * 512;
+			if (fd_req->current_nr_sectors <= 0) {
+				end_request(fd_req, 1);
+				fs->state = idle;
+			} else {
 				fs->req_sector += fs->scount;
 				if (fs->req_sector > fs->secpertrack) {
 					fs->req_sector -= fs->secpertrack;
@@ -763,8 +734,7 @@ static irqreturn_t swim3_interrupt(int irq, void *dev_id)
 					}
 				}
 				act(fs);
-			} else
-				fs->state = idle;
+			}
 		}
 		if (fs->state == idle)
 			start_request(fs);
@@ -772,11 +742,10 @@ static irqreturn_t swim3_interrupt(int irq, void *dev_id)
 	default:
 		printk(KERN_ERR "swim3: don't know what to do in state %d\n", fs->state);
 	}
-	return IRQ_HANDLED;
 }
 
 /*
-static void fd_dma_interrupt(int irq, void *dev_id)
+static void fd_dma_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 }
 */
@@ -786,13 +755,14 @@ static int grab_drive(struct floppy_state *fs, enum swim_state state,
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&fs->lock, flags);
+	save_flags(flags);
+	cli();
 	if (fs->state != idle) {
 		++fs->wanted;
 		while (fs->state != available) {
 			if (interruptible && signal_pending(current)) {
 				--fs->wanted;
-				spin_unlock_irqrestore(&fs->lock, flags);
+				restore_flags(flags);
 				return -EINTR;
 			}
 			interruptible_sleep_on(&fs->wait);
@@ -800,7 +770,7 @@ static int grab_drive(struct floppy_state *fs, enum swim_state state,
 		--fs->wanted;
 	}
 	fs->state = state;
-	spin_unlock_irqrestore(&fs->lock, flags);
+	restore_flags(flags);
 	return 0;
 }
 
@@ -808,10 +778,11 @@ static void release_drive(struct floppy_state *fs)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&fs->lock, flags);
+	save_flags(flags);
+	cli();
 	fs->state = idle;
 	start_request(fs);
-	spin_unlock_irqrestore(&fs->lock, flags);
+	restore_flags(flags);
 }
 
 static int fd_eject(struct floppy_state *fs)
@@ -822,18 +793,16 @@ static int fd_eject(struct floppy_state *fs)
 	if (err)
 		return err;
 	swim3_action(fs, EJECT);
-	for (n = 20; n > 0; --n) {
+	for (n = 2*HZ; n > 0; --n) {
+		if (swim3_readbit(fs, RELAX))
+			break;
 		if (signal_pending(current)) {
 			err = -EINTR;
 			break;
 		}
-		swim3_select(fs, RELAX);
-		schedule_timeout_interruptible(1);
-		if (swim3_readbit(fs, DISK_IN) == 0)
-			break;
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
 	}
-	swim3_select(fs, RELAX);
-	udelay(150);
 	fs->ejected = 1;
 	release_drive(fs);
 	return err;
@@ -842,17 +811,16 @@ static int fd_eject(struct floppy_state *fs)
 static struct floppy_struct floppy_type =
 	{ 2880,18,2,80,0,0x1B,0x00,0xCF,0x6C,NULL };	/*  7 1.44MB 3.5"   */
 
-static int floppy_locked_ioctl(struct block_device *bdev, fmode_t mode,
+static int floppy_ioctl(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long param)
 {
-	struct floppy_state *fs = bdev->bd_disk->private_data;
+	struct floppy_state *fs = inode->i_bdev->bd_disk->private_data;
 	int err;
 		
 	if ((cmd & 0x80) && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (fs->mdev->media_bay &&
-	    check_media_bay(fs->mdev->media_bay) != MB_FD)
+	if (fs->media_bay && check_media_bay(fs->media_bay, MB_FD))
 		return -ENXIO;
 
 	switch (cmd) {
@@ -862,7 +830,7 @@ static int floppy_locked_ioctl(struct block_device *bdev, fmode_t mode,
 		err = fd_eject(fs);
 		return err;
 	case FDGETPRM:
-	        if (copy_to_user((void __user *) param, &floppy_type,
+	        if (copy_to_user((void *) param, (void *)&floppy_type,
 				 sizeof(struct floppy_struct)))
 			return -EFAULT;
 		return 0;
@@ -870,64 +838,50 @@ static int floppy_locked_ioctl(struct block_device *bdev, fmode_t mode,
 	return -ENOTTY;
 }
 
-static int floppy_ioctl(struct block_device *bdev, fmode_t mode,
-				 unsigned int cmd, unsigned long param)
+static int floppy_open(struct inode *inode, struct file *filp)
 {
-	int ret;
-
-	mutex_lock(&swim3_mutex);
-	ret = floppy_locked_ioctl(bdev, mode, cmd, param);
-	mutex_unlock(&swim3_mutex);
-
-	return ret;
-}
-
-static int floppy_open(struct block_device *bdev, fmode_t mode)
-{
-	struct floppy_state *fs = bdev->bd_disk->private_data;
-	struct swim3 __iomem *sw = fs->swim3;
+	struct floppy_state *fs = inode->i_bdev->bd_disk->private_data;
+	volatile struct swim3 *sw = fs->swim3;
 	int n, err = 0;
 
 	if (fs->ref_count == 0) {
-		if (fs->mdev->media_bay &&
-		    check_media_bay(fs->mdev->media_bay) != MB_FD)
+		if (fs->media_bay && check_media_bay(fs->media_bay, MB_FD))
 			return -ENXIO;
-		out_8(&sw->setup, S_IBM_DRIVE | S_FCLK_DIV2);
-		out_8(&sw->control_bic, 0xff);
 		out_8(&sw->mode, 0x95);
+		out_8(&sw->control_bic, 0xff);
+		out_8(&sw->setup, S_IBM_DRIVE | S_FCLK_DIV2);
 		udelay(10);
 		out_8(&sw->intr_enable, 0);
 		out_8(&sw->control_bis, DRIVE_ENABLE | INTR_ENABLE);
 		swim3_action(fs, MOTOR_ON);
 		fs->write_prot = -1;
 		fs->cur_cyl = -1;
-		for (n = 0; n < 2 * HZ; ++n) {
-			if (n >= HZ/30 && swim3_readbit(fs, SEEK_COMPLETE))
+		for (n = HZ; n > 0; --n) {
+			if (swim3_readbit(fs, SEEK_COMPLETE))
 				break;
 			if (signal_pending(current)) {
 				err = -EINTR;
 				break;
 			}
-			swim3_select(fs, RELAX);
-			schedule_timeout_interruptible(1);
+			current->state = TASK_INTERRUPTIBLE;
+			schedule_timeout(1);
 		}
 		if (err == 0 && (swim3_readbit(fs, SEEK_COMPLETE) == 0
 				 || swim3_readbit(fs, DISK_IN) == 0))
 			err = -ENXIO;
-		swim3_action(fs, SETMFM);
-		swim3_select(fs, RELAX);
+		swim3_action(fs, 9);
 
-	} else if (fs->ref_count == -1 || mode & FMODE_EXCL)
+	} else if (fs->ref_count == -1 || filp->f_flags & O_EXCL)
 		return -EBUSY;
 
-	if (err == 0 && (mode & FMODE_NDELAY) == 0
-	    && (mode & (FMODE_READ|FMODE_WRITE))) {
-		check_disk_change(bdev);
+	if (err == 0 && (filp->f_flags & O_NDELAY) == 0
+	    && (filp->f_mode & 3)) {
+		check_disk_change(inode->i_bdev);
 		if (fs->ejected)
 			err = -ENXIO;
 	}
 
-	if (err == 0 && (mode & FMODE_WRITE)) {
+	if (err == 0 && (filp->f_mode & 2)) {
 		if (fs->write_prot < 0)
 			fs->write_prot = swim3_readbit(fs, WRITE_PROT);
 		if (fs->write_prot)
@@ -938,12 +892,11 @@ static int floppy_open(struct block_device *bdev, fmode_t mode)
 		if (fs->ref_count == 0) {
 			swim3_action(fs, MOTOR_OFF);
 			out_8(&sw->control_bic, DRIVE_ENABLE | INTR_ENABLE);
-			swim3_select(fs, RELAX);
 		}
 		return err;
 	}
 
-	if (mode & FMODE_EXCL)
+	if (filp->f_flags & O_EXCL)
 		fs->ref_count = -1;
 	else
 		++fs->ref_count;
@@ -951,63 +904,46 @@ static int floppy_open(struct block_device *bdev, fmode_t mode)
 	return 0;
 }
 
-static int floppy_unlocked_open(struct block_device *bdev, fmode_t mode)
+static int floppy_release(struct inode *inode, struct file *filp)
 {
-	int ret;
-
-	mutex_lock(&swim3_mutex);
-	ret = floppy_open(bdev, mode);
-	mutex_unlock(&swim3_mutex);
-
-	return ret;
-}
-
-static int floppy_release(struct gendisk *disk, fmode_t mode)
-{
-	struct floppy_state *fs = disk->private_data;
-	struct swim3 __iomem *sw = fs->swim3;
-	mutex_lock(&swim3_mutex);
+	struct floppy_state *fs = inode->i_bdev->bd_disk->private_data;
+	volatile struct swim3 *sw = fs->swim3;
 	if (fs->ref_count > 0 && --fs->ref_count == 0) {
 		swim3_action(fs, MOTOR_OFF);
 		out_8(&sw->control_bic, 0xff);
-		swim3_select(fs, RELAX);
 	}
-	mutex_unlock(&swim3_mutex);
 	return 0;
 }
 
-static unsigned int floppy_check_events(struct gendisk *disk,
-					unsigned int clearing)
+static int floppy_check_change(struct gendisk *disk)
 {
 	struct floppy_state *fs = disk->private_data;
-	return fs->ejected ? DISK_EVENT_MEDIA_CHANGE : 0;
+	return fs->ejected;
 }
 
 static int floppy_revalidate(struct gendisk *disk)
 {
 	struct floppy_state *fs = disk->private_data;
-	struct swim3 __iomem *sw;
+	volatile struct swim3 *sw;
 	int ret, n;
 
-	if (fs->mdev->media_bay &&
-	    check_media_bay(fs->mdev->media_bay) != MB_FD)
+	if (fs->media_bay && check_media_bay(fs->media_bay, MB_FD))
 		return -ENXIO;
 
 	sw = fs->swim3;
 	grab_drive(fs, revalidating, 0);
 	out_8(&sw->intr_enable, 0);
-	out_8(&sw->control_bis, DRIVE_ENABLE);
-	swim3_action(fs, MOTOR_ON);	/* necessary? */
+	out_8(&sw->control_bis, DRIVE_ENABLE | INTR_ENABLE);
+	swim3_action(fs, MOTOR_ON);
 	fs->write_prot = -1;
 	fs->cur_cyl = -1;
-	mdelay(1);
 	for (n = HZ; n > 0; --n) {
 		if (swim3_readbit(fs, SEEK_COMPLETE))
 			break;
 		if (signal_pending(current))
 			break;
-		swim3_select(fs, RELAX);
-		schedule_timeout_interruptible(1);
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
 	}
 	ret = swim3_readbit(fs, SEEK_COMPLETE) == 0
 		|| swim3_readbit(fs, DISK_IN) == 0;
@@ -1015,82 +951,130 @@ static int floppy_revalidate(struct gendisk *disk)
 		swim3_action(fs, MOTOR_OFF);
 	else {
 		fs->ejected = 0;
-		swim3_action(fs, SETMFM);
+		swim3_action(fs, 9);
 	}
-	swim3_select(fs, RELAX);
 
 	release_drive(fs);
 	return ret;
 }
 
-static const struct block_device_operations floppy_fops = {
-	.open		= floppy_unlocked_open,
+static void floppy_off(unsigned int nr)
+{
+}
+
+static struct block_device_operations floppy_fops = {
+	.open		= floppy_open,
 	.release	= floppy_release,
 	.ioctl		= floppy_ioctl,
-	.check_events	= floppy_check_events,
+	.media_changed	= floppy_check_change,
 	.revalidate_disk= floppy_revalidate,
 };
 
-static int swim3_add_device(struct macio_dev *mdev, int index)
+int swim3_init(void)
 {
-	struct device_node *swim = mdev->ofdev.dev.of_node;
-	struct floppy_state *fs = &floppy_states[index];
-	int rc = -EBUSY;
+	struct device_node *swim;
+	int err = -ENOMEM;
+	int i;
 
-	/* Check & Request resources */
-	if (macio_resource_count(mdev) < 2) {
-		printk(KERN_WARNING "ifd%d: no address for %s\n",
-		       index, swim->full_name);
-		return -ENXIO;
-	}
-	if (macio_irq_count(mdev) < 2) {
-		printk(KERN_WARNING "fd%d: no intrs for device %s\n",
-			index, swim->full_name);
-	}
-	if (macio_request_resource(mdev, 0, "swim3 (mmio)")) {
-		printk(KERN_ERR "fd%d: can't request mmio resource for %s\n",
-		       index, swim->full_name);
-		return -EBUSY;
-	}
-	if (macio_request_resource(mdev, 1, "swim3 (dma)")) {
-		printk(KERN_ERR "fd%d: can't request dma resource for %s\n",
-		       index, swim->full_name);
-		macio_release_resource(mdev, 0);
-		return -EBUSY;
-	}
-	dev_set_drvdata(&mdev->ofdev.dev, fs);
+	devfs_mk_dir("floppy");
 
-	if (mdev->media_bay == NULL)
+	swim = find_devices("floppy");
+	while (swim && (floppy_count < MAX_FLOPPIES))
+	{
+		swim3_add_device(swim);
+		swim = swim->next;
+	}
+
+	swim = find_devices("swim3");
+	while (swim && (floppy_count < MAX_FLOPPIES))
+	{
+		swim3_add_device(swim);
+		swim = swim->next;
+	}
+
+	if (!floppy_count)
+		return -ENODEV;
+
+	for (i = 0; i < floppy_count; i++) {
+		disks[i] = alloc_disk(1);
+		if (!disks[i])
+			goto out;
+	}
+
+	if (register_blkdev(FLOPPY_MAJOR, "fd")) {
+		err = -EBUSY;
+		goto out;
+	}
+
+	swim3_queue = blk_init_queue(do_fd_request, &swim3_lock);
+	if (!swim3_queue) {
+		err = -ENOMEM;
+		goto out_queue;
+	}
+
+	for (i = 0; i < floppy_count; i++) {
+		struct gendisk *disk = disks[i];
+		disk->major = FLOPPY_MAJOR;
+		disk->first_minor = i;
+		disk->fops = &floppy_fops;
+		disk->private_data = &floppy_states[i];
+		disk->queue = swim3_queue;
+		sprintf(disk->disk_name, "fd%d", i);
+		sprintf(disk->devfs_name, "floppy/%d", i);
+		set_capacity(disk, 2880);
+		add_disk(disk);
+	}
+	return 0;
+
+out_queue:
+	unregister_blkdev(FLOPPY_MAJOR, "fd");
+out:
+	while (i--)
+		put_disk(disks[i]);
+	/* shouldn't we do something with results of swim_add_device()? */
+	return err;
+}
+
+static int swim3_add_device(struct device_node *swim)
+{
+	struct device_node *mediabay;
+	struct floppy_state *fs = &floppy_states[floppy_count];
+
+	if (swim->n_addrs < 2)
+	{
+		printk(KERN_INFO "swim3: expecting 2 addrs (n_addrs:%d, n_intrs:%d)\n",
+		       swim->n_addrs, swim->n_intrs);
+		return -EINVAL;
+	}
+
+	if (swim->n_intrs < 2)
+	{
+		printk(KERN_INFO "swim3: expecting 2 intrs (n_addrs:%d, n_intrs:%d)\n",
+		       swim->n_addrs, swim->n_intrs);
+		return -EINVAL;
+	}
+
+	if (!request_OF_resource(swim, 0, NULL)) {
+		printk(KERN_INFO "swim3: can't request IO resource !\n");
+		return -EINVAL;
+	}
+
+	mediabay = (strcasecmp(swim->parent->type, "media-bay") == 0) ? swim->parent : NULL;
+	if (mediabay == NULL)
 		pmac_call_feature(PMAC_FTR_SWIM3_ENABLE, swim, 0, 1);
 	
 	memset(fs, 0, sizeof(*fs));
-	spin_lock_init(&fs->lock);
 	fs->state = idle;
-	fs->swim3 = (struct swim3 __iomem *)
-		ioremap(macio_resource_start(mdev, 0), 0x200);
-	if (fs->swim3 == NULL) {
-		printk("fd%d: couldn't map registers for %s\n",
-		       index, swim->full_name);
-		rc = -ENOMEM;
-		goto out_release;
-	}
-	fs->dma = (struct dbdma_regs __iomem *)
-		ioremap(macio_resource_start(mdev, 1), 0x200);
-	if (fs->dma == NULL) {
-		printk("fd%d: couldn't map DMA for %s\n",
-		       index, swim->full_name);
-		iounmap(fs->swim3);
-		rc = -ENOMEM;
-		goto out_release;
-	}
-	fs->swim3_intr = macio_irq(mdev, 0);
-	fs->dma_intr = macio_irq(mdev, 1);
+	fs->swim3 = (volatile struct swim3 *) ioremap(swim->addrs[0].address, 0x200);
+	fs->dma = (struct dbdma_regs *) ioremap(swim->addrs[1].address, 0x200);
+	fs->swim3_intr = swim->intrs[0].line;
+	fs->dma_intr = swim->intrs[1].line;
 	fs->cur_cyl = -1;
 	fs->cur_sector = -1;
 	fs->secpercyl = 36;
 	fs->secpertrack = 18;
 	fs->total_secs = 2880;
-	fs->mdev = mdev;
+	fs->media_bay = mediabay;
 	init_waitqueue_head(&fs->wait);
 
 	fs->dma_cmd = (struct dbdma_cmd *) DBDMA_ALIGN(fs->dbdma_cmd_space);
@@ -1098,16 +1082,15 @@ static int swim3_add_device(struct macio_dev *mdev, int index)
 	st_le16(&fs->dma_cmd[1].command, DBDMA_STOP);
 
 	if (request_irq(fs->swim3_intr, swim3_interrupt, 0, "SWIM3", fs)) {
-		printk(KERN_ERR "fd%d: couldn't request irq %d for %s\n",
-		       index, fs->swim3_intr, swim->full_name);
+		printk(KERN_ERR "Couldn't get irq %d for SWIM3\n", fs->swim3_intr);
 		pmac_call_feature(PMAC_FTR_SWIM3_ENABLE, swim, 0, 0);
-		goto out_unmap;
 		return -EBUSY;
 	}
 /*
 	if (request_irq(fs->dma_intr, fd_dma_interrupt, 0, "SWIM3-dma", fs)) {
 		printk(KERN_ERR "Couldn't get irq %d for SWIM3 DMA",
 		       fs->dma_intr);
+		pmac_call_feature(PMAC_FTR_SWIM3_ENABLE, swim, 0, 0);
 		return -EBUSY;
 	}
 */
@@ -1115,99 +1098,9 @@ static int swim3_add_device(struct macio_dev *mdev, int index)
 	init_timer(&fs->timeout);
 
 	printk(KERN_INFO "fd%d: SWIM3 floppy controller %s\n", floppy_count,
-		mdev->media_bay ? "in media bay" : "");
+		mediabay ? "in media bay" : "");
 
-	return 0;
-
- out_unmap:
-	iounmap(fs->dma);
-	iounmap(fs->swim3);
-
- out_release:
-	macio_release_resource(mdev, 0);
-	macio_release_resource(mdev, 1);
-
-	return rc;
-}
-
-static int __devinit swim3_attach(struct macio_dev *mdev, const struct of_device_id *match)
-{
-	int i, rc;
-	struct gendisk *disk;
-
-	/* Add the drive */
-	rc = swim3_add_device(mdev, floppy_count);
-	if (rc)
-		return rc;
-
-	/* Now create the queue if not there yet */
-	if (swim3_queue == NULL) {
-		/* If we failed, there isn't much we can do as the driver is still
-		 * too dumb to remove the device, just bail out
-		 */
-		if (register_blkdev(FLOPPY_MAJOR, "fd"))
-			return 0;
-		swim3_queue = blk_init_queue(do_fd_request, &swim3_lock);
-		if (swim3_queue == NULL) {
-			unregister_blkdev(FLOPPY_MAJOR, "fd");
-			return 0;
-		}
-	}
-
-	/* Now register that disk. Same comment about failure handling */
-	i = floppy_count++;
-	disk = disks[i] = alloc_disk(1);
-	if (disk == NULL)
-		return 0;
-
-	disk->major = FLOPPY_MAJOR;
-	disk->first_minor = i;
-	disk->fops = &floppy_fops;
-	disk->private_data = &floppy_states[i];
-	disk->queue = swim3_queue;
-	disk->flags |= GENHD_FL_REMOVABLE;
-	sprintf(disk->disk_name, "fd%d", i);
-	set_capacity(disk, 2880);
-	add_disk(disk);
-
+	floppy_count++;
+	
 	return 0;
 }
-
-static struct of_device_id swim3_match[] =
-{
-	{
-	.name		= "swim3",
-	},
-	{
-	.compatible	= "ohare-swim3"
-	},
-	{
-	.compatible	= "swim3"
-	},
-};
-
-static struct macio_driver swim3_driver =
-{
-	.driver = {
-		.name 		= "swim3",
-		.of_match_table	= swim3_match,
-	},
-	.probe		= swim3_attach,
-#if 0
-	.suspend	= swim3_suspend,
-	.resume		= swim3_resume,
-#endif
-};
-
-
-int swim3_init(void)
-{
-	macio_register_driver(&swim3_driver);
-	return 0;
-}
-
-module_init(swim3_init)
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Paul Mackerras");
-MODULE_ALIAS_BLOCKDEV_MAJOR(FLOPPY_MAJOR);

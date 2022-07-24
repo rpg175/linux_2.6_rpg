@@ -12,7 +12,7 @@
  *
  *	This driver allows use of the real time clock (built into
  *	nearly all computers) from user space. It exports the /dev/rtc
- *	interface supporting various ioctl() and also the /proc/driver/rtc
+ *	interface supporting various ioctl() and also the /proc/dev/rtc
  *	pseudo-file for status information.
  *
  *	The ioctls can be used to set the interrupt behaviour where
@@ -43,7 +43,7 @@
 #define RTC_VERSION	"1.07"
 
 #include <linux/module.h>
-#include <linux/sched.h>
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/fcntl.h>
@@ -52,7 +52,6 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/proc_fs.h>
-#include <linux/mutex.h>
 #include <linux/workqueue.h>
 
 #include <asm/uaccess.h>
@@ -66,7 +65,6 @@
  *	ioctls.
  */
 
-static DEFINE_MUTEX(gen_rtc_mutex);
 static DECLARE_WAIT_QUEUE_HEAD(gen_rtc_wait);
 
 /*
@@ -85,7 +83,7 @@ static unsigned char days_in_mo[] =
 static int irq_active;
 
 #ifdef CONFIG_GEN_RTC_X
-static struct work_struct genrtc_task;
+struct work_struct genrtc_task;
 static struct timer_list timer_task;
 
 static unsigned int oldsecs;
@@ -97,7 +95,7 @@ static void gen_rtc_timer(unsigned long data);
 static volatile int stask_active;              /* schedule_work */
 static volatile int ttask_active;              /* timer_task */
 static int stop_rtc_timers;                    /* don't requeue tasks */
-static DEFINE_SPINLOCK(gen_rtc_lock);
+static spinlock_t gen_rtc_lock = SPIN_LOCK_UNLOCKED;
 
 static void gen_rtc_interrupt(unsigned long arg);
 
@@ -105,7 +103,7 @@ static void gen_rtc_interrupt(unsigned long arg);
  * Routine to poll RTC seconds field for change as often as possible,
  * after first RTC_UIE use timer to reduce polling
  */
-static void genrtc_troutine(struct work_struct *work)
+static void genrtc_troutine(void *data)
 {
 	unsigned int tmp = get_rtc_ss();
 	
@@ -173,9 +171,10 @@ static void gen_rtc_interrupt(unsigned long arg)
 /*
  *	Now all the various file operations that we export.
  */
-static ssize_t gen_rtc_read(struct file *file, char __user *buf,
+static ssize_t gen_rtc_read(struct file *file, char *buf,
 			size_t count, loff_t *ppos)
 {
+	DECLARE_WAITQUEUE(wait, current);
 	unsigned long data;
 	ssize_t retval;
 
@@ -185,22 +184,33 @@ static ssize_t gen_rtc_read(struct file *file, char __user *buf,
 	if (file->f_flags & O_NONBLOCK && !gen_rtc_irq_data)
 		return -EAGAIN;
 
-	retval = wait_event_interruptible(gen_rtc_wait,
-			(data = xchg(&gen_rtc_irq_data, 0)));
-	if (retval)
-		goto out;
+	add_wait_queue(&gen_rtc_wait, &wait);
+	retval = -ERESTARTSYS;
+
+	while (1) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		data = xchg(&gen_rtc_irq_data, 0);
+		if (data)
+			break;
+		if (signal_pending(current))
+			goto out;
+		schedule();
+	}
 
 	/* first test allows optimizer to nuke this case for 32-bit machines */
 	if (sizeof (int) != sizeof (long) && count == sizeof (unsigned int)) {
 		unsigned int uidata = data;
-		retval = put_user(uidata, (unsigned int __user *)buf) ?:
-			sizeof(unsigned int);
+		retval = put_user(uidata, (unsigned long *)buf);
 	}
 	else {
-		retval = put_user(data, (unsigned long __user *)buf) ?:
-			sizeof(unsigned long);
+		retval = put_user(data, (unsigned long *)buf);
 	}
-out:
+	if (!retval)
+		retval = sizeof(unsigned long);
+ out:
+	current->state = TASK_RUNNING;
+	remove_wait_queue(&gen_rtc_wait, &wait);
+
 	return retval;
 }
 
@@ -246,7 +256,7 @@ static inline int gen_set_rtc_irq_bit(unsigned char bit)
 		irq_active = 1;
 		stop_rtc_timers = 0;
 		lostint = 0;
-		INIT_WORK(&genrtc_task, genrtc_troutine);
+		INIT_WORK(&genrtc_task, genrtc_troutine, NULL);
 		oldsecs = get_rtc_ss();
 		init_timer(&timer_task);
 
@@ -263,12 +273,11 @@ static inline int gen_set_rtc_irq_bit(unsigned char bit)
 #endif
 }
 
-static int gen_rtc_ioctl(struct file *file,
+static int gen_rtc_ioctl(struct inode *inode, struct file *file,
 			 unsigned int cmd, unsigned long arg)
 {
 	struct rtc_time wtime;
 	struct rtc_pll_info pll;
-	void __user *argp = (void __user *)arg;
 
 	switch (cmd) {
 
@@ -276,12 +285,13 @@ static int gen_rtc_ioctl(struct file *file,
 	    if (get_rtc_pll(&pll))
 	 	    return -EINVAL;
 	    else
-		    return copy_to_user(argp, &pll, sizeof pll) ? -EFAULT : 0;
+		    return copy_to_user((void *)arg, &pll, sizeof pll) ? -EFAULT : 0;
 
 	case RTC_PLL_SET:
 		if (!capable(CAP_SYS_TIME))
 			return -EACCES;
-		if (copy_from_user(&pll, argp, sizeof(pll)))
+		if (copy_from_user(&pll, (struct rtc_pll_info*)arg,
+				   sizeof(pll)))
 			return -EFAULT;
 	    return set_rtc_pll(&pll);
 
@@ -297,7 +307,7 @@ static int gen_rtc_ioctl(struct file *file,
 		memset(&wtime, 0, sizeof(wtime));
 		get_rtc_time(&wtime);
 
-		return copy_to_user(argp, &wtime, sizeof(wtime)) ? -EFAULT : 0;
+		return copy_to_user((void *)arg, &wtime, sizeof(wtime)) ? -EFAULT : 0;
 
 	case RTC_SET_TIME:	/* Set the RTC */
 	    {
@@ -307,7 +317,8 @@ static int gen_rtc_ioctl(struct file *file,
 		if (!capable(CAP_SYS_TIME))
 			return -EACCES;
 
-		if (copy_from_user(&wtime, argp, sizeof(wtime)))
+		if (copy_from_user(&wtime, (struct rtc_time *)arg,
+				   sizeof(wtime)))
 			return -EFAULT;
 
 		year = wtime.tm_year + 1900;
@@ -333,18 +344,6 @@ static int gen_rtc_ioctl(struct file *file,
 	return -EINVAL;
 }
 
-static long gen_rtc_unlocked_ioctl(struct file *file, unsigned int cmd,
-				   unsigned long arg)
-{
-	int ret;
-
-	mutex_lock(&gen_rtc_mutex);
-	ret = gen_rtc_ioctl(file, cmd, arg);
-	mutex_unlock(&gen_rtc_mutex);
-
-	return ret;
-}
-
 /*
  *	We enforce only one user at a time here with the open/close.
  *	Also clear the previous interrupt data on an open, and clean
@@ -353,16 +352,12 @@ static long gen_rtc_unlocked_ioctl(struct file *file, unsigned int cmd,
 
 static int gen_rtc_open(struct inode *inode, struct file *file)
 {
-	mutex_lock(&gen_rtc_mutex);
-	if (gen_rtc_status & RTC_IS_OPEN) {
-		mutex_unlock(&gen_rtc_mutex);
+	if (gen_rtc_status & RTC_IS_OPEN)
 		return -EBUSY;
-	}
 
 	gen_rtc_status |= RTC_IS_OPEN;
 	gen_rtc_irq_data = 0;
 	irq_active = 0;
-	mutex_unlock(&gen_rtc_mutex);
 
 	return 0;
 }
@@ -380,12 +375,67 @@ static int gen_rtc_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int gen_rtc_read_proc(char *page, char **start, off_t off,
+			     int count, int *eof, void *data);
 
-#ifdef CONFIG_PROC_FS
 
 /*
- *	Info exported via "/proc/driver/rtc".
+ *	The various file operations we support.
  */
+
+static struct file_operations gen_rtc_fops = {
+	.owner		= THIS_MODULE,
+#ifdef CONFIG_GEN_RTC_X
+	.read		= gen_rtc_read,
+	.poll		= gen_rtc_poll,
+#endif
+	.ioctl		= gen_rtc_ioctl,
+	.open		= gen_rtc_open,
+	.release	= gen_rtc_release,
+};
+
+static struct miscdevice rtc_gen_dev =
+{
+	.minor		= RTC_MINOR,
+	.name		= "rtc",
+	.fops		= &gen_rtc_fops,
+};
+
+static int __init rtc_generic_init(void)
+{
+	int retval;
+
+	printk(KERN_INFO "Generic RTC Driver v%s\n", RTC_VERSION);
+
+	retval = misc_register(&rtc_gen_dev);
+	if(retval < 0)
+		return retval;
+
+#ifdef CONFIG_PROC_FS
+	if((create_proc_read_entry ("driver/rtc", 0, 0, gen_rtc_read_proc, NULL)) == NULL){
+		misc_deregister(&rtc_gen_dev);
+		return -ENOMEM;
+	}
+#endif
+
+	return 0;
+}
+
+static void __exit rtc_generic_exit(void)
+{
+	remove_proc_entry ("driver/rtc", NULL);
+	misc_deregister(&rtc_gen_dev);
+}
+
+module_init(rtc_generic_init);
+module_exit(rtc_generic_exit);
+
+
+/*
+ *	Info exported via "/proc/rtc".
+ */
+
+#ifdef CONFIG_PROC_FS
 
 static int gen_rtc_proc_output(char *buf)
 {
@@ -471,72 +521,9 @@ static int gen_rtc_read_proc(char *page, char **start, off_t off,
 	return len;
 }
 
-static int __init gen_rtc_proc_init(void)
-{
-	struct proc_dir_entry *r;
-
-	r = create_proc_read_entry("driver/rtc", 0, NULL, gen_rtc_read_proc, NULL);
-	if (!r)
-		return -ENOMEM;
-	return 0;
-}
-#else
-static inline int gen_rtc_proc_init(void) { return 0; }
 #endif /* CONFIG_PROC_FS */
 
 
-/*
- *	The various file operations we support.
- */
-
-static const struct file_operations gen_rtc_fops = {
-	.owner		= THIS_MODULE,
-#ifdef CONFIG_GEN_RTC_X
-	.read		= gen_rtc_read,
-	.poll		= gen_rtc_poll,
-#endif
-	.unlocked_ioctl	= gen_rtc_unlocked_ioctl,
-	.open		= gen_rtc_open,
-	.release	= gen_rtc_release,
-	.llseek		= noop_llseek,
-};
-
-static struct miscdevice rtc_gen_dev =
-{
-	.minor		= RTC_MINOR,
-	.name		= "rtc",
-	.fops		= &gen_rtc_fops,
-};
-
-static int __init rtc_generic_init(void)
-{
-	int retval;
-
-	printk(KERN_INFO "Generic RTC Driver v%s\n", RTC_VERSION);
-
-	retval = misc_register(&rtc_gen_dev);
-	if (retval < 0)
-		return retval;
-
-	retval = gen_rtc_proc_init();
-	if (retval) {
-		misc_deregister(&rtc_gen_dev);
-		return retval;
-	}
-
-	return 0;
-}
-
-static void __exit rtc_generic_exit(void)
-{
-	remove_proc_entry ("driver/rtc", NULL);
-	misc_deregister(&rtc_gen_dev);
-}
-
-
-module_init(rtc_generic_init);
-module_exit(rtc_generic_exit);
-
 MODULE_AUTHOR("Richard Zidlicky");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS_MISCDEV(RTC_MINOR);
+

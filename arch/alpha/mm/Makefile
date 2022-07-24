@@ -2,8 +2,8 @@
 # Makefile for the linux alpha-specific parts of the memory manager.
 #
 
-ccflags-y := -Werror
+EXTRA_CFLAGS := -Werror
 
-obj-y	:= init.o fault.o extable.o
+obj-y	:= init.o fault.o extable.o remap.o
 
 obj-$(CONFIG_DISCONTIGMEM) += numa.o

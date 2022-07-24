@@ -21,7 +21,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/gfp.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
 #include "hisax_isac.h"
@@ -33,7 +32,7 @@
 
 #ifdef CONFIG_HISAX_DEBUG
 static int debug = 1;
-module_param(debug, int, 0);
+MODULE_PARM(debug, "i");
 
 static char *ISACVer[] = {
   "2086/2186 V1.1", 
@@ -434,7 +433,7 @@ static void l1m_debug(struct FsmInst *fi, char *fmt, ...)
 	char buf[256];
 	
 	va_start(args, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, args);
+	vsprintf(buf, fmt, args);
 	DBG(DBG_L1M, "%s", buf);
 	va_end(args);
 }
@@ -451,7 +450,7 @@ static void isac_empty_fifo(struct isac *isac, int count)
 {
 	// this also works for isacsx, since
 	// CMDR(D) register works the same
-	u_char *ptr;
+	u8 *ptr;
 
 	DBG(DBG_IRQ, "count %d", count);
 
@@ -475,12 +474,14 @@ static void isac_fill_fifo(struct isac *isac)
 
 	int count;
 	unsigned char cmd;
-	u_char *ptr;
+	u8 *ptr;
 
-	BUG_ON(!isac->tx_skb);
+	if (!isac->tx_skb)
+		BUG();
 
 	count = isac->tx_skb->len;
-	BUG_ON(count <= 0);
+	if (count <= 0)
+		BUG();
 
 	DBG(DBG_IRQ, "count %d", count);
 
@@ -769,7 +770,7 @@ void isac_init(struct isac *isac)
 	FsmInitTimer(&isac->l1m, &isac->timer);
 }
 
-void isac_setup(struct isac *isac)
+void hisax_isac_setup(struct isac *isac)
 {
 	int val, eval;
 
@@ -858,7 +859,8 @@ void isac_d_l2l1(struct hisax_if *hisax_d_if, int pr, void *arg)
 			dev_kfree_skb(skb);
 			break;
 		}
-		BUG_ON(isac->tx_skb);
+		if (isac->tx_skb)
+			BUG();
 
 		isac->tx_skb = skb;
 		isac_fill_fifo(isac);
@@ -888,7 +890,7 @@ EXPORT_SYMBOL(isac_d_l2l1);
 EXPORT_SYMBOL(isacsx_setup);
 EXPORT_SYMBOL(isacsx_irq);
 
-EXPORT_SYMBOL(isac_setup);
+EXPORT_SYMBOL(hisax_isac_setup);
 EXPORT_SYMBOL(isac_irq);
 
 module_init(hisax_isac_init);

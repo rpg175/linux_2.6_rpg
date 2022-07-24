@@ -1,4 +1,4 @@
-/*
+/* $Id: parport_share.c,v 1.15 1998/01/11 12:06:17 philip Exp $
  * Parallel-port resource manager code.
  * 
  * Authors: David Campbell <campbell@tirian.che.curtin.edu.au>
@@ -17,6 +17,7 @@
 
 #undef PARPORT_DEBUG_SHARING		/* undef for production */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/threads.h>
@@ -31,7 +32,6 @@
 #include <linux/kmod.h>
 
 #include <linux/spinlock.h>
-#include <linux/mutex.h>
 #include <asm/irq.h>
 
 #undef PARPORT_PARANOID
@@ -41,16 +41,11 @@
 unsigned long parport_default_timeslice = PARPORT_DEFAULT_TIMESLICE;
 int parport_default_spintime =  DEFAULT_SPIN_TIME;
 
-static LIST_HEAD(portlist);
-static DEFINE_SPINLOCK(parportlist_lock);
+static struct parport *portlist = NULL, *portlist_tail = NULL;
+static spinlock_t parportlist_lock = SPIN_LOCK_UNLOCKED;
 
-/* list of all allocated ports, sorted by ->number */
-static LIST_HEAD(all_ports);
-static DEFINE_SPINLOCK(full_list_lock);
-
-static LIST_HEAD(drivers);
-
-static DEFINE_MUTEX(registration_lock);
+static struct parport_driver *driver_chain = NULL;
+static spinlock_t driverlist_lock = SPIN_LOCK_UNLOCKED;
 
 /* What you can do to a port that's gone away.. */
 static void dead_write_lines (struct parport *p, unsigned char b){}
@@ -103,19 +98,55 @@ static struct parport_operations dead_ops = {
 /* Call attach(port) for each registered driver. */
 static void attach_driver_chain(struct parport *port)
 {
-	/* caller has exclusive registration_lock */
 	struct parport_driver *drv;
-	list_for_each_entry(drv, &drivers, list)
-		drv->attach(port);
+	void (**attach) (struct parport *);
+	int count = 0, i;
+
+	/* This is complicated because attach() must be able to block,
+	 * but we can't let it do that while we're holding a
+	 * spinlock. */
+
+	spin_lock (&driverlist_lock);
+	for (drv = driver_chain; drv; drv = drv->next)
+		count++;
+	spin_unlock (&driverlist_lock);
+
+	/* Drivers can unregister here; that's okay.  If they register
+	 * they'll be given an attach during parport_register_driver,
+	 * so that's okay too.  The only worry is that someone might
+	 * get given an attach twice if they registered just before
+	 * this function gets called. */
+
+	/* Hmm, this could be fixed with a generation number..
+	 * FIXME */
+
+	attach = kmalloc (sizeof (void(*)(struct parport *)) * count,
+			  GFP_KERNEL);
+	if (!attach) {
+		printk (KERN_WARNING "parport: not enough memory to attach\n");
+		return;
+	}
+
+	spin_lock (&driverlist_lock);
+	for (i = 0, drv = driver_chain; drv && i < count; drv = drv->next)
+		attach[i++] = drv->attach;
+	spin_unlock (&driverlist_lock);
+
+	for (count = 0; count < i; count++)
+		(*attach[count]) (port);
+
+	kfree (attach);
 }
 
 /* Call detach(port) for each registered driver. */
 static void detach_driver_chain(struct parport *port)
 {
 	struct parport_driver *drv;
-	/* caller has exclusive registration_lock */
-	list_for_each_entry(drv, &drivers, list)
+
+	spin_lock (&driverlist_lock);
+	for (drv = driver_chain; drv; drv = drv->next)
 		drv->detach (port);
+	spin_unlock (&driverlist_lock);
 }
 
 /* Ask kmod for some lowlevel drivers. */
@@ -143,7 +174,7 @@ static void get_lowlevel_driver (void)
  *	pointer it must call parport_get_port() to do so.  Calling
  *	parport_register_device() on that port will do this for you.
  *
- *	The driver's detach() function may block.  The port that
+ *	The driver's detach() function may not block.  The port that
  *	detach() is given will be valid for the duration of the
  *	callback, but if the driver wants to take a copy of the
  *	pointer it must call parport_get_port() to do so.
@@ -154,22 +185,52 @@ static void get_lowlevel_driver (void)
 int parport_register_driver (struct parport_driver *drv)
 {
 	struct parport *port;
+	struct parport **ports;
+	int count = 0, i;
 
-	if (list_empty(&portlist))
+	if (!portlist)
 		get_lowlevel_driver ();
 
-	mutex_lock(&registration_lock);
-	list_for_each_entry(port, &portlist, list)
-		drv->attach(port);
-	list_add(&drv->list, &drivers);
-	mutex_unlock(&registration_lock);
+	/* We have to take the portlist lock for this to be sure
+	 * that port is valid for the duration of the callback. */
+
+	/* This is complicated by the fact that attach must be allowed
+	 * to block, so we can't be holding any spinlocks when we call
+	 * it.  But we need to hold a spinlock to iterate over the
+	 * list of ports.. */
+
+	spin_lock (&parportlist_lock);
+	for (port = portlist; port; port = port->next)
+		count++;
+	spin_unlock (&parportlist_lock);
+
+	ports = kmalloc (sizeof (struct parport *) * count, GFP_KERNEL);
+	if (!ports)
+		printk (KERN_WARNING "parport: not enough memory to attach\n");
+	else {
+		spin_lock (&parportlist_lock);
+		for (i = 0, port = portlist; port && i < count;
+		     port = port->next)
+			ports[i++] = port;
+		spin_unlock (&parportlist_lock);
+
+		for (count = 0; count < i; count++)
+			drv->attach (ports[count]);
+
+		kfree (ports);
+	}
+
+	spin_lock (&driverlist_lock);
+	drv->next = driver_chain;
+	driver_chain = drv;
+	spin_unlock (&driverlist_lock);
 
 	return 0;
 }
 
 /**
  *	parport_unregister_driver - deregister a parallel port device driver
- *	@drv: structure describing the driver that was given to
+ *	@arg: structure describing the driver that was given to
  *	      parport_register_driver()
  *
  *	This should be called by a parallel port device driver that
@@ -180,33 +241,60 @@ int parport_register_driver (struct parport_driver *drv)
  *	be called, and for each port that attach() was called for, the
  *	detach() routine will have been called.
  *
- *	All the driver's attach() and detach() calls are guaranteed to have
+ *	If the caller's attach() function can block, it is their
+ *	responsibility to make sure to wait for it to exit before
+ *	unloading.
+ *
+ *	All the driver's detach() calls are guaranteed to have
  *	finished by the time this function returns.
+ *
+ *	The driver's detach() call is not allowed to block.
  **/
 
-void parport_unregister_driver (struct parport_driver *drv)
+void parport_unregister_driver (struct parport_driver *arg)
 {
-	struct parport *port;
+	struct parport_driver *drv = driver_chain, *olddrv = NULL;
 
-	mutex_lock(&registration_lock);
-	list_del_init(&drv->list);
-	list_for_each_entry(port, &portlist, list)
-		drv->detach(port);
-	mutex_unlock(&registration_lock);
+	while (drv) {
+		if (drv == arg) {
+			struct parport *port;
+
+			spin_lock (&driverlist_lock);
+			if (olddrv)
+				olddrv->next = drv->next;
+			else
+				driver_chain = drv->next;
+			spin_unlock (&driverlist_lock);
+
+			/* Call the driver's detach routine for each
+			 * port to clean up any resources that the
+			 * attach routine acquired. */
+			spin_lock (&parportlist_lock);
+			for (port = portlist; port; port = port->next)
+				drv->detach (port);
+			spin_unlock (&parportlist_lock);
+
+			return;
+		}
+		olddrv = drv;
+		drv = drv->next;
+	}
 }
 
 static void free_port (struct parport *port)
 {
 	int d;
-	spin_lock(&full_list_lock);
-	list_del(&port->full_list);
-	spin_unlock(&full_list_lock);
 	for (d = 0; d < 5; d++) {
-		kfree(port->probe_info[d].class_name);
-		kfree(port->probe_info[d].mfr);
-		kfree(port->probe_info[d].model);
-		kfree(port->probe_info[d].cmdset);
-		kfree(port->probe_info[d].description);
+		if (port->probe_info[d].class_name)
+			kfree (port->probe_info[d].class_name);
+		if (port->probe_info[d].mfr)
+			kfree (port->probe_info[d].mfr);
+		if (port->probe_info[d].model)
+			kfree (port->probe_info[d].model);
+		if (port->probe_info[d].cmdset)
+			kfree (port->probe_info[d].cmdset);
+		if (port->probe_info[d].description)
+			kfree (port->probe_info[d].description);
 	}
 
 	kfree(port->name);
@@ -217,7 +305,7 @@ static void free_port (struct parport *port)
  *	parport_get_port - increment a port's reference count
  *	@port: the port
  *
- *	This ensures that a struct parport pointer remains valid
+ *	This ensure's that a struct parport pointer remains valid
  *	until the matching parport_put_port() call.
  **/
 
@@ -245,6 +333,28 @@ void parport_put_port (struct parport *port)
 }
 
 /**
+ *	parport_enumerate - return a list of the system's parallel ports
+ *
+ *	This returns the head of the list of parallel ports in the
+ *	system, as a &struct parport.  The structure that is returned
+ *	describes the first port in the list, and its 'next' member
+ *	points to the next port, or %NULL if it's the last port.
+ *
+ *	If there are no parallel ports in the system,
+ *	parport_enumerate() will return %NULL.
+ **/
+
+struct parport *parport_enumerate(void)
+{
+	/* Don't use this: use parport_register_driver instead. */
+
+	if (!portlist)
+		get_lowlevel_driver ();
+
+	return portlist;
+}
+
+/**
  *	parport_register_port - register a parallel port
  *	@base: base I/O address
  *	@irq: IRQ line
@@ -267,7 +377,7 @@ void parport_put_port (struct parport *port)
  *	parport_announce_port().
  *
  *	The @ops structure is allocated by the caller, and must not be
- *	deallocated before calling parport_remove_port().
+ *	deallocated before calling parport_unregister_port().
  *
  *	If there is no memory to allocate a new parport structure,
  *	this function will return %NULL.
@@ -276,9 +386,8 @@ void parport_put_port (struct parport *port)
 struct parport *parport_register_port(unsigned long base, int irq, int dma,
 				      struct parport_operations *ops)
 {
-	struct list_head *l;
 	struct parport *tmp;
-	int num;
+	int portnum;
 	int device;
 	char *name;
 
@@ -295,21 +404,20 @@ struct parport *parport_register_port(unsigned long base, int irq, int dma,
 	tmp->dma = dma;
 	tmp->muxport = tmp->daisy = tmp->muxsel = -1;
 	tmp->modes = 0;
- 	INIT_LIST_HEAD(&tmp->list);
+ 	tmp->next = NULL;
 	tmp->devices = tmp->cad = NULL;
 	tmp->flags = 0;
 	tmp->ops = ops;
 	tmp->physport = tmp;
 	memset (tmp->probe_info, 0, 5 * sizeof (struct parport_device_info));
-	rwlock_init(&tmp->cad_lock);
+	tmp->cad_lock = RW_LOCK_UNLOCKED;
 	spin_lock_init(&tmp->waitlist_lock);
 	spin_lock_init(&tmp->pardevice_lock);
 	tmp->ieee1284.mode = IEEE1284_MODE_COMPAT;
 	tmp->ieee1284.phase = IEEE1284_PH_FWD_IDLE;
-	sema_init(&tmp->ieee1284.irq, 0);
+	init_MUTEX_LOCKED (&tmp->ieee1284.irq); /* actually a semaphore at 0 */
 	tmp->spintime = parport_default_spintime;
 	atomic_set (&tmp->ref_count, 1);
-	INIT_LIST_HEAD(&tmp->full_list);
 
 	name = kmalloc(15, GFP_KERNEL);
 	if (!name) {
@@ -319,21 +427,52 @@ struct parport *parport_register_port(unsigned long base, int irq, int dma,
 	}
 	/* Search for the lowest free parport number. */
 
-	spin_lock(&full_list_lock);
-	for (l = all_ports.next, num = 0; l != &all_ports; l = l->next, num++) {
-		struct parport *p = list_entry(l, struct parport, full_list);
-		if (p->number != num)
+	spin_lock_irq (&parportlist_lock);
+	for (portnum = 0; ; portnum++) {
+		struct parport *itr = portlist;
+		while (itr) {
+			if (itr->number == portnum)
+				/* No good, already used. */
+				break;
+			else
+				itr = itr->next;
+		}
+
+		if (itr == NULL)
+			/* Got to the end of the list. */
 			break;
 	}
-	tmp->portnum = tmp->number = num;
-	list_add_tail(&tmp->full_list, l);
-	spin_unlock(&full_list_lock);
 
 	/*
 	 * Now that the portnum is known finish doing the Init.
 	 */
-	sprintf(name, "parport%d", tmp->portnum = tmp->number);
+	tmp->portnum = tmp->number = portnum;
+	sprintf(name, "parport%d", portnum);
 	tmp->name = name;
+
+	
+	/*
+	 * Chain the entry to our list.
+	 *
+	 * This function must not run from an irq handler so we don' t need
+	 * to clear irq on the local CPU. -arca
+	 */
+
+	/* We are locked against anyone else performing alterations, but
+	 * because of parport_enumerate people can still _read_ the list
+	 * while we are changing it; so be careful..
+	 *
+	 * It's okay to have portlist_tail a little bit out of sync
+	 * since it's only used for changing the list, not for reading
+	 * from it.
+	 */
+
+	if (portlist_tail)
+		portlist_tail->next = tmp;
+	portlist_tail = tmp;
+	if (!portlist)
+		portlist = tmp;
+	spin_unlock_irq(&parportlist_lock);
 
 	for (device = 0; device < 5; device++)
 		/* assume the worst */
@@ -358,41 +497,29 @@ struct parport *parport_register_port(unsigned long base, int irq, int dma,
 
 void parport_announce_port (struct parport *port)
 {
-	int i;
-
 #ifdef CONFIG_PARPORT_1284
 	/* Analyse the IEEE1284.3 topology of the port. */
-	parport_daisy_init(port);
+	if (parport_daisy_init (port) == 0) {
+		/* No devices were detected.  Perhaps they are in some
+                   funny state; let's try to reset them and see if
+                   they wake up. */
+		parport_daisy_fini (port);
+		parport_write_control (port, PARPORT_CONTROL_SELECT);
+		udelay (50);
+		parport_write_control (port,
+				       PARPORT_CONTROL_SELECT |
+				       PARPORT_CONTROL_INIT);
+		udelay (50);
+		parport_daisy_init (port);
+	}
 #endif
 
-	if (!port->dev)
-		printk(KERN_WARNING "%s: fix this legacy "
-				"no-device port driver!\n",
-				port->name);
-
-	parport_proc_register(port);
-	mutex_lock(&registration_lock);
-	spin_lock_irq(&parportlist_lock);
-	list_add_tail(&port->list, &portlist);
-	for (i = 1; i < 3; i++) {
-		struct parport *slave = port->slaves[i-1];
-		if (slave)
-			list_add_tail(&slave->list, &portlist);
-	}
-	spin_unlock_irq(&parportlist_lock);
-
-	/* Let drivers know that new port(s) has arrived. */
+	/* Let drivers know that a new port has arrived. */
 	attach_driver_chain (port);
-	for (i = 1; i < 3; i++) {
-		struct parport *slave = port->slaves[i-1];
-		if (slave)
-			attach_driver_chain(slave);
-	}
-	mutex_unlock(&registration_lock);
 }
 
 /**
- *	parport_remove_port - deregister a parallel port
+ *	parport_unregister_port - deregister a parallel port
  *	@port: parallel port to deregister
  *
  *	When a parallel port driver is forcibly unloaded, or a
@@ -410,46 +537,42 @@ void parport_announce_port (struct parport *port)
  *	with @port as the parameter.
  **/
 
-void parport_remove_port(struct parport *port)
+void parport_unregister_port(struct parport *port)
 {
-	int i;
+	struct parport *p;
 
-	mutex_lock(&registration_lock);
+	port->ops = &dead_ops;
 
 	/* Spread the word. */
 	detach_driver_chain (port);
 
 #ifdef CONFIG_PARPORT_1284
 	/* Forget the IEEE1284.3 topology of the port. */
-	parport_daisy_fini(port);
-	for (i = 1; i < 3; i++) {
-		struct parport *slave = port->slaves[i-1];
-		if (!slave)
-			continue;
-		detach_driver_chain(slave);
-		parport_daisy_fini(slave);
-	}
+	parport_daisy_fini (port);
 #endif
 
-	port->ops = &dead_ops;
 	spin_lock(&parportlist_lock);
-	list_del_init(&port->list);
-	for (i = 1; i < 3; i++) {
-		struct parport *slave = port->slaves[i-1];
-		if (slave)
-			list_del_init(&slave->list);
+
+	/* We are protected from other people changing the list, but
+	 * they can still see it (using parport_enumerate).  So be
+	 * careful about the order of writes.. */
+	if (portlist == port) {
+		if ((portlist = port->next) == NULL)
+			portlist_tail = NULL;
+	} else {
+		for (p = portlist; (p != NULL) && (p->next != port); 
+		     p=p->next);
+		if (p) {
+			if ((p->next = port->next) == NULL)
+				portlist_tail = p;
+		}
+		else printk (KERN_WARNING
+			     "%s not found in port list!\n", port->name);
 	}
 	spin_unlock(&parportlist_lock);
 
-	mutex_unlock(&registration_lock);
-
-	parport_proc_unregister(port);
-
-	for (i = 1; i < 3; i++) {
-		struct parport *slave = port->slaves[i-1];
-		if (slave)
-			parport_put_port(slave);
-	}
+	/* Yes, parport_enumerate _is_ unsafe.  Don't use it. */
+	parport_put_port (port);
 }
 
 /**
@@ -524,7 +647,7 @@ void parport_remove_port(struct parport *port)
 struct pardevice *
 parport_register_device(struct parport *port, const char *name,
 			int (*pf)(void *), void (*kf)(void *),
-			void (*irq_func)(void *), 
+			void (*irq_func)(int, void *, struct pt_regs *), 
 			int flags, void *handle)
 {
 	struct pardevice *tmp;
@@ -546,8 +669,9 @@ parport_register_device(struct parport *port, const char *name,
 	/* We up our own module reference count, and that of the port
            on which a device is to be registered, to ensure that
            neither of us gets unloaded while we sleep in (e.g.)
-           kmalloc.
-         */
+           kmalloc.  To be absolutely safe, we have to require that
+           our caller doesn't sleep in between parport_enumerate and
+           parport_register_device.. */
 	if (!try_module_get(port->ops->owner)) {
 		return NULL;
 	}
@@ -614,16 +738,13 @@ parport_register_device(struct parport *port, const char *name,
 	 * pardevice fields. -arca
 	 */
 	port->ops->init_state(tmp, tmp->state);
-	if (!test_and_set_bit(PARPORT_DEVPROC_REGISTERED, &port->devflags)) {
-		port->proc_device = tmp;
-		parport_device_proc_register(tmp);
-	}
+	parport_device_proc_register(tmp);
 	return tmp;
 
  out_free_all:
-	kfree(tmp->state);
+	kfree (tmp->state);
  out_free_pardevice:
-	kfree(tmp);
+	kfree (tmp);
  out:
 	parport_put_port (port);
 	module_put(port->ops->owner);
@@ -649,13 +770,9 @@ void parport_unregister_device(struct pardevice *dev)
 	}
 #endif
 
-	port = dev->port->physport;
+	parport_device_proc_unregister(dev);
 
-	if (port->proc_device == dev) {
-		port->proc_device = NULL;
-		clear_bit(PARPORT_DEVPROC_REGISTERED, &port->devflags);
-		parport_device_proc_unregister(dev);
-	}
+	port = dev->port->physport;
 
 	if (port->cad == dev) {
 		printk(KERN_DEBUG "%s: %s forgot to release port\n",
@@ -678,7 +795,7 @@ void parport_unregister_device(struct pardevice *dev)
 
 	/* Make sure we haven't left any pointers around in the wait
 	 * list. */
-	spin_lock_irq(&port->waitlist_lock);
+	spin_lock (&port->waitlist_lock);
 	if (dev->waitprev || dev->waitnext || port->waithead == dev) {
 		if (dev->waitprev)
 			dev->waitprev->waitnext = dev->waitnext;
@@ -689,13 +806,18 @@ void parport_unregister_device(struct pardevice *dev)
 		else
 			port->waittail = dev->waitprev;
 	}
-	spin_unlock_irq(&port->waitlist_lock);
+	spin_unlock (&port->waitlist_lock);
 
 	kfree(dev->state);
 	kfree(dev);
 
 	module_put(port->ops->owner);
 	parport_put_port (port);
+
+	/* Yes, that's right, someone _could_ still have a pointer to
+	 * port, if they used parport_enumerate.  That's why they
+	 * shouldn't use it (and use parport_register_driver instead)..
+	 */
 }
 
 /**
@@ -714,16 +836,15 @@ struct parport *parport_find_number (int number)
 {
 	struct parport *port, *result = NULL;
 
-	if (list_empty(&portlist))
+	if (!portlist)
 		get_lowlevel_driver ();
 
 	spin_lock (&parportlist_lock);
-	list_for_each_entry(port, &portlist, list) {
+	for (port = portlist; port; port = port->next)
 		if (port->number == number) {
 			result = parport_get_port (port);
 			break;
 		}
-	}
 	spin_unlock (&parportlist_lock);
 	return result;
 }
@@ -744,16 +865,15 @@ struct parport *parport_find_base (unsigned long base)
 {
 	struct parport *port, *result = NULL;
 
-	if (list_empty(&portlist))
+	if (!portlist)
 		get_lowlevel_driver ();
 
 	spin_lock (&parportlist_lock);
-	list_for_each_entry(port, &portlist, list) {
+	for (port = portlist; port; port = port->next)
 		if (port->base == base) {
 			result = parport_get_port (port);
 			break;
 		}
-	}
 	spin_unlock (&parportlist_lock);
 	return result;
 }
@@ -1002,31 +1122,41 @@ void parport_release(struct pardevice *dev)
 	}
 }
 
-irqreturn_t parport_irq_handler(int irq, void *dev_id)
+static int parport_parse_params (int nports, const char *str[], int val[],
+				 int automatic, int none, int nofifo)
 {
-	struct parport *port = dev_id;
+	unsigned int i;
+	for (i = 0; i < nports && str[i]; i++) {
+		if (!strncmp(str[i], "auto", 4))
+			val[i] = automatic;
+		else if (!strncmp(str[i], "none", 4))
+			val[i] = none;
+		else if (nofifo && !strncmp(str[i], "nofifo", 4))
+			val[i] = nofifo;
+		else {
+			char *ep;
+			unsigned long r = simple_strtoul(str[i], &ep, 0);
+			if (ep != str[i])
+				val[i] = r;
+			else {
+				printk(KERN_ERR "parport: bad specifier `%s'\n", str[i]);
+				return -1;
+			}
+		}
+	}
 
-	parport_generic_irq(port);
-
-	return IRQ_HANDLED;
+	return 0;
 }
 
-/* Exported symbols for modules. */
+int parport_parse_irqs(int nports, const char *irqstr[], int irqval[])
+{
+	return parport_parse_params (nports, irqstr, irqval, PARPORT_IRQ_AUTO,
+				     PARPORT_IRQ_NONE, 0);
+}
 
-EXPORT_SYMBOL(parport_claim);
-EXPORT_SYMBOL(parport_claim_or_block);
-EXPORT_SYMBOL(parport_release);
-EXPORT_SYMBOL(parport_register_port);
-EXPORT_SYMBOL(parport_announce_port);
-EXPORT_SYMBOL(parport_remove_port);
-EXPORT_SYMBOL(parport_register_driver);
-EXPORT_SYMBOL(parport_unregister_driver);
-EXPORT_SYMBOL(parport_register_device);
-EXPORT_SYMBOL(parport_unregister_device);
-EXPORT_SYMBOL(parport_get_port);
-EXPORT_SYMBOL(parport_put_port);
-EXPORT_SYMBOL(parport_find_number);
-EXPORT_SYMBOL(parport_find_base);
-EXPORT_SYMBOL(parport_irq_handler);
-
+int parport_parse_dmas(int nports, const char *dmastr[], int dmaval[])
+{
+	return parport_parse_params (nports, dmastr, dmaval, PARPORT_DMA_AUTO,
+				     PARPORT_DMA_NONE, PARPORT_DMA_NOFIFO);
+}
 MODULE_LICENSE("GPL");

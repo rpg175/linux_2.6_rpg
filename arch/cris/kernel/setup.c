@@ -1,4 +1,4 @@
-/*
+/* $Id: setup.c,v 1.7 2003/07/04 08:27:52 starvik Exp $
  *
  *  linux/arch/cris/kernel/setup.c
  *
@@ -15,30 +15,28 @@
 #include <linux/bootmem.h>
 #include <asm/pgtable.h>
 #include <linux/seq_file.h>
-#include <linux/screen_info.h>
-#include <linux/utsname.h>
-#include <linux/pfn.h>
-#include <linux/cpu.h>
-#include <asm/setup.h>
+#include <linux/tty.h>
 
 /*
  * Setup options
  */
+struct drive_info_struct { char dummy[32]; } drive_info;
 struct screen_info screen_info;
+
+unsigned char aux_device_present;
 
 extern int root_mountflags;
 extern char _etext, _edata, _end;
 
-char __initdata cris_command_line[COMMAND_LINE_SIZE] = { 0, };
+#define COMMAND_LINE_SIZE 256
+
+static char command_line[COMMAND_LINE_SIZE] = { 0, };
+       char saved_command_line[COMMAND_LINE_SIZE];
 
 extern const unsigned long text_start, edata; /* set by the linker script */
 extern unsigned long dram_start, dram_end;
 
 extern unsigned long romfs_start, romfs_length, romfs_in_flash; /* from head.S */
-
-static struct cpu cpu_devices[NR_CPUS];
-
-extern void show_etrax_copyright(void);		/* arch-vX/kernel/setup.c */
 
 /* This mainly sets up the memory area, and can be really confusing.
  *
@@ -47,23 +45,24 @@ extern void show_etrax_copyright(void);		/* arch-vX/kernel/setup.c */
  * given by the macro __pa().
  *
  * In this DRAM, the kernel code and data is loaded, in the beginning.
- * It really starts at c0004000 to make room for some special pages -
+ * It really starts at c0004000 to make room for some special pages - 
  * the start address is text_start. The kernel data ends at _end. After
  * this the ROM filesystem is appended (if there is any).
- *
+ * 
  * Between this address and dram_end, we have RAM pages usable to the
  * boot code and the system.
  *
  */
 
-void __init setup_arch(char **cmdline_p)
+void __init 
+setup_arch(char **cmdline_p)
 {
 	extern void init_etrax_debug(void);
 	unsigned long bootmap_size;
 	unsigned long start_pfn, max_pfn;
 	unsigned long memory_start;
 
-	/* register an initial console printing routine for printk's */
+ 	/* register an initial console printing routine for printk's */
 
 	init_etrax_debug();
 
@@ -88,6 +87,10 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_code =   (unsigned long) &_etext;
 	init_mm.end_data =   (unsigned long) &_edata;
 	init_mm.brk =        (unsigned long) &_end;
+
+#define PFN_UP(x)       (((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
+#define PFN_DOWN(x)     ((x) >> PAGE_SHIFT)
+#define PFN_PHYS(x)     ((x) << PAGE_SHIFT)
 
 	/* min_low_pfn points to the start of DRAM, start_pfn points
 	 * to the first DRAM pages after the kernel, and max_low_pfn
@@ -122,7 +125,7 @@ void __init setup_arch(char **cmdline_p)
 	min_low_pfn = PAGE_OFFSET >> PAGE_SHIFT;
 
 	bootmap_size = init_bootmem_node(NODE_DATA(0), start_pfn,
-					 min_low_pfn,
+					 min_low_pfn, 
 					 max_low_pfn);
 
 	/* And free all memory not belonging to the kernel (addr, size) */
@@ -138,41 +141,42 @@ void __init setup_arch(char **cmdline_p)
 	 * Arguments are start, size
          */
 
-	reserve_bootmem(PFN_PHYS(start_pfn), bootmap_size, BOOTMEM_DEFAULT);
+        reserve_bootmem(PFN_PHYS(start_pfn), bootmap_size);
 
 	/* paging_init() sets up the MMU and marks all pages as reserved */
 
 	paging_init();
 
-	*cmdline_p = cris_command_line;
+	/* We don't use a command line yet, so just re-initialize it without
+	   saving anything that might be there.  */
+
+	*cmdline_p = command_line;
 
 #ifdef CONFIG_ETRAX_CMDLINE
-        if (!strcmp(cris_command_line, "")) {
-		strlcpy(cris_command_line, CONFIG_ETRAX_CMDLINE, COMMAND_LINE_SIZE);
-		cris_command_line[COMMAND_LINE_SIZE - 1] = '\0';
-	}
+	strlcpy(command_line, CONFIG_ETRAX_CMDLINE, sizeof(command_line));
+#elif defined(CONFIG_ETRAX_ROOT_DEVICE)
+	strlcpy(command_line, "root=", sizeof(command_line));
+	strlcat(command_line, CONFIG_ETRAX_ROOT_DEVICE,
+		sizeof(command_line));
 #endif
-
-	/* Save command line for future references. */
-	memcpy(boot_command_line, cris_command_line, COMMAND_LINE_SIZE);
-	boot_command_line[COMMAND_LINE_SIZE - 1] = '\0';
+	command_line[COMMAND_LINE_SIZE - 1] = '\0';
 
 	/* give credit for the CRIS port */
-	show_etrax_copyright();
 
-	/* Setup utsname */
-	strcpy(init_utsname()->machine, cris_machine_name);
+	printk("Linux/CRIS port on ETRAX 100LX (c) 2001 Axis Communications AB\n");
+
 }
 
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
-	return *pos < nr_cpu_ids ? (void *)(int)(*pos + 1) : NULL;
+	/* We only got one CPU... */
+	return *pos < 1 ? (void *)1 : NULL;
 }
 
 static void *c_next(struct seq_file *m, void *v, loff_t *pos)
 {
 	++*pos;
-	return c_start(m, pos);
+	return NULL;
 }
 
 static void c_stop(struct seq_file *m, void *v)
@@ -181,23 +185,11 @@ static void c_stop(struct seq_file *m, void *v)
 
 extern int show_cpuinfo(struct seq_file *m, void *v);
 
-const struct seq_operations cpuinfo_op = {
+struct seq_operations cpuinfo_op = {
 	.start = c_start,
 	.next  = c_next,
 	.stop  = c_stop,
 	.show  = show_cpuinfo,
 };
 
-static int __init topology_init(void)
-{
-	int i;
-
-	for_each_possible_cpu(i) {
-		 return register_cpu(&cpu_devices[i], i);
-	}
-
-	return 0;
-}
-
-subsys_initcall(topology_init);
 

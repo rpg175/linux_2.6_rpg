@@ -12,14 +12,19 @@ ENTRY(_start)
 SECTIONS
 {
   . = 0;
+  _text = .;
   .text : {
    _stext = .;
    *(.start)
-   *(.text)
-   initrd_size = initrd_end - initrd_start;
+   arch/arm/boot/bootp/kernel.o
+   . = ALIGN(32);
+   initrd_start = .;
+   arch/arm/boot/bootp/initrd.o
+   initrd_len = . - initrd_start;
+   . = ALIGN(32);
    _etext = .;
   }
-
+  
   .stab 0 : { *(.stab) }
   .stabstr 0 : { *(.stabstr) }
   .stab.excl 0 : { *(.stab.excl) }

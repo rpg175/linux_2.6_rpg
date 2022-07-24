@@ -14,35 +14,26 @@
 #include <linux/init.h>
 #include "autofs_i.h"
 
-static struct dentry *autofs_mount(struct file_system_type *fs_type,
+static struct super_block *autofs_get_sb(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data)
 {
-	return mount_nodev(fs_type, flags, data, autofs4_fill_super);
+	return get_sb_nodev(fs_type, flags, data, autofs4_fill_super);
 }
 
 static struct file_system_type autofs_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "autofs",
-	.mount		= autofs_mount,
-	.kill_sb	= autofs4_kill_sb,
+	.get_sb		= autofs_get_sb,
+	.kill_sb	= kill_anon_super,
 };
 
 static int __init init_autofs4_fs(void)
 {
-	int err;
-
-	err = register_filesystem(&autofs_fs_type);
-	if (err)
-		return err;
-
-	autofs_dev_ioctl_init();
-
-	return err;
+	return register_filesystem(&autofs_fs_type);
 }
 
 static void __exit exit_autofs4_fs(void)
 {
-	autofs_dev_ioctl_exit();
 	unregister_filesystem(&autofs_fs_type);
 }
 

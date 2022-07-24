@@ -15,11 +15,13 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/stddef.h>
-#include <linux/syscalls.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
+#include <linux/slab.h>
 #include <linux/user.h>
+#include <linux/a.out.h>
 #include <linux/utsname.h>
 #include <linux/time.h>
 #include <linux/timex.h>
@@ -34,8 +36,6 @@
 #include <linux/namei.h>
 #include <linux/uio.h>
 #include <linux/vfs.h>
-#include <linux/rcupdate.h>
-#include <linux/slab.h>
 
 #include <asm/fpu.h>
 #include <asm/io.h>
@@ -45,13 +45,17 @@
 #include <asm/hwrpb.h>
 #include <asm/processor.h>
 
+extern int do_pipe(int *);
+extern asmlinkage unsigned long sys_brk(unsigned long);
+
 /*
  * Brk needs to return an error.  Still support Linux's brk(0) query idiom,
  * which OSF programs just shouldn't be doing.  We're still not quite
  * identical to OSF as we don't return 0 on success, but doing otherwise
  * would require changes to libc.  Hopefully this is good enough.
  */
-SYSCALL_DEFINE1(osf_brk, unsigned long, brk)
+asmlinkage unsigned long
+osf_brk(unsigned long brk)
 {
 	unsigned long retval = sys_brk(brk);
 	if (brk && brk != retval)
@@ -62,20 +66,21 @@ SYSCALL_DEFINE1(osf_brk, unsigned long, brk)
 /*
  * This is pure guess-work..
  */
-SYSCALL_DEFINE4(osf_set_program_attributes, unsigned long, text_start,
-		unsigned long, text_len, unsigned long, bss_start,
-		unsigned long, bss_len)
+asmlinkage int
+osf_set_program_attributes(unsigned long text_start, unsigned long text_len,
+			   unsigned long bss_start, unsigned long bss_len)
 {
 	struct mm_struct *mm;
 
+	lock_kernel();
 	mm = current->mm;
 	mm->end_code = bss_start + bss_len;
-	mm->start_brk = bss_start + bss_len;
 	mm->brk = bss_start + bss_len;
 #if 0
 	printk("set_program_attributes(%lx %lx %lx %lx)\n",
 		text_start, text_len, bss_start, bss_len);
 #endif
+	unlock_kernel();
 	return 0;
 }
 
@@ -86,7 +91,8 @@ SYSCALL_DEFINE4(osf_set_program_attributes, unsigned long, text_start,
  * braindamage (it can't really handle filesystems where the directory
  * offset differences aren't the same as "d_reclen").
  */
-#define NAME_OFFSET	offsetof (struct osf_dirent, d_name)
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
 
 struct osf_dirent {
 	unsigned int d_ino;
@@ -96,53 +102,44 @@ struct osf_dirent {
 };
 
 struct osf_dirent_callback {
-	struct osf_dirent __user *dirent;
-	long __user *basep;
+	struct osf_dirent *dirent;
+	long *basep;
 	unsigned int count;
 	int error;
 };
 
 static int
 osf_filldir(void *__buf, const char *name, int namlen, loff_t offset,
-	    u64 ino, unsigned int d_type)
+	    ino_t ino, unsigned int d_type)
 {
-	struct osf_dirent __user *dirent;
+	struct osf_dirent *dirent;
 	struct osf_dirent_callback *buf = (struct osf_dirent_callback *) __buf;
-	unsigned int reclen = ALIGN(NAME_OFFSET + namlen + 1, sizeof(u32));
-	unsigned int d_ino;
+	unsigned int reclen = ROUND_UP(NAME_OFFSET(dirent) + namlen + 1);
 
 	buf->error = -EINVAL;	/* only used if we fail */
 	if (reclen > buf->count)
 		return -EINVAL;
-	d_ino = ino;
-	if (sizeof(d_ino) < sizeof(ino) && d_ino != ino) {
-		buf->error = -EOVERFLOW;
-		return -EOVERFLOW;
-	}
 	if (buf->basep) {
 		if (put_user(offset, buf->basep))
-			goto Efault;
+			return -EFAULT;
 		buf->basep = NULL;
 	}
 	dirent = buf->dirent;
-	if (put_user(d_ino, &dirent->d_ino) ||
-	    put_user(namlen, &dirent->d_namlen) ||
-	    put_user(reclen, &dirent->d_reclen) ||
-	    copy_to_user(dirent->d_name, name, namlen) ||
+	put_user(ino, &dirent->d_ino);
+	put_user(namlen, &dirent->d_namlen);
+	put_user(reclen, &dirent->d_reclen);
+	if (copy_to_user(dirent->d_name, name, namlen) ||
 	    put_user(0, dirent->d_name + namlen))
-		goto Efault;
-	dirent = (void __user *)dirent + reclen;
+		return -EFAULT;
+	((char *) dirent) += reclen;
 	buf->dirent = dirent;
 	buf->count -= reclen;
 	return 0;
-Efault:
-	buf->error = -EFAULT;
-	return -EFAULT;
 }
 
-SYSCALL_DEFINE4(osf_getdirentries, unsigned int, fd,
-		struct osf_dirent __user *, dirent, unsigned int, count,
-		long __user *, basep)
+asmlinkage int
+osf_getdirentries(unsigned int fd, struct osf_dirent *dirent,
+		  unsigned int count, long *basep)
 {
 	int error;
 	struct file *file;
@@ -159,34 +156,45 @@ SYSCALL_DEFINE4(osf_getdirentries, unsigned int, fd,
 	buf.error = 0;
 
 	error = vfs_readdir(file, osf_filldir, &buf);
-	if (error >= 0)
-		error = buf.error;
+	if (error < 0)
+		goto out_putf;
+
+	error = buf.error;
 	if (count != buf.count)
 		error = count - buf.count;
 
+ out_putf:
 	fput(file);
  out:
 	return error;
 }
 
+#undef ROUND_UP
 #undef NAME_OFFSET
 
-SYSCALL_DEFINE6(osf_mmap, unsigned long, addr, unsigned long, len,
-		unsigned long, prot, unsigned long, flags, unsigned long, fd,
-		unsigned long, off)
+asmlinkage unsigned long
+osf_mmap(unsigned long addr, unsigned long len, unsigned long prot,
+	 unsigned long flags, unsigned long fd, unsigned long off)
 {
-	unsigned long ret = -EINVAL;
+	struct file *file = NULL;
+	unsigned long ret = -EBADF;
 
 #if 0
 	if (flags & (_MAP_HASSEMAPHORE | _MAP_INHERIT | _MAP_UNALIGNED))
 		printk("%s: unimplemented OSF mmap flags %04lx\n", 
 			current->comm, flags);
 #endif
-	if ((off + PAGE_ALIGN(len)) < off)
-		goto out;
-	if (off & ~PAGE_MASK)
-		goto out;
-	ret = sys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
+	if (!(flags & MAP_ANONYMOUS)) {
+		file = fget(fd);
+		if (!file)
+			goto out;
+	}
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	down_write(&current->mm->mmap_sem);
+	ret = do_mmap(file, addr, len, prot, flags, off);
+	up_write(&current->mm->mmap_sem);
+	if (file)
+		fput(file);
  out:
 	return ret;
 }
@@ -207,10 +215,10 @@ struct osf_statfs {
 	int f_files;
 	int f_ffree;
 	__kernel_fsid_t f_fsid;
-};
+} *osf_stat;
 
 static int
-linux_to_osf_statfs(struct kstatfs *linux_stat, struct osf_statfs __user *osf_stat,
+linux_to_osf_statfs(struct kstatfs *linux_stat, struct osf_statfs *osf_stat,
 		    unsigned long bufsiz)
 {
 	struct osf_statfs tmp_stat;
@@ -230,24 +238,44 @@ linux_to_osf_statfs(struct kstatfs *linux_stat, struct osf_statfs __user *osf_st
 	return copy_to_user(osf_stat, &tmp_stat, bufsiz) ? -EFAULT : 0;
 }
 
-SYSCALL_DEFINE3(osf_statfs, const char __user *, pathname,
-		struct osf_statfs __user *, buffer, unsigned long, bufsiz)
+static int
+do_osf_statfs(struct dentry * dentry, struct osf_statfs *buffer,
+	      unsigned long bufsiz)
 {
 	struct kstatfs linux_stat;
-	int error = user_statfs(pathname, &linux_stat);
+	int error = vfs_statfs(dentry->d_inode->i_sb, &linux_stat);
 	if (!error)
 		error = linux_to_osf_statfs(&linux_stat, buffer, bufsiz);
 	return error;	
 }
 
-SYSCALL_DEFINE3(osf_fstatfs, unsigned long, fd,
-		struct osf_statfs __user *, buffer, unsigned long, bufsiz)
+asmlinkage int
+osf_statfs(char *path, struct osf_statfs *buffer, unsigned long bufsiz)
 {
-	struct kstatfs linux_stat;
-	int error = fd_statfs(fd, &linux_stat);
-	if (!error)
-		error = linux_to_osf_statfs(&linux_stat, buffer, bufsiz);
-	return error;
+	struct nameidata nd;
+	int retval;
+
+	retval = user_path_walk(path, &nd);
+	if (!retval) {
+		retval = do_osf_statfs(nd.dentry, buffer, bufsiz);
+		path_release(&nd);
+	}
+	return retval;
+}
+
+asmlinkage int
+osf_fstatfs(unsigned long fd, struct osf_statfs *buffer, unsigned long bufsiz)
+{
+	struct file *file;
+	int retval;
+
+	retval = -EBADF;
+	file = fget(fd);
+	if (file) {
+		retval = do_osf_statfs(file->f_dentry, buffer, bufsiz);
+		fput(file);
+	}
+	return retval;
 }
 
 /*
@@ -256,13 +284,13 @@ SYSCALL_DEFINE3(osf_fstatfs, unsigned long, fd,
  * Although to be frank, neither are the native Linux/i386 ones..
  */
 struct ufs_args {
-	char __user *devname;
+	char *devname;
 	int flags;
 	uid_t exroot;
 };
 
 struct cdfs_args {
-	char __user *devname;
+	char *devname;
 	int flags;
 	uid_t exroot;
 
@@ -271,7 +299,7 @@ struct cdfs_args {
 };
 
 struct procfs_args {
-	char __user *devname;
+	char *devname;
 	int flags;
 	uid_t exroot;
 };
@@ -285,7 +313,7 @@ struct procfs_args {
  * unhappy with OSF UFS. [CHECKME]
  */
 static int
-osf_ufs_mount(char *dirname, struct ufs_args __user *args, int flags)
+osf_ufs_mount(char *dirname, struct ufs_args *args, int flags)
 {
 	int retval;
 	struct cdfs_args tmp;
@@ -305,7 +333,7 @@ osf_ufs_mount(char *dirname, struct ufs_args __user *args, int flags)
 }
 
 static int
-osf_cdfs_mount(char *dirname, struct cdfs_args __user *args, int flags)
+osf_cdfs_mount(char *dirname, struct cdfs_args *args, int flags)
 {
 	int retval;
 	struct cdfs_args tmp;
@@ -325,7 +353,7 @@ osf_cdfs_mount(char *dirname, struct cdfs_args __user *args, int flags)
 }
 
 static int
-osf_procfs_mount(char *dirname, struct procfs_args __user *args, int flags)
+osf_procfs_mount(char *dirname, struct procfs_args *args, int flags)
 {
 	struct procfs_args tmp;
 
@@ -335,11 +363,13 @@ osf_procfs_mount(char *dirname, struct procfs_args __user *args, int flags)
 	return do_mount("", dirname, "proc", flags, NULL);
 }
 
-SYSCALL_DEFINE4(osf_mount, unsigned long, typenr, const char __user *, path,
-		int, flag, void __user *, data)
+asmlinkage int
+osf_mount(unsigned long typenr, char *path, int flag, void *data)
 {
-	int retval;
+	int retval = -EINVAL;
 	char *name;
+
+	lock_kernel();
 
 	name = getname(path);
 	retval = PTR_ERR(name);
@@ -347,38 +377,39 @@ SYSCALL_DEFINE4(osf_mount, unsigned long, typenr, const char __user *, path,
 		goto out;
 	switch (typenr) {
 	case 1:
-		retval = osf_ufs_mount(name, data, flag);
+		retval = osf_ufs_mount(name, (struct ufs_args *) data, flag);
 		break;
 	case 6:
-		retval = osf_cdfs_mount(name, data, flag);
+		retval = osf_cdfs_mount(name, (struct cdfs_args *) data, flag);
 		break;
 	case 9:
-		retval = osf_procfs_mount(name, data, flag);
+		retval = osf_procfs_mount(name, (struct procfs_args *) data, flag);
 		break;
 	default:
-		retval = -EINVAL;
 		printk("osf_mount(%ld, %x)\n", typenr, flag);
 	}
 	putname(name);
  out:
+	unlock_kernel();
 	return retval;
 }
 
-SYSCALL_DEFINE1(osf_utsname, char __user *, name)
+asmlinkage int
+osf_utsname(char *name)
 {
 	int error;
 
 	down_read(&uts_sem);
 	error = -EFAULT;
-	if (copy_to_user(name + 0, utsname()->sysname, 32))
+	if (copy_to_user(name + 0, system_utsname.sysname, 32))
 		goto out;
-	if (copy_to_user(name + 32, utsname()->nodename, 32))
+	if (copy_to_user(name + 32, system_utsname.nodename, 32))
 		goto out;
-	if (copy_to_user(name + 64, utsname()->release, 32))
+	if (copy_to_user(name + 64, system_utsname.release, 32))
 		goto out;
-	if (copy_to_user(name + 96, utsname()->version, 32))
+	if (copy_to_user(name + 96, system_utsname.version, 32))
 		goto out;
-	if (copy_to_user(name + 128, utsname()->machine, 32))
+	if (copy_to_user(name + 128, system_utsname.machine, 32))
 		goto out;
 
 	error = 0;
@@ -387,26 +418,30 @@ SYSCALL_DEFINE1(osf_utsname, char __user *, name)
 	return error;
 }
 
-SYSCALL_DEFINE0(getpagesize)
+asmlinkage unsigned long
+sys_getpagesize(void)
 {
 	return PAGE_SIZE;
 }
 
-SYSCALL_DEFINE0(getdtablesize)
+asmlinkage unsigned long
+sys_getdtablesize(void)
 {
-	return sysctl_nr_open;
+	return NR_OPEN;
 }
 
 /*
  * For compatibility with OSF/1 only.  Use utsname(2) instead.
  */
-SYSCALL_DEFINE2(osf_getdomainname, char __user *, name, int, namelen)
+asmlinkage int
+osf_getdomainname(char *name, int namelen)
 {
 	unsigned len;
-	int i;
+	int i, error;
 
-	if (!access_ok(VERIFY_WRITE, name, namelen))
-		return -EFAULT;
+	error = verify_area(VERIFY_WRITE, name, namelen);
+	if (error)
+		goto out;
 
 	len = namelen;
 	if (namelen > 32)
@@ -414,14 +449,30 @@ SYSCALL_DEFINE2(osf_getdomainname, char __user *, name, int, namelen)
 
 	down_read(&uts_sem);
 	for (i = 0; i < len; ++i) {
-		__put_user(utsname()->domainname[i], name + i);
-		if (utsname()->domainname[i] == '\0')
+		__put_user(system_utsname.domainname[i], name + i);
+		if (system_utsname.domainname[i] == '\0')
 			break;
 	}
 	up_read(&uts_sem);
-
-	return 0;
+ out:
+	return error;
 }
+
+asmlinkage long
+osf_shmat(int shmid, void *shmaddr, int shmflg)
+{
+	unsigned long raddr;
+	long err;
+
+	err = sys_shmat(shmid, shmaddr, shmflg, &raddr);
+
+	/*
+	 * This works because all user-level addresses are
+	 * non-negative longs!
+	 */
+	return err ? err : (long)raddr;
+}
+
 
 /*
  * The following stuff should move into a header file should it ever
@@ -446,39 +497,39 @@ struct proplistname_args {
 
 union pl_args {
 	struct setargs {
-		char __user *path;
+		char *path;
 		long follow;
 		long nbytes;
-		char __user *buf;
+		char *buf;
 	} set;
 	struct fsetargs {
 		long fd;
 		long nbytes;
-		char __user *buf;
+		char *buf;
 	} fset;
 	struct getargs {
-		char __user *path;
+		char *path;
 		long follow;
-		struct proplistname_args __user *name_args;
+		struct proplistname_args *name_args;
 		long nbytes;
-		char __user *buf;
-		int __user *min_buf_size;
+		char *buf;
+		int *min_buf_size;
 	} get;
 	struct fgetargs {
 		long fd;
-		struct proplistname_args __user *name_args;
+		struct proplistname_args *name_args;
 		long nbytes;
-		char __user *buf;
-		int __user *min_buf_size;
+		char *buf;
+		int *min_buf_size;
 	} fget;
 	struct delargs {
-		char __user *path;
+		char *path;
 		long follow;
-		struct proplistname_args __user *name_args;
+		struct proplistname_args *name_args;
 	} del;
 	struct fdelargs {
 		long fd;
-		struct proplistname_args __user *name_args;
+		struct proplistname_args *name_args;
 	} fdel;
 };
 
@@ -488,20 +539,25 @@ enum pl_code {
 	PL_DEL = 5, PL_FDEL = 6
 };
 
-SYSCALL_DEFINE2(osf_proplist_syscall, enum pl_code, code,
-		union pl_args __user *, args)
+asmlinkage long
+osf_proplist_syscall(enum pl_code code, union pl_args *args)
 {
 	long error;
-	int __user *min_buf_size_ptr;
+	int *min_buf_size_ptr;
 
+	lock_kernel();
 	switch (code) {
 	case PL_SET:
-		if (get_user(error, &args->set.nbytes))
-			error = -EFAULT;
+		error = verify_area(VERIFY_READ, &args->set.nbytes,
+				    sizeof(args->set.nbytes));
+		if (!error)
+			error = args->set.nbytes;
 		break;
 	case PL_FSET:
-		if (get_user(error, &args->fset.nbytes))
-			error = -EFAULT;
+		error = verify_area(VERIFY_READ, &args->fset.nbytes,
+				    sizeof(args->fset.nbytes));
+		if (!error)
+			error = args->fset.nbytes;
 		break;
 	case PL_GET:
 		error = get_user(min_buf_size_ptr, &args->get.min_buf_size);
@@ -523,11 +579,12 @@ SYSCALL_DEFINE2(osf_proplist_syscall, enum pl_code, code,
 		error = -EOPNOTSUPP;
 		break;
 	};
+	unlock_kernel();
 	return error;
 }
 
-SYSCALL_DEFINE2(osf_sigstack, struct sigstack __user *, uss,
-		struct sigstack __user *, uoss)
+asmlinkage int
+osf_sigstack(struct sigstack *uss, struct sigstack *uoss)
 {
 	unsigned long usp = rdusp();
 	unsigned long oss_sp = current->sas_ss_sp + current->sas_ss_size;
@@ -535,7 +592,7 @@ SYSCALL_DEFINE2(osf_sigstack, struct sigstack __user *, uss,
 	int error;
 
 	if (uss) {
-		void __user *ss_sp;
+		void *ss_sp;
 
 		error = -EFAULT;
 		if (get_user(ss_sp, &uss->ss_sp))
@@ -567,30 +624,31 @@ SYSCALL_DEFINE2(osf_sigstack, struct sigstack __user *, uss,
 	return error;
 }
 
-SYSCALL_DEFINE3(osf_sysinfo, int, command, char __user *, buf, long, count)
+asmlinkage long
+osf_sysinfo(int command, char *buf, long count)
 {
-	const char *sysinfo_table[] = {
-		utsname()->sysname,
-		utsname()->nodename,
-		utsname()->release,
-		utsname()->version,
-		utsname()->machine,
+	static char * sysinfo_table[] = {
+		system_utsname.sysname,
+		system_utsname.nodename,
+		system_utsname.release,
+		system_utsname.version,
+		system_utsname.machine,
 		"alpha",	/* instruction set architecture */
 		"dummy",	/* hardware serial number */
 		"dummy",	/* hardware manufacturer */
 		"dummy",	/* secure RPC domain */
 	};
 	unsigned long offset;
-	const char *res;
+	char *res;
 	long len, err = -EINVAL;
 
 	offset = command-1;
-	if (offset >= ARRAY_SIZE(sysinfo_table)) {
+	if (offset >= sizeof(sysinfo_table)/sizeof(char *)) {
 		/* Digital UNIX has a few unpublished interfaces here */
 		printk("sysinfo(%d)", command);
 		goto out;
 	}
-
+	
 	down_read(&uts_sem);
 	res = sysinfo_table[offset];
 	len = strlen(res)+1;
@@ -605,8 +663,9 @@ SYSCALL_DEFINE3(osf_sysinfo, int, command, char __user *, buf, long, count)
 	return err;
 }
 
-SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
-		unsigned long, nbytes, int __user *, start, void __user *, arg)
+asmlinkage unsigned long
+osf_getsysinfo(unsigned long op, void *buffer, unsigned long nbytes,
+	       int *start, void *arg)
 {
 	unsigned long w;
 	struct percpu_struct *cpu;
@@ -618,7 +677,7 @@ SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
 
  		w = current_thread_info()->ieee_state & IEEE_SW_MASK;
  		w = swcr_update_status(w, rdfpcr());
-		if (put_user(w, (unsigned long __user *) buffer))
+		if (put_user(w, (unsigned long *) buffer))
 			return -EFAULT;
 		return 0;
 
@@ -634,7 +693,7 @@ SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
 		if (nbytes < sizeof(unsigned int))
 			return -EINVAL;
  		w = (current_thread_info()->flags >> UAC_SHIFT) & UAC_BITMASK;
- 		if (put_user(w, (unsigned int __user *)buffer))
+ 		if (put_user(w, (unsigned int *)buffer))
  			return -EFAULT;
  		return 1;
 
@@ -644,7 +703,7 @@ SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
 		cpu = (struct percpu_struct*)
 		  ((char*)hwrpb + hwrpb->processor_offset);
 		w = cpu->type;
-		if (put_user(w, (unsigned long  __user*)buffer))
+		if (put_user(w, (unsigned long *)buffer))
 			return -EFAULT;
 		return 1;
 
@@ -662,57 +721,37 @@ SYSCALL_DEFINE5(osf_getsysinfo, unsigned long, op, void __user *, buffer,
 	return -EOPNOTSUPP;
 }
 
-SYSCALL_DEFINE5(osf_setsysinfo, unsigned long, op, void __user *, buffer,
-		unsigned long, nbytes, int __user *, start, void __user *, arg)
+asmlinkage unsigned long
+osf_setsysinfo(unsigned long op, void *buffer, unsigned long nbytes,
+	       int *start, void *arg)
 {
 	switch (op) {
 	case SSI_IEEE_FP_CONTROL: {
-		unsigned long swcr, fpcr;
-		unsigned int *state;
+		unsigned long swcr, fpcr, fex;
 
 		/* 
 		 * Alpha Architecture Handbook 4.7.7.3:
 		 * To be fully IEEE compiant, we must track the current IEEE
-		 * exception state in software, because spurious bits can be
+		 * exception state in software, because spurrious bits can be
 		 * set in the trap shadow of a software-complete insn.
 		 */
 
-		if (get_user(swcr, (unsigned long __user *)buffer))
-			return -EFAULT;
-		state = &current_thread_info()->ieee_state;
-
 		/* Update softare trap enable bits.  */
-		*state = (*state & ~IEEE_SW_MASK) | (swcr & IEEE_SW_MASK);
-
-		/* Update the real fpcr.  */
-		fpcr = rdfpcr() & FPCR_DYN_MASK;
-		fpcr |= ieee_swcr_to_fpcr(swcr);
-		wrfpcr(fpcr);
-
-		return 0;
-	}
-
-	case SSI_IEEE_RAISE_EXCEPTION: {
-		unsigned long exc, swcr, fpcr, fex;
-		unsigned int *state;
-
-		if (get_user(exc, (unsigned long __user *)buffer))
+		if (get_user(swcr, (unsigned long *)buffer))
 			return -EFAULT;
-		state = &current_thread_info()->ieee_state;
-		exc &= IEEE_STATUS_MASK;
-
-		/* Update softare trap enable bits.  */
- 		swcr = (*state & IEEE_SW_MASK) | exc;
-		*state |= exc;
+		current_thread_info()->ieee_state
+		  = ((current_thread_info()->ieee_state & ~IEEE_SW_MASK)
+		     | (swcr & IEEE_SW_MASK));
 
 		/* Update the real fpcr.  */
 		fpcr = rdfpcr();
+		fpcr &= FPCR_DYN_MASK;
 		fpcr |= ieee_swcr_to_fpcr(swcr);
 		wrfpcr(fpcr);
 
- 		/* If any exceptions set by this call, and are unmasked,
-		   send a signal.  Old exceptions are not signaled.  */
-		fex = (exc >> IEEE_STATUS_TO_EXCSUM_SHIFT) & swcr;
+ 		/* If any exceptions are now unmasked, send a signal.  */
+		fex = ((swcr & IEEE_STATUS_MASK)
+		       >> IEEE_STATUS_TO_EXCSUM_SHIFT) & swcr;
  		if (fex) {
 			siginfo_t info;
 			int si_code = 0;
@@ -727,9 +766,10 @@ SYSCALL_DEFINE5(osf_setsysinfo, unsigned long, op, void __user *, buffer,
 			info.si_signo = SIGFPE;
 			info.si_errno = 0;
 			info.si_code = si_code;
-			info.si_addr = NULL;  /* FIXME */
+			info.si_addr = 0;  /* FIXME */
  			send_sig_info(SIGFPE, &info, current);
  		}
+
 		return 0;
 	}
 
@@ -748,9 +788,9 @@ SYSCALL_DEFINE5(osf_setsysinfo, unsigned long, op, void __user *, buffer,
 		
  		for (i = 0; i < nbytes; ++i) {
 
- 			if (get_user(v, 2*i + (unsigned int __user *)buffer))
+ 			if (get_user(v, 2*i + (unsigned int *)buffer))
  				return -EFAULT;
- 			if (get_user(w, 2*i + 1 + (unsigned int __user *)buffer))
+ 			if (get_user(w, 2*i + 1 + (unsigned int *)buffer))
  				return -EFAULT;
  			switch (v) {
  			case SSIN_UACPROC:
@@ -781,6 +821,8 @@ SYSCALL_DEFINE5(osf_setsysinfo, unsigned long, op, void __user *, buffer,
    affects all sorts of things, like timeval and itimerval.  */
 
 extern struct timezone sys_tz;
+extern asmlinkage int sys_utimes(char *, struct timeval *);
+extern int do_adjtimex(struct timex *);
 
 struct timeval32
 {
@@ -794,7 +836,7 @@ struct itimerval32
 };
 
 static inline long
-get_tv32(struct timeval *o, struct timeval32 __user *i)
+get_tv32(struct timeval *o, struct timeval32 *i)
 {
 	return (!access_ok(VERIFY_READ, i, sizeof(*i)) ||
 		(__get_user(o->tv_sec, &i->tv_sec) |
@@ -802,7 +844,7 @@ get_tv32(struct timeval *o, struct timeval32 __user *i)
 }
 
 static inline long
-put_tv32(struct timeval32 __user *o, struct timeval *i)
+put_tv32(struct timeval32 *o, struct timeval *i)
 {
 	return (!access_ok(VERIFY_WRITE, o, sizeof(*o)) ||
 		(__put_user(i->tv_sec, &o->tv_sec) |
@@ -810,7 +852,7 @@ put_tv32(struct timeval32 __user *o, struct timeval *i)
 }
 
 static inline long
-get_it32(struct itimerval *o, struct itimerval32 __user *i)
+get_it32(struct itimerval *o, struct itimerval32 *i)
 {
 	return (!access_ok(VERIFY_READ, i, sizeof(*i)) ||
 		(__get_user(o->it_interval.tv_sec, &i->it_interval.tv_sec) |
@@ -820,7 +862,7 @@ get_it32(struct itimerval *o, struct itimerval32 __user *i)
 }
 
 static inline long
-put_it32(struct itimerval32 __user *o, struct itimerval *i)
+put_it32(struct itimerval32 *o, struct itimerval *i)
 {
 	return (!access_ok(VERIFY_WRITE, o, sizeof(*o)) ||
 		(__put_user(i->it_interval.tv_sec, &o->it_interval.tv_sec) |
@@ -836,8 +878,8 @@ jiffies_to_timeval32(unsigned long jiffies, struct timeval32 *value)
 	value->tv_sec = jiffies / HZ;
 }
 
-SYSCALL_DEFINE2(osf_gettimeofday, struct timeval32 __user *, tv,
-		struct timezone __user *, tz)
+asmlinkage int
+osf_gettimeofday(struct timeval32 *tv, struct timezone *tz)
 {
 	if (tv) {
 		struct timeval ktv;
@@ -852,8 +894,8 @@ SYSCALL_DEFINE2(osf_gettimeofday, struct timeval32 __user *, tv,
 	return 0;
 }
 
-SYSCALL_DEFINE2(osf_settimeofday, struct timeval32 __user *, tv,
-		struct timezone __user *, tz)
+asmlinkage int
+osf_settimeofday(struct timeval32 *tv, struct timezone *tz)
 {
 	struct timespec kts;
 	struct timezone ktz;
@@ -872,7 +914,8 @@ SYSCALL_DEFINE2(osf_settimeofday, struct timeval32 __user *, tv,
 	return do_sys_settimeofday(tv ? &kts : NULL, tz ? &ktz : NULL);
 }
 
-SYSCALL_DEFINE2(osf_getitimer, int, which, struct itimerval32 __user *, it)
+asmlinkage int
+osf_getitimer(int which, struct itimerval32 *it)
 {
 	struct itimerval kit;
 	int error;
@@ -884,8 +927,8 @@ SYSCALL_DEFINE2(osf_getitimer, int, which, struct itimerval32 __user *, it)
 	return error;
 }
 
-SYSCALL_DEFINE3(osf_setitimer, int, which, struct itimerval32 __user *, in,
-		struct itimerval32 __user *, out)
+asmlinkage int
+osf_setitimer(int which, struct itimerval32 *in, struct itimerval32 *out)
 {
 	struct itimerval kin, kout;
 	int error;
@@ -907,55 +950,116 @@ SYSCALL_DEFINE3(osf_setitimer, int, which, struct itimerval32 __user *, in,
 
 }
 
-SYSCALL_DEFINE2(osf_utimes, const char __user *, filename,
-		struct timeval32 __user *, tvs)
+asmlinkage int
+osf_utimes(const char *filename, struct timeval32 *tvs)
 {
-	struct timespec tv[2];
+	char *kfilename;
+	struct timeval ktvs[2];
+	mm_segment_t old_fs;
+	int ret;
+
+	kfilename = getname(filename);
+	if (IS_ERR(kfilename))
+		return PTR_ERR(kfilename);
 
 	if (tvs) {
-		struct timeval ktvs[2];
 		if (get_tv32(&ktvs[0], &tvs[0]) ||
 		    get_tv32(&ktvs[1], &tvs[1]))
 			return -EFAULT;
-
-		if (ktvs[0].tv_usec < 0 || ktvs[0].tv_usec >= 1000000 ||
-		    ktvs[1].tv_usec < 0 || ktvs[1].tv_usec >= 1000000)
-			return -EINVAL;
-
-		tv[0].tv_sec = ktvs[0].tv_sec;
-		tv[0].tv_nsec = 1000 * ktvs[0].tv_usec;
-		tv[1].tv_sec = ktvs[1].tv_sec;
-		tv[1].tv_nsec = 1000 * ktvs[1].tv_usec;
 	}
 
-	return do_utimes(AT_FDCWD, filename, tvs ? tv : NULL, 0);
+	old_fs = get_fs();
+	set_fs(KERNEL_DS);
+	ret = sys_utimes(kfilename, tvs ? ktvs : 0);
+	set_fs(old_fs);
+
+	putname(kfilename);
+
+	return ret;
 }
 
-SYSCALL_DEFINE5(osf_select, int, n, fd_set __user *, inp, fd_set __user *, outp,
-		fd_set __user *, exp, struct timeval32 __user *, tvp)
+#define MAX_SELECT_SECONDS \
+	((unsigned long) (MAX_SCHEDULE_TIMEOUT / HZ)-1)
+
+asmlinkage int
+osf_select(int n, fd_set *inp, fd_set *outp, fd_set *exp,
+	   struct timeval32 *tvp)
 {
-	struct timespec end_time, *to = NULL;
+	fd_set_bits fds;
+	char *bits;
+	size_t size;
+	unsigned long timeout;
+	int ret;
+
+	timeout = MAX_SCHEDULE_TIMEOUT;
 	if (tvp) {
 		time_t sec, usec;
 
-		to = &end_time;
+		if ((ret = verify_area(VERIFY_READ, tvp, sizeof(*tvp)))
+		    || (ret = __get_user(sec, &tvp->tv_sec))
+		    || (ret = __get_user(usec, &tvp->tv_usec)))
+			goto out_nofds;
 
-		if (!access_ok(VERIFY_READ, tvp, sizeof(*tvp))
-		    || __get_user(sec, &tvp->tv_sec)
-		    || __get_user(usec, &tvp->tv_usec)) {
-		    	return -EFAULT;
-		}
-
+		ret = -EINVAL;
 		if (sec < 0 || usec < 0)
-			return -EINVAL;
+			goto out_nofds;
 
-		if (poll_select_set_timeout(to, sec, usec * NSEC_PER_USEC))
-			return -EINVAL;		
-
+		if ((unsigned long) sec < MAX_SELECT_SECONDS) {
+			timeout = (usec + 1000000/HZ - 1) / (1000000/HZ);
+			timeout += sec * (unsigned long) HZ;
+		}
 	}
 
+	ret = -EINVAL;
+	if (n < 0 || n > current->files->max_fdset)
+		goto out_nofds;
+
+	/*
+	 * We need 6 bitmaps (in/out/ex for both incoming and outgoing),
+	 * since we used fdset we need to allocate memory in units of
+	 * long-words. 
+	 */
+	ret = -ENOMEM;
+	size = FDS_BYTES(n);
+	bits = kmalloc(6 * size, GFP_KERNEL);
+	if (!bits)
+		goto out_nofds;
+	fds.in      = (unsigned long *)  bits;
+	fds.out     = (unsigned long *) (bits +   size);
+	fds.ex      = (unsigned long *) (bits + 2*size);
+	fds.res_in  = (unsigned long *) (bits + 3*size);
+	fds.res_out = (unsigned long *) (bits + 4*size);
+	fds.res_ex  = (unsigned long *) (bits + 5*size);
+
+	if ((ret = get_fd_set(n, inp->fds_bits, fds.in)) ||
+	    (ret = get_fd_set(n, outp->fds_bits, fds.out)) ||
+	    (ret = get_fd_set(n, exp->fds_bits, fds.ex)))
+		goto out;
+	zero_fd_set(n, fds.res_in);
+	zero_fd_set(n, fds.res_out);
+	zero_fd_set(n, fds.res_ex);
+
+	ret = do_select(n, &fds, &timeout);
+
 	/* OSF does not copy back the remaining time.  */
-	return core_sys_select(n, inp, outp, exp, to);
+
+	if (ret < 0)
+		goto out;
+	if (!ret) {
+		ret = -ERESTARTNOHAND;
+		if (signal_pending(current))
+			goto out;
+		ret = 0;
+	}
+
+	set_fd_set(n, inp->fds_bits, fds.res_in);
+	set_fd_set(n, outp->fds_bits, fds.res_out);
+	set_fd_set(n, exp->fds_bits, fds.res_ex);
+
+ out:
+	kfree(bits);
+ out_nofds:
+	return ret;
 }
 
 struct rusage32 {
@@ -977,7 +1081,8 @@ struct rusage32 {
 	long	ru_nivcsw;		/* involuntary " */
 };
 
-SYSCALL_DEFINE2(osf_getrusage, int, who, struct rusage32 __user *, ru)
+asmlinkage int
+osf_getrusage(int who, struct rusage32 *ru)
 {
 	struct rusage32 r;
 
@@ -991,58 +1096,69 @@ SYSCALL_DEFINE2(osf_getrusage, int, who, struct rusage32 __user *, ru)
 		jiffies_to_timeval32(current->stime, &r.ru_stime);
 		r.ru_minflt = current->min_flt;
 		r.ru_majflt = current->maj_flt;
+		r.ru_nswap = current->nswap;
 		break;
 	case RUSAGE_CHILDREN:
-		jiffies_to_timeval32(current->signal->cutime, &r.ru_utime);
-		jiffies_to_timeval32(current->signal->cstime, &r.ru_stime);
-		r.ru_minflt = current->signal->cmin_flt;
-		r.ru_majflt = current->signal->cmaj_flt;
+		jiffies_to_timeval32(current->cutime, &r.ru_utime);
+		jiffies_to_timeval32(current->cstime, &r.ru_stime);
+		r.ru_minflt = current->cmin_flt;
+		r.ru_majflt = current->cmaj_flt;
+		r.ru_nswap = current->cnswap;
+		break;
+	default:
+		jiffies_to_timeval32(current->utime + current->cutime,
+				   &r.ru_utime);
+		jiffies_to_timeval32(current->stime + current->cstime,
+				   &r.ru_stime);
+		r.ru_minflt = current->min_flt + current->cmin_flt;
+		r.ru_majflt = current->maj_flt + current->cmaj_flt;
+		r.ru_nswap = current->nswap + current->cnswap;
 		break;
 	}
 
 	return copy_to_user(ru, &r, sizeof(r)) ? -EFAULT : 0;
 }
 
-SYSCALL_DEFINE4(osf_wait4, pid_t, pid, int __user *, ustatus, int, options,
-		struct rusage32 __user *, ur)
+asmlinkage int
+osf_wait4(pid_t pid, int *ustatus, int options, struct rusage32 *ur)
 {
-	struct rusage r;
-	long ret, err;
-	mm_segment_t old_fs;
-
-	if (!ur)
+	if (!ur) {
 		return sys_wait4(pid, ustatus, options, NULL);
-
-	old_fs = get_fs();
+	} else {
+		struct rusage r;
+		int ret, status;
+		mm_segment_t old_fs = get_fs();
 		
-	set_fs (KERNEL_DS);
-	ret = sys_wait4(pid, ustatus, options, (struct rusage __user *) &r);
-	set_fs (old_fs);
+		set_fs (KERNEL_DS);
+		ret = sys_wait4(pid, &status, options, &r);
+		set_fs (old_fs);
 
-	if (!access_ok(VERIFY_WRITE, ur, sizeof(*ur)))
-		return -EFAULT;
+		if (!access_ok(VERIFY_WRITE, ur, sizeof(*ur)))
+			return -EFAULT;
+		__put_user(r.ru_utime.tv_sec, &ur->ru_utime.tv_sec);
+		__put_user(r.ru_utime.tv_usec, &ur->ru_utime.tv_usec);
+		__put_user(r.ru_stime.tv_sec, &ur->ru_stime.tv_sec);
+		__put_user(r.ru_stime.tv_usec, &ur->ru_stime.tv_usec);
+		__put_user(r.ru_maxrss, &ur->ru_maxrss);
+		__put_user(r.ru_ixrss, &ur->ru_ixrss);
+		__put_user(r.ru_idrss, &ur->ru_idrss);
+		__put_user(r.ru_isrss, &ur->ru_isrss);
+		__put_user(r.ru_minflt, &ur->ru_minflt);
+		__put_user(r.ru_majflt, &ur->ru_majflt);
+		__put_user(r.ru_nswap, &ur->ru_nswap);
+		__put_user(r.ru_inblock, &ur->ru_inblock);
+		__put_user(r.ru_oublock, &ur->ru_oublock);
+		__put_user(r.ru_msgsnd, &ur->ru_msgsnd);
+		__put_user(r.ru_msgrcv, &ur->ru_msgrcv);
+		__put_user(r.ru_nsignals, &ur->ru_nsignals);
+		__put_user(r.ru_nvcsw, &ur->ru_nvcsw);
+		if (__put_user(r.ru_nivcsw, &ur->ru_nivcsw))
+			return -EFAULT;
 
-	err = 0;
-	err |= __put_user(r.ru_utime.tv_sec, &ur->ru_utime.tv_sec);
-	err |= __put_user(r.ru_utime.tv_usec, &ur->ru_utime.tv_usec);
-	err |= __put_user(r.ru_stime.tv_sec, &ur->ru_stime.tv_sec);
-	err |= __put_user(r.ru_stime.tv_usec, &ur->ru_stime.tv_usec);
-	err |= __put_user(r.ru_maxrss, &ur->ru_maxrss);
-	err |= __put_user(r.ru_ixrss, &ur->ru_ixrss);
-	err |= __put_user(r.ru_idrss, &ur->ru_idrss);
-	err |= __put_user(r.ru_isrss, &ur->ru_isrss);
-	err |= __put_user(r.ru_minflt, &ur->ru_minflt);
-	err |= __put_user(r.ru_majflt, &ur->ru_majflt);
-	err |= __put_user(r.ru_nswap, &ur->ru_nswap);
-	err |= __put_user(r.ru_inblock, &ur->ru_inblock);
-	err |= __put_user(r.ru_oublock, &ur->ru_oublock);
-	err |= __put_user(r.ru_msgsnd, &ur->ru_msgsnd);
-	err |= __put_user(r.ru_msgrcv, &ur->ru_msgrcv);
-	err |= __put_user(r.ru_nsignals, &ur->ru_nsignals);
-	err |= __put_user(r.ru_nvcsw, &ur->ru_nvcsw);
-	err |= __put_user(r.ru_nivcsw, &ur->ru_nivcsw);
-
-	return err ? err : ret;
+		if (ustatus && put_user(status, ustatus))
+			return -EFAULT;
+		return ret;
+	}
 }
 
 /*
@@ -1050,8 +1166,8 @@ SYSCALL_DEFINE4(osf_wait4, pid_t, pid, int __user *, ustatus, int, options,
  * seems to be a timeval pointer, and I suspect the second
  * one is the time remaining.. Ho humm.. No documentation.
  */
-SYSCALL_DEFINE2(osf_usleep_thread, struct timeval32 __user *, sleep,
-		struct timeval32 __user *, remain)
+asmlinkage int
+osf_usleep_thread(struct timeval32 *sleep, struct timeval32 *remain)
 {
 	struct timeval tmp;
 	unsigned long ticks;
@@ -1059,12 +1175,16 @@ SYSCALL_DEFINE2(osf_usleep_thread, struct timeval32 __user *, sleep,
 	if (get_tv32(&tmp, sleep))
 		goto fault;
 
-	ticks = timeval_to_jiffies(&tmp);
+	ticks = tmp.tv_usec;
+	ticks = (ticks + (1000000 / HZ) - 1) / (1000000 / HZ);
+	ticks += tmp.tv_sec * HZ;
 
-	ticks = schedule_timeout_interruptible(ticks);
+	current->state = TASK_INTERRUPTIBLE;
+	ticks = schedule_timeout(ticks);
 
 	if (remain) {
-		jiffies_to_timeval(ticks, &tmp);
+		tmp.tv_sec = ticks / HZ;
+		tmp.tv_usec = ticks % HZ;
 		if (put_tv32(remain, &tmp))
 			goto fault;
 	}
@@ -1104,7 +1224,8 @@ struct timex32 {
 	int  :32; int  :32; int  :32; int  :32;
 };
 
-SYSCALL_DEFINE1(old_adjtimex, struct timex32 __user *, txc_p)
+asmlinkage int
+sys_old_adjtimex(struct timex32 *txc_p)
 {
         struct timex txc;
 	int ret;
@@ -1165,9 +1286,6 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	if (len > limit)
 		return -ENOMEM;
 
-	if (flags & MAP_FIXED)
-		return addr;
-
 	/* First, see if the given suggestion fits.
 
 	   The OSF/1 loader (/sbin/loader) relies on us returning an
@@ -1197,17 +1315,19 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 }
 
 #ifdef CONFIG_OSF4_COMPAT
+extern ssize_t sys_readv(unsigned long, const struct iovec *, unsigned long);
+extern ssize_t sys_writev(unsigned long, const struct iovec *, unsigned long);
 
 /* Clear top 32 bits of iov_len in the user's buffer for
    compatibility with old versions of OSF/1 where iov_len
    was defined as int. */
 static int
-osf_fix_iov_len(const struct iovec __user *iov, unsigned long count)
+osf_fix_iov_len(const struct iovec *iov, unsigned long count)
 {
 	unsigned long i;
 
 	for (i = 0 ; i < count ; i++) {
-		int __user *iov_len_high = (int __user *)&iov[i].iov_len + 1;
+		int *iov_len_high = (int *)&iov[i].iov_len + 1;
 
 		if (put_user(0, iov_len_high))
 			return -EFAULT;
@@ -1215,8 +1335,8 @@ osf_fix_iov_len(const struct iovec __user *iov, unsigned long count)
 	return 0;
 }
 
-SYSCALL_DEFINE3(osf_readv, unsigned long, fd,
-		const struct iovec __user *, vector, unsigned long, count)
+asmlinkage ssize_t
+osf_readv(unsigned long fd, const struct iovec * vector, unsigned long count)
 {
 	if (unlikely(personality(current->personality) == PER_OSF4))
 		if (osf_fix_iov_len(vector, count))
@@ -1224,8 +1344,8 @@ SYSCALL_DEFINE3(osf_readv, unsigned long, fd,
 	return sys_readv(fd, vector, count);
 }
 
-SYSCALL_DEFINE3(osf_writev, unsigned long, fd,
-		const struct iovec __user *, vector, unsigned long, count)
+asmlinkage ssize_t
+osf_writev(unsigned long fd, const struct iovec * vector, unsigned long count)
 {
 	if (unlikely(personality(current->personality) == PER_OSF4))
 		if (osf_fix_iov_len(vector, count))

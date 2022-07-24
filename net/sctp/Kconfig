@@ -2,19 +2,21 @@
 # SCTP configuration
 #
 
-menuconfig IP_SCTP
-	tristate "The SCTP Protocol (EXPERIMENTAL)"
+menu "SCTP Configuration (EXPERIMENTAL)"
 	depends on INET && EXPERIMENTAL
-	depends on IPV6 || IPV6=n
-	select CRYPTO
-	select CRYPTO_HMAC
-	select CRYPTO_SHA1
-	select CRYPTO_MD5 if SCTP_HMAC_MD5
-	select LIBCRC32C
+
+config IPV6_SCTP__
+	tristate
+	default y if IPV6=n
+	default IPV6 if IPV6
+
+config IP_SCTP
+	tristate "The SCTP Protocol (EXPERIMENTAL)"
+	depends on IPV6_SCTP__
 	---help---
 	  Stream Control Transmission Protocol
 
-	  From RFC 2960 <http://www.ietf.org/rfc/rfc2960.txt>.
+	  From RFC 2960 (http://www.ietf.org/rfc/rfc2960.txt)
 
 	  "SCTP is a reliable transport protocol operating on top of a
 	  connectionless packet network such as IP.  It offers the following
@@ -35,22 +37,22 @@ menuconfig IP_SCTP
 
 	  If in doubt, say N.
 
-if IP_SCTP
+config SCTP_ADLER32
+	bool "SCTP: Use old checksum (Adler-32)"
+	depends on IP_SCTP
+	help
+	  RFC2960 currently specifies the Adler-32 checksum algorithm for SCTP.
+	  This has been deprecated and replaced by an algorithm now referred
+	  to as crc32c.
 
-config NET_SCTPPROBE
-	tristate "SCTP: Association probing"
-        depends on PROC_FS && KPROBES
-        ---help---
-        This module allows for capturing the changes to SCTP association
-        state in response to incoming packets. It is used for debugging
-        SCTP congestion control algorithms. If you don't understand
-        what was just said, you don't need it: say N.
+	  If you say Y, this will use the Adler-32 algorithm, this might be 
+	  useful for interoperation with downlevel peers. 
 
-        To compile this code as a module, choose M here: the
-        module will be called sctp_probe.
+	  If unsure, say N.  
 
 config SCTP_DBG_MSG
 	bool "SCTP: Debug messages"
+	depends on IP_SCTP
 	help
 	  If you say Y, this will enable verbose debugging messages. 
 
@@ -59,18 +61,19 @@ config SCTP_DBG_MSG
 
 config SCTP_DBG_OBJCNT
 	bool "SCTP: Debug object counts"
-	depends on PROC_FS
+	depends on IP_SCTP
 	help
 	  If you say Y, this will enable debugging support for counting the 
 	  type of objects that are currently allocated.  This is useful for 
-	  identifying memory leaks. This debug information can be viewed by
+	  identifying memory leaks.   If the /proc filesystem is enabled this 
+	  debug information can be viewed by 
 	  'cat /proc/net/sctp/sctp_dbg_objcnt'
 
 	  If unsure, say N
 
 choice
 	prompt "SCTP: Cookie HMAC Algorithm"
-	default SCTP_HMAC_MD5
+	depends on IP_SCTP
 	help
 	  HMAC algorithm to be used during association initialization.  It
 	  is strongly recommended to use HMAC-SHA1 or HMAC-MD5.  See 
@@ -84,17 +87,16 @@ config SCTP_HMAC_NONE
 	  establishment.  It is advised to use either HMAC-MD5 or HMAC-SHA1.
 
 config SCTP_HMAC_SHA1
-	bool "HMAC-SHA1"
+	bool "HMAC-SHA1" if CRYPTO_HMAC=y && CRYPTO_SHA1=y || CRYPTO_SHA1=m
 	help 
 	  Enable the use of HMAC-SHA1 during association establishment.  It 
 	  is advised to use either HMAC-MD5 or HMAC-SHA1.
 
 config SCTP_HMAC_MD5
-	bool "HMAC-MD5"
+	bool "HMAC-MD5" if CRYPTO_HMAC=y && CRYPTO_MD5=y || CRYPTO_MD5=m
 	help
 	  Enable the use of HMAC-MD5 during association establishment.  It is 
 	  advised to use either HMAC-MD5 or HMAC-SHA1.
 
 endchoice
-
-endif # IP_SCTP
+endmenu

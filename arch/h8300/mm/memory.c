@@ -17,10 +17,12 @@
  *  Copyright (C) 1995  Hamish Macdonald
  */
 
+#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/slab.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
@@ -43,8 +45,8 @@ void cache_push_v (unsigned long vaddr, int len)
 {
 }
 
-/*
- * Map some physical address range into the kernel address space.
+/* Map some physical address range into the kernel address space. The
+ * code is copied and adapted from map_chunk().
  */
 
 unsigned long kernel_map(unsigned long paddr, unsigned long size,
@@ -52,4 +54,17 @@ unsigned long kernel_map(unsigned long paddr, unsigned long size,
 {
 	return paddr;
 }
+
+#ifdef MAGIC_ROM_PTR
+
+int is_in_rom(unsigned long addr)
+{
+	/* Anything not in operational RAM is returned as in rom! */
+	if (addr < _ramstart || addr >= _ramend)
+ 		return 1;
+	else
+		return 0;
+}
+
+#endif
 

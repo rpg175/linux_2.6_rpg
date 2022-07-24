@@ -78,6 +78,7 @@ static actcapi_msgdsc valid_msg[] = {
 #endif
 	{{ 0x00, 0x00}, NULL},
 };
+#define num_valid_msg (sizeof(valid_msg)/sizeof(actcapi_msgdsc))
 #define num_valid_imsg 27 /* MANUFACTURER_IND */
 
 /*
@@ -223,7 +224,6 @@ actcapi_manufacturer_req_net(act2000_card *card)
 /*
  * Switch V.42 on or off
  */
-#if 0
 int
 actcapi_manufacturer_req_v42(act2000_card *card, ulong arg)
 {
@@ -242,7 +242,6 @@ actcapi_manufacturer_req_v42(act2000_card *card, ulong arg)
 	ACTCAPI_QUEUE_TX;
         return 0;
 }
-#endif  /*  0  */
 
 /*
  * Set error-handler
@@ -592,9 +591,10 @@ handle_ack(act2000_card *card, act2000_chan *chan, __u8 blocknr) {
 	struct actcapi_msg *m;
 	int ret = 0;
 
-	spin_lock_irqsave(&card->lock, flags);
+	save_flags(flags);
+	cli();
 	skb = skb_peek(&card->ackq);
-	spin_unlock_irqrestore(&card->lock, flags);
+	restore_flags(flags);
         if (!skb) {
 		printk(KERN_WARNING "act2000: handle_ack nothing found!\n");
 		return 0;
@@ -605,7 +605,7 @@ handle_ack(act2000_card *card, act2000_chan *chan, __u8 blocknr) {
                 if ((((m->msg.data_b3_req.fakencci >> 8) & 0xff) == chan->ncci) &&
 		    (m->msg.data_b3_req.blocknr == blocknr)) {
 			/* found corresponding DATA_B3_REQ */
-                        skb_unlink(tmp, &card->ackq);
+                        skb_unlink(tmp);
 			chan->queued -= m->msg.data_b3_req.datalen;
 			if (m->msg.data_b3_req.flags)
 				ret = m->msg.data_b3_req.datalen;
@@ -614,9 +614,10 @@ handle_ack(act2000_card *card, act2000_chan *chan, __u8 blocknr) {
 				chan->queued = 0;
                         return ret;
                 }
-                spin_lock_irqsave(&card->lock, flags);
+		save_flags(flags);
+		cli();
                 tmp = skb_peek((struct sk_buff_head *)tmp);
-                spin_unlock_irqrestore(&card->lock, flags);
+		restore_flags(flags);
                 if ((tmp == skb) || (tmp == NULL)) {
 			/* reached end of queue */
 			printk(KERN_WARNING "act2000: handle_ack nothing found!\n");
@@ -626,10 +627,8 @@ handle_ack(act2000_card *card, act2000_chan *chan, __u8 blocknr) {
 }
 
 void
-actcapi_dispatch(struct work_struct *work)
+actcapi_dispatch(act2000_card *card)
 {
-	struct act2000_card *card =
-		container_of(work, struct act2000_card, rcv_tq);
 	struct sk_buff *skb;
 	actcapi_msg *msg;
 	__u16 ccmd;
@@ -1024,7 +1023,7 @@ actcapi_debug_msg(struct sk_buff *skb, int direction)
 #ifdef DEBUG_DUMP_SKB
 	dump_skb(skb);
 #endif
-	for (i = 0; i < ARRAY_SIZE(valid_msg); i++)
+	for (i = 0; i < num_valid_msg; i++)
 		if ((msg->hdr.cmd.cmd == valid_msg[i].cmd.cmd) &&
 		    (msg->hdr.cmd.subcmd == valid_msg[i].cmd.subcmd)) {
 			descr = valid_msg[i].description;

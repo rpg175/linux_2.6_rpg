@@ -5,7 +5,7 @@
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  * 
- * Ulf Carlsson - Compatibility with the IRIX structures added
+ * Ulf Carlsson - Compability with the IRIX structures added
  */
 
 #ifndef _SGI_NEWPORT_H
@@ -291,6 +291,8 @@ struct newport_regs {
 	unsigned int _unused2[0x1ef];
 	struct newport_cregs cgo;
 };
+extern struct newport_regs *npregs;
+
 
 typedef struct {
 	unsigned int drawmode1;
@@ -382,8 +384,7 @@ typedef struct {
 #define VC2_IREG_CONTROL       0x10
 #define VC2_IREG_CONFIG        0x20
 
-static inline void newport_vc2_set(struct newport_regs *regs,
-				   unsigned char vc2ireg,
+extern __inline__ void newport_vc2_set(struct newport_regs *regs, unsigned char vc2ireg,
 				   unsigned short val)
 {
 	regs->set.dcbmode = (NPORT_DMODE_AVC2 | VC2_REGADDR_INDEX | NPORT_DMODE_W3 |
@@ -391,7 +392,7 @@ static inline void newport_vc2_set(struct newport_regs *regs,
 	regs->set.dcbdata0.byword = (vc2ireg << 24) | (val << 8);
 }
 
-static inline unsigned short newport_vc2_get(struct newport_regs *regs,
+extern __inline__ unsigned short newport_vc2_get(struct newport_regs *regs,
 					     unsigned char vc2ireg)
 {
 	regs->set.dcbmode = (NPORT_DMODE_AVC2 | VC2_REGADDR_INDEX | NPORT_DMODE_W1 |
@@ -449,25 +450,37 @@ static __inline__ void newport_cmap_setrgb(struct newport_regs *regs,
 
 /* Miscellaneous NEWPORT routines. */
 #define BUSY_TIMEOUT 100000
-static __inline__ int newport_wait(struct newport_regs *regs)
+static __inline__ int newport_wait(void)
 {
-	int t = BUSY_TIMEOUT;
+	int i = 0;
 
-	while (--t)
-		if (!(regs->cset.status & NPORT_STAT_GBUSY))
+	while(i < BUSY_TIMEOUT)
+		if(!(npregs->cset.status & NPORT_STAT_GBUSY))
 			break;
-	return !t;
+	if(i == BUSY_TIMEOUT)
+		return 1;
+	return 0;
 }
 
-static __inline__ int newport_bfwait(struct newport_regs *regs)
+static __inline__ int newport_bfwait(void)
 {
-	int t = BUSY_TIMEOUT;
+	int i = 0;
 
-	while (--t)
-		if(!(regs->cset.status & NPORT_STAT_BBUSY))
+	while(i < BUSY_TIMEOUT)
+		if(!(npregs->cset.status & NPORT_STAT_BBUSY))
 			break;
-	return !t;
+	if(i == BUSY_TIMEOUT)
+		return 1;
+	return 0;
 }
+
+/* newport.c and cons_newport.c routines */
+extern struct graphics_ops *newport_probe (int, const char **);
+
+void newport_save    (void *);
+void newport_restore (void *);
+void newport_reset   (void);
+int  newport_ioctl   (int card, int cmd, unsigned long arg);
 
 /*
  * DCBMODE register defines:
@@ -551,7 +564,7 @@ xmap9FIFOWait (struct newport_regs *rex)
 {
         rex->set.dcbmode = DCB_XMAP0 | XM9_CRS_FIFO_AVAIL |
 		DCB_DATAWIDTH_1 | R_DCB_XMAP9_PROTOCOL;
-        newport_bfwait (rex);
+        newport_bfwait ();
 	
         while ((rex->set.dcbdata0.bybytes.b3 & 3) != XM9_FIFO_EMPTY)
 		;

@@ -2,6 +2,8 @@
  * Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 1999,2000 MIPS Technologies, Inc.  All rights reserved.
  *
+ * ########################################################################
+ *
  *  This program is free software; you can distribute it and/or modify it
  *  under the terms of the GNU General Public License (Version 2) as
  *  published by the Free Software Foundation.
@@ -15,41 +17,81 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  *
- * Routines for generic manipulation of the interrupts found on the
+ * ########################################################################
+ *
+ * Routines for generic manipulation of the interrupts found on the 
  * Lasat boards.
+ *
  */
+#include <linux/config.h>
 #include <linux/init.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
-#include <linux/irq.h>
+#include <linux/kernel_stat.h>
 
-#include <asm/irq_cpu.h>
-#include <asm/lasat/lasat.h>
+#include <asm/bootinfo.h>
+#include <asm/irq.h>
 #include <asm/lasat/lasatint.h>
+#include <asm/gdb-stub.h>
 
-#include <irq.h>
-
-static volatile int *lasat_int_status;
-static volatile int *lasat_int_mask;
+static volatile int *lasat_int_status = NULL;
+static volatile int *lasat_int_mask = NULL;
 static volatile int lasat_int_mask_shift;
 
-void disable_lasat_irq(struct irq_data *d)
-{
-	unsigned int irq_nr = d->irq - LASAT_IRQ_BASE;
+extern asmlinkage void mipsIRQ(void);
 
+#if 0
+#define DEBUG_INT(x...) printk(x)
+#else
+#define DEBUG_INT(x...)
+#endif
+
+void disable_lasat_irq(unsigned int irq_nr)
+{
+	unsigned long flags;
+	DEBUG_INT("disable_lasat_irq: %d", irq_nr);
+
+	local_irq_save(flags);
 	*lasat_int_mask &= ~(1 << irq_nr) << lasat_int_mask_shift;
+	local_irq_restore(flags);
 }
 
-void enable_lasat_irq(struct irq_data *d)
+void enable_lasat_irq(unsigned int irq_nr)
 {
-	unsigned int irq_nr = d->irq - LASAT_IRQ_BASE;
+	unsigned long flags;
+	DEBUG_INT("enable_lasat_irq: %d", irq_nr);
 
+	local_irq_save(flags);
 	*lasat_int_mask |= (1 << irq_nr) << lasat_int_mask_shift;
+	local_irq_restore(flags);
 }
 
-static struct irq_chip lasat_irq_type = {
-	.name = "Lasat",
-	.irq_mask = disable_lasat_irq,
-	.irq_unmask = enable_lasat_irq,
+static unsigned int startup_lasat_irq(unsigned int irq)
+{
+	enable_lasat_irq(irq);
+	return 0; /* never anything pending */
+}
+
+#define shutdown_lasat_irq	disable_lasat_irq
+
+#define mask_and_ack_lasat_irq disable_lasat_irq
+
+static void end_lasat_irq(unsigned int irq)
+{
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		enable_lasat_irq(irq);
+}
+
+static struct hw_interrupt_type lasat_irq_type = {
+	"Lasat",
+	startup_lasat_irq,
+	shutdown_lasat_irq,
+	enable_lasat_irq,
+	disable_lasat_irq,
+	mask_and_ack_lasat_irq,
+	end_lasat_irq,
+	NULL
 };
 
 static inline int ls1bit32(unsigned int x)
@@ -65,14 +107,14 @@ static inline int ls1bit32(unsigned int x)
 	return b;
 }
 
-static unsigned long (*get_int_status)(void);
+static unsigned long (* get_int_status)(void);
 
 static unsigned long get_int_status_100(void)
 {
-	return *lasat_int_status & *lasat_int_mask;
+	return (*lasat_int_status & *lasat_int_mask);
 }
 
-static unsigned long get_int_status_200(void)
+static unsigned long get_int_status_200(void) 
 {
 	unsigned long int_status;
 
@@ -81,54 +123,72 @@ static unsigned long get_int_status_200(void)
 	return int_status;
 }
 
-asmlinkage void plat_irq_dispatch(void)
+void lasat_hw0_irqdispatch(struct pt_regs *regs)
 {
+	struct irqaction *action;
 	unsigned long int_status;
-	unsigned int cause = read_c0_cause();
 	int irq;
-
-	if (cause & CAUSEF_IP7) {	/* R4000 count / compare IRQ */
-		do_IRQ(7);
-		return;
-	}
 
 	int_status = get_int_status();
 
 	/* if int_status == 0, then the interrupt has already been cleared */
-	if (int_status) {
-		irq = LASAT_IRQ_BASE + ls1bit32(int_status);
+	if (int_status == 0)
+		return;
 
-		do_IRQ(irq);
+	irq = ls1bit32(int_status);
+	action = irq_desc[irq].action;
+
+	DEBUG_INT("lasat_hw0_irqdispatch: irq=%d\n", irq);
+
+	/* if action == NULL, then we don't have a handler for the irq */
+	if (action == NULL) {
+		printk("No handler for hw0 irq: %i\n", irq);
+		atomic_inc(&irq_err_count);
+		disable_lasat_irq(irq);
+		return;
 	}
+
+	irq_enter();
+	kstat_this_cpu.irqs[irq]++;
+	action->handler(irq, action->dev_id, regs);
+	irq_exit();
+
+	return;		
 }
 
-static struct irqaction cascade = {
-	.handler	= no_action,
-	.name		= "cascade",
-};
-
-void __init arch_init_irq(void)
+void __init init_IRQ(void)
 {
 	int i;
 
-	if (IS_LASAT_200()) {
-		lasat_int_status = (void *)LASAT_INT_STATUS_REG_200;
-		lasat_int_mask = (void *)LASAT_INT_MASK_REG_200;
-		lasat_int_mask_shift = LASATINT_MASK_SHIFT_200;
-		get_int_status = get_int_status_200;
-		*lasat_int_mask &= 0xffff;
-	} else {
+	init_generic_irq();
+
+	switch (mips_machtype) {
+	case MACH_LASAT_100:
 		lasat_int_status = (void *)LASAT_INT_STATUS_REG_100;
 		lasat_int_mask = (void *)LASAT_INT_MASK_REG_100;
 		lasat_int_mask_shift = LASATINT_MASK_SHIFT_100;
 		get_int_status = get_int_status_100;
 		*lasat_int_mask = 0;
+		break;
+	case MACH_LASAT_200:
+		printk("**** MACH_LASAT_200 interrupt routines\n");
+		lasat_int_status = (void *)LASAT_INT_STATUS_REG_200;
+		lasat_int_mask = (void *)LASAT_INT_MASK_REG_200;
+		lasat_int_mask_shift = LASATINT_MASK_SHIFT_200;
+		get_int_status = get_int_status_200;
+		*lasat_int_mask &= 0xffff;
+		break;
+	default:
+		panic("init_IRQ: mips_machtype incorrect");
 	}
 
-	mips_cpu_irq_init();
+	/* Now safe to set the exception vector. */
+	set_except_vector(0, mipsIRQ);
 
-	for (i = LASAT_IRQ_BASE; i <= LASAT_IRQ_END; i++)
-		irq_set_chip_and_handler(i, &lasat_irq_type, handle_level_irq);
-
-	setup_irq(LASAT_CASCADE_IRQ, &cascade);
+	for (i = 0; i <= LASATINT_END; i++) {
+		irq_desc[i].status	= IRQ_DISABLED;
+		irq_desc[i].action	= 0;
+		irq_desc[i].depth	= 1;
+		irq_desc[i].handler	= &lasat_irq_type;
+	}
 }

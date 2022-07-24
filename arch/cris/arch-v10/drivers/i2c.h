@@ -1,5 +1,4 @@
-/* i2c.h */
-int i2c_init(void);
+/* $Id: i2c.h,v 1.2 2002/11/18 13:16:06 starvik Exp $ */
 
 /* High level I2C actions */
 int i2c_writereg(unsigned char theSlave, unsigned char theReg, unsigned char theValue);

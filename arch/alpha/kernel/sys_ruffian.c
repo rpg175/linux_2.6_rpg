@@ -14,7 +14,6 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
-#include <linux/timex.h>
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
@@ -26,7 +25,6 @@
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
 #include <asm/tlbflush.h>
-#include <asm/8253pit.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -66,8 +64,6 @@ ruffian_init_irq(void)
 	common_init_isa_dma();
 }
 
-#define RUFFIAN_LATCH	DIV_ROUND_CLOSEST(PIT_TICK_RATE, HZ)
-
 static void __init
 ruffian_init_rtc(void)
 {
@@ -76,8 +72,8 @@ ruffian_init_rtc(void)
 
 	/* Setup interval timer.  */
 	outb(0x34, 0x43);		/* binary, mode 2, LSB/MSB, ch 0 */
-	outb(RUFFIAN_LATCH & 0xff, 0x40);	/* LSB */
-	outb(RUFFIAN_LATCH >> 8, 0x40);		/* MSB */
+	outb(LATCH & 0xff, 0x40);	/* LSB */
+	outb(LATCH >> 8, 0x40);		/* MSB */
 
 	outb(0xb6, 0x43);		/* pit counter 2: speaker */
 	outb(0x31, 0x42);
@@ -161,7 +157,7 @@ ruffian_swizzle(struct pci_dev *dev, u8 *pinp)
 				slot = PCI_SLOT(dev->devfn) + 10;
 				break;
 			}
-			pin = pci_swizzle_interrupt_pin(dev, pin);
+			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
 
 			/* Move up the chain of bridges.  */
 			dev = dev->bus->self;
@@ -183,16 +179,16 @@ static unsigned long __init
 ruffian_get_bank_size(unsigned long offset)
 {
 	unsigned long bank_addr, bank, ret = 0;
-
+  
 	/* Valid offsets are: 0x800, 0x840 and 0x880
 	   since Ruffian only uses three banks.  */
 	bank_addr = (unsigned long)PYXIS_MCR + offset;
 	bank = *(vulp)bank_addr;
-
+    
 	/* Check BANK_ENABLE */
 	if (bank & 0x01) {
 		static unsigned long size[] __initdata = {
-			0x40000000UL, /* 0x00,   1G */
+			0x40000000UL, /* 0x00,   1G */ 
 			0x20000000UL, /* 0x02, 512M */
 			0x10000000UL, /* 0x04, 256M */
 			0x08000000UL, /* 0x06, 128M */
@@ -204,7 +200,7 @@ ruffian_get_bank_size(unsigned long offset)
 		};
 
 		bank = (bank & 0x1e) >> 1;
-		if (bank < ARRAY_SIZE(size))
+		if (bank < sizeof(size)/sizeof(*size))
 			ret = size[bank];
 	}
 
@@ -221,6 +217,7 @@ struct alpha_machine_vector ruffian_mv __initmv = {
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
+	DO_CIA_BUS,
 	.machine_check		= cia_machine_check,
 	.max_isa_dma_address	= ALPHA_RUFFIAN_MAX_ISA_DMA_ADDRESS,
 	.min_io_address		= DEFAULT_IO_BASE,

@@ -9,29 +9,26 @@
  *
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/poll.h>
-#include <linux/slab.h>
+#include <linux/smp_lock.h>
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
 #else
 #include <linux/fs.h>
 #endif
-#include <linux/sched.h>
 #include <linux/isdnif.h>
-#include <net/net_namespace.h>
-#include <linux/mutex.h>
 #include "isdn_divert.h"
-
 
 /*********************************/
 /* Variables for interface queue */
 /*********************************/
 ulong if_used = 0;		/* number of interface users */
-static DEFINE_MUTEX(isdn_divert_mutex);
 static struct divert_info *divert_info_head = NULL;	/* head of queue */
 static struct divert_info *divert_info_tail = NULL;	/* pointer to last entry */
-static DEFINE_SPINLOCK(divert_info_lock);/* lock for queue */
+static spinlock_t divert_info_lock = SPIN_LOCK_UNLOCKED;/* lock for queue */
 static wait_queue_head_t rd_queue;
 
 /*********************************/
@@ -49,7 +46,7 @@ put_info_buffer(char *cp)
 		return;
 	if (!*cp)
 		return;
-	if (!(ib = kmalloc(sizeof(struct divert_info) + strlen(cp), GFP_ATOMIC)))
+	if (!(ib = (struct divert_info *) kmalloc(sizeof(struct divert_info) + strlen(cp), GFP_ATOMIC)))
 		 return;	/* no memory */
 	strcpy(ib->info_start, cp);	/* set output string */
 	ib->next = NULL;
@@ -75,13 +72,11 @@ put_info_buffer(char *cp)
 	wake_up_interruptible(&(rd_queue));
 }				/* put_info_buffer */
 
-#ifdef CONFIG_PROC_FS
-
 /**********************************/
 /* deflection device read routine */
 /**********************************/
 static ssize_t
-isdn_divert_read(struct file *file, char __user *buf, size_t count, loff_t * off)
+isdn_divert_read(struct file *file, char *buf, size_t count, loff_t * off)
 {
 	struct divert_info *inf;
 	int len;
@@ -95,11 +90,11 @@ isdn_divert_read(struct file *file, char __user *buf, size_t count, loff_t * off
 		return (0);
 
 	inf->usage_cnt--;	/* new usage count */
-	file->private_data = &inf->next;	/* next structure */
+	(struct divert_info **) file->private_data = &inf->next;	/* next structure */
 	if ((len = strlen(inf->info_start)) <= count) {
 		if (copy_to_user(buf, inf->info_start, len))
 			return -EFAULT;
-		*off += len;
+		file->f_pos += len;
 		return (len);
 	}
 	return (0);
@@ -109,7 +104,7 @@ isdn_divert_read(struct file *file, char __user *buf, size_t count, loff_t * off
 /* deflection device write routine */
 /**********************************/
 static ssize_t
-isdn_divert_write(struct file *file, const char __user *buf, size_t count, loff_t * off)
+isdn_divert_write(struct file *file, const char *buf, size_t count, loff_t * off)
 {
 	return (-ENODEV);
 }				/* isdn_divert_write */
@@ -142,12 +137,12 @@ isdn_divert_open(struct inode *ino, struct file *filep)
 	spin_lock_irqsave( &divert_info_lock, flags );
  	if_used++;
 	if (divert_info_head)
-		filep->private_data = &(divert_info_tail->next);
+		(struct divert_info **) filep->private_data = &(divert_info_tail->next);
 	else
-		filep->private_data = &divert_info_head;
+		(struct divert_info **) filep->private_data = &divert_info_head;
 	spin_unlock_irqrestore( &divert_info_lock, flags );
 	/*  start_divert(); */
-	return nonseekable_open(ino, filep);
+	return (0);
 }				/* isdn_divert_open */
 
 /*******************/
@@ -179,7 +174,9 @@ isdn_divert_close(struct inode *ino, struct file *filep)
 /*********/
 /* IOCTL */
 /*********/
-static int isdn_divert_ioctl_unlocked(struct file *file, uint cmd, ulong arg)
+static int
+isdn_divert_ioctl(struct inode *inode, struct file *file,
+		  uint cmd, ulong arg)
 {
 	divert_ioctl dioctl;
 	int i;
@@ -187,7 +184,7 @@ static int isdn_divert_ioctl_unlocked(struct file *file, uint cmd, ulong arg)
 	divert_rule *rulep;
 	char *cp;
 
-	if (copy_from_user(&dioctl, (void __user *) arg, sizeof(dioctl)))
+	if (copy_from_user(&dioctl, (char *) arg, sizeof(dioctl)))
 		return -EFAULT;
 
 	switch (cmd) {
@@ -218,9 +215,10 @@ static int isdn_divert_ioctl_unlocked(struct file *file, uint cmd, ulong arg)
 		case IIOCMODRULE:
 			if (!(rulep = getruleptr(dioctl.getsetrule.ruleidx)))
 				return (-EINVAL);
-            spin_lock_irqsave(&divert_lock, flags);
+			save_flags(flags);
+			cli();
 			*rulep = dioctl.getsetrule.rule;	/* copy data */
-			spin_unlock_irqrestore(&divert_lock, flags);
+			restore_flags(flags);
 			return (0);	/* no copy required */
 			break;
 
@@ -255,28 +253,19 @@ static int isdn_divert_ioctl_unlocked(struct file *file, uint cmd, ulong arg)
 		default:
 			return (-EINVAL);
 	}			/* switch cmd */
-	return copy_to_user((void __user *)arg, &dioctl, sizeof(dioctl)) ? -EFAULT : 0;
+	return copy_to_user((char *)arg, &dioctl, sizeof(dioctl)) ? -EFAULT : 0;
 }				/* isdn_divert_ioctl */
 
-static long isdn_divert_ioctl(struct file *file, uint cmd, ulong arg)
-{
-	long ret;
 
-	mutex_lock(&isdn_divert_mutex);
-	ret = isdn_divert_ioctl_unlocked(file, cmd, arg);
-	mutex_unlock(&isdn_divert_mutex);
-
-	return ret;
-}
-
-static const struct file_operations isdn_fops =
+#ifdef CONFIG_PROC_FS
+static struct file_operations isdn_fops =
 {
 	.owner          = THIS_MODULE,
 	.llseek         = no_llseek,
 	.read           = isdn_divert_read,
 	.write          = isdn_divert_write,
 	.poll           = isdn_divert_poll,
-	.unlocked_ioctl = isdn_divert_ioctl,
+	.ioctl          = isdn_divert_ioctl,
 	.open           = isdn_divert_open,
 	.release        = isdn_divert_close,                                      
 };
@@ -298,15 +287,16 @@ divert_dev_init(void)
 	init_waitqueue_head(&rd_queue);
 
 #ifdef CONFIG_PROC_FS
-	isdn_proc_entry = proc_mkdir("isdn", init_net.proc_net);
+	isdn_proc_entry = create_proc_entry("isdn", S_IFDIR | S_IRUGO | S_IXUGO, proc_net);
 	if (!isdn_proc_entry)
 		return (-1);
-	isdn_divert_entry = proc_create("divert", S_IFREG | S_IRUGO,
-					isdn_proc_entry, &isdn_fops);
+	isdn_divert_entry = create_proc_entry("divert", S_IFREG | S_IRUGO, isdn_proc_entry);
 	if (!isdn_divert_entry) {
-		remove_proc_entry("isdn", init_net.proc_net);
+		remove_proc_entry("isdn", proc_net);
 		return (-1);
 	}
+	isdn_divert_entry->proc_fops = &isdn_fops; 
+	isdn_divert_entry->owner = THIS_MODULE; 
 #endif	/* CONFIG_PROC_FS */
 
 	return (0);
@@ -322,7 +312,7 @@ divert_dev_deinit(void)
 
 #ifdef CONFIG_PROC_FS
 	remove_proc_entry("divert", isdn_proc_entry);
-	remove_proc_entry("isdn", init_net.proc_net);
+	remove_proc_entry("isdn", proc_net);
 #endif	/* CONFIG_PROC_FS */
 
 	return (0);

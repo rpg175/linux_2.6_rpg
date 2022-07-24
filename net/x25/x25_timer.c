@@ -3,7 +3,7 @@
  *
  *	This is ALPHA test software. This code may break your machine,
  *	randomly fail to work with new releases, misbehave and/or generally
- *	screw up. It might even work.
+ *	screw up. It might even work. 
  *
  *	This code REQUIRES 2.1.15 or higher
  *
@@ -20,10 +20,24 @@
  */
 
 #include <linux/errno.h>
+#include <linux/types.h>
+#include <linux/socket.h>
+#include <linux/in.h>
+#include <linux/kernel.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
+#include <linux/string.h>
+#include <linux/sockios.h>
+#include <linux/net.h>
+#include <linux/inet.h>
+#include <linux/netdevice.h>
+#include <linux/skbuff.h>
 #include <net/sock.h>
-#include <net/tcp_states.h>
+#include <net/tcp.h>
+#include <asm/system.h>
+#include <linux/fcntl.h>
+#include <linux/mm.h>
+#include <linux/interrupt.h>
 #include <net/x25.h>
 
 static void x25_heartbeat_expiry(unsigned long);
@@ -31,9 +45,11 @@ static void x25_timer_expiry(unsigned long);
 
 void x25_init_timers(struct sock *sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
-	setup_timer(&x25->timer, x25_timer_expiry, (unsigned long)sk);
+	init_timer(&x25->timer);
+	x25->timer.data     = (unsigned long)sk;
+	x25->timer.function = &x25_timer_expiry;
 
 	/* initialized by sock_init_data */
 	sk->sk_timer.data     = (unsigned long)sk;
@@ -52,28 +68,28 @@ void x25_stop_heartbeat(struct sock *sk)
 
 void x25_start_t2timer(struct sock *sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
 	mod_timer(&x25->timer, jiffies + x25->t2);
 }
 
 void x25_start_t21timer(struct sock *sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
 	mod_timer(&x25->timer, jiffies + x25->t21);
 }
 
 void x25_start_t22timer(struct sock *sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
 	mod_timer(&x25->timer, jiffies + x25->t22);
 }
 
 void x25_start_t23timer(struct sock *sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
 	mod_timer(&x25->timer, jiffies + x25->t23);
 }
@@ -85,7 +101,7 @@ void x25_stop_timer(struct sock *sk)
 
 unsigned long x25_display_timer(struct sock *sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
 	if (!timer_pending(&x25->timer))
 		return 0;
@@ -97,8 +113,8 @@ static void x25_heartbeat_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
 
-	bh_lock_sock(sk);
-	if (sock_owned_by_user(sk)) /* can currently only occur in state 3 */
+        bh_lock_sock(sk);
+        if (sock_owned_by_user(sk)) /* can currently only occur in state 3 */ 
 		goto restart_heartbeat;
 
 	switch (x25_sk(sk)->state) {
@@ -112,9 +128,8 @@ static void x25_heartbeat_expiry(unsigned long param)
 			if (sock_flag(sk, SOCK_DESTROY) ||
 			    (sk->sk_state == TCP_LISTEN &&
 			     sock_flag(sk, SOCK_DEAD))) {
-				bh_unlock_sock(sk);
-				x25_destroy_socket_from_timer(sk);
-				return;
+				x25_destroy_socket(sk);
+				goto unlock;
 			}
 			break;
 
@@ -127,6 +142,7 @@ static void x25_heartbeat_expiry(unsigned long param)
 	}
 restart_heartbeat:
 	x25_start_heartbeat(sk);
+unlock:
 	bh_unlock_sock(sk);
 }
 
@@ -136,7 +152,7 @@ restart_heartbeat:
  */
 static inline void x25_do_timer_expiry(struct sock * sk)
 {
-	struct x25_sock *x25 = x25_sk(sk);
+	struct x25_opt *x25 = x25_sk(sk);
 
 	switch (x25->state) {
 

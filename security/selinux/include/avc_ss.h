@@ -8,15 +8,20 @@
 
 #include "flask.h"
 
+int avc_ss_grant(u32 ssid, u32 tsid, u16 tclass, u32 perms, u32 seqno);
+
+int avc_ss_try_revoke(u32 ssid, u32 tsid, u16 tclass, u32 perms, u32 seqno,
+		      u32 *out_retained);
+
+int avc_ss_revoke(u32 ssid, u32 tsid, u16 tclass, u32 perms, u32 seqno);
+
 int avc_ss_reset(u32 seqno);
 
-/* Class/perm mapping support */
-struct security_class_mapping {
-	const char *name;
-	const char *perms[sizeof(u32) * 8 + 1];
-};
+int avc_ss_set_auditallow(u32 ssid, u32 tsid, u16 tclass, u32 perms,
+			  u32 seqno, u32 enable);
 
-extern struct security_class_mapping secclass_map[];
+int avc_ss_set_auditdeny(u32 ssid, u32 tsid, u16 tclass, u32 perms,
+			 u32 seqno, u32 enable);
 
 #endif /* _SELINUX_AVC_SS_H_ */
 

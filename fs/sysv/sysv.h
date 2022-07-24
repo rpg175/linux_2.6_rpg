@@ -2,10 +2,6 @@
 #define _SYSV_H
 
 #include <linux/buffer_head.h>
-
-typedef __u16 __bitwise __fs16;
-typedef __u32 __bitwise __fs32;
-
 #include <linux/sysv_fs.h>
 
 /*
@@ -42,14 +38,14 @@ struct sysv_sb_info {
 	   different superblock layout. */
 	char *         s_sbd1;		/* entire superblock data, for part 1 */
 	char *         s_sbd2;		/* entire superblock data, for part 2 */
-	__fs16         *s_sb_fic_count;	/* pointer to s_sbd->s_ninode */
-        sysv_ino_t     *s_sb_fic_inodes; /* pointer to s_sbd->s_inode */
-	__fs16         *s_sb_total_free_inodes; /* pointer to s_sbd->s_tinode */
-	__fs16         *s_bcache_count;	/* pointer to s_sbd->s_nfree */
-	sysv_zone_t    *s_bcache;	/* pointer to s_sbd->s_free */
-	__fs32         *s_free_blocks;	/* pointer to s_sbd->s_tfree */
-	__fs32         *s_sb_time;	/* pointer to s_sbd->s_time */
-	__fs32         *s_sb_state;	/* pointer to s_sbd->s_state, only FSTYPE_SYSV */
+	u16            *s_sb_fic_count;	/* pointer to s_sbd->s_ninode */
+        u16            *s_sb_fic_inodes; /* pointer to s_sbd->s_inode */
+	u16            *s_sb_total_free_inodes; /* pointer to s_sbd->s_tinode */
+	u16            *s_bcache_count;	/* pointer to s_sbd->s_nfree */
+	u32	       *s_bcache;	/* pointer to s_sbd->s_free */
+	u32            *s_free_blocks;	/* pointer to s_sbd->s_tfree */
+	u32            *s_sb_time;	/* pointer to s_sbd->s_time */
+	u32            *s_sb_state;	/* pointer to s_sbd->s_state, only FSTYPE_SYSV */
 	/* We keep those superblock entities that don't change here;
 	   this saves us an indirection and perhaps a conversion. */
 	u32            s_firstinodezone; /* index of first inode zone */
@@ -58,14 +54,13 @@ struct sysv_sb_info {
 	u32            s_ndatazones;	/* total number of data zones */
 	u32            s_nzones;	/* same as s_sbd->s_fsize */
 	u16	       s_namelen;       /* max length of dir entry */
-	int	       s_forced_ro;
 };
 
 /*
  * SystemV/V7/Coherent FS inode data in memory
  */
 struct sysv_inode_info {
-	__fs32		i_data[13];
+	u32		i_data[13];
 	u32		i_dir_start_lookup;
 	struct inode	vfs_inode;
 };
@@ -130,23 +125,19 @@ extern void sysv_free_inode(struct inode *);
 extern unsigned long sysv_count_free_inodes(struct super_block *);
 
 /* balloc.c */
-extern sysv_zone_t sysv_new_block(struct super_block *);
-extern void sysv_free_block(struct super_block *, sysv_zone_t);
+extern u32 sysv_new_block(struct super_block *);
+extern void sysv_free_block(struct super_block *, u32);
 extern unsigned long sysv_count_free_blocks(struct super_block *);
 
 /* itree.c */
 extern void sysv_truncate(struct inode *);
-extern int sysv_prepare_chunk(struct page *page, loff_t pos, unsigned len);
 
 /* inode.c */
-extern struct inode *sysv_iget(struct super_block *, unsigned int);
-extern int sysv_write_inode(struct inode *, struct writeback_control *wbc);
+extern void sysv_write_inode(struct inode *, int);
 extern int sysv_sync_inode(struct inode *);
+extern int sysv_sync_file(struct file *, struct dentry *, int);
 extern void sysv_set_inode(struct inode *, dev_t);
 extern int sysv_getattr(struct vfsmount *, struct dentry *, struct kstat *);
-extern int sysv_init_icache(void);
-extern void sysv_destroy_icache(void);
-
 
 /* dir.c */
 extern struct sysv_dir_entry *sysv_find_entry(struct dentry *, struct page **);
@@ -160,14 +151,14 @@ extern struct sysv_dir_entry *sysv_dotdot(struct inode *, struct page **);
 extern ino_t sysv_inode_by_name(struct dentry *);
 
 
-extern const struct inode_operations sysv_file_inode_operations;
-extern const struct inode_operations sysv_dir_inode_operations;
-extern const struct inode_operations sysv_fast_symlink_inode_operations;
-extern const struct file_operations sysv_file_operations;
-extern const struct file_operations sysv_dir_operations;
-extern const struct address_space_operations sysv_aops;
-extern const struct super_operations sysv_sops;
-extern const struct dentry_operations sysv_dentry_operations;
+extern struct inode_operations sysv_file_inode_operations;
+extern struct inode_operations sysv_dir_inode_operations;
+extern struct inode_operations sysv_fast_symlink_inode_operations;
+extern struct file_operations sysv_file_operations;
+extern struct file_operations sysv_dir_operations;
+extern struct address_space_operations sysv_aops;
+extern struct super_operations sysv_sops;
+extern struct dentry_operations sysv_dentry_operations;
 
 
 enum {
@@ -189,60 +180,58 @@ static inline u32 PDP_swab(u32 x)
 #endif
 }
 
-static inline __u32 fs32_to_cpu(struct sysv_sb_info *sbi, __fs32 n)
+static inline u32 fs32_to_cpu(struct sysv_sb_info *sbi, u32 n)
 {
 	if (sbi->s_bytesex == BYTESEX_PDP)
-		return PDP_swab((__force __u32)n);
+		return PDP_swab(n);
 	else if (sbi->s_bytesex == BYTESEX_LE)
-		return le32_to_cpu((__force __le32)n);
+		return le32_to_cpu(n);
 	else
-		return be32_to_cpu((__force __be32)n);
+		return be32_to_cpu(n);
 }
 
-static inline __fs32 cpu_to_fs32(struct sysv_sb_info *sbi, __u32 n)
+static inline u32 cpu_to_fs32(struct sysv_sb_info *sbi, u32 n)
 {
 	if (sbi->s_bytesex == BYTESEX_PDP)
-		return (__force __fs32)PDP_swab(n);
+		return PDP_swab(n);
 	else if (sbi->s_bytesex == BYTESEX_LE)
-		return (__force __fs32)cpu_to_le32(n);
+		return cpu_to_le32(n);
 	else
-		return (__force __fs32)cpu_to_be32(n);
+		return cpu_to_be32(n);
 }
 
-static inline __fs32 fs32_add(struct sysv_sb_info *sbi, __fs32 *n, int d)
+static inline u32 fs32_add(struct sysv_sb_info *sbi, u32 *n, int d)
 {
 	if (sbi->s_bytesex == BYTESEX_PDP)
-		*(__u32*)n = PDP_swab(PDP_swab(*(__u32*)n)+d);
+		return *n = PDP_swab(PDP_swab(*n)+d);
 	else if (sbi->s_bytesex == BYTESEX_LE)
-		le32_add_cpu((__le32 *)n, d);
+		return *n = cpu_to_le32(le32_to_cpu(*n)+d);
 	else
-		be32_add_cpu((__be32 *)n, d);
-	return *n;
+		return *n = cpu_to_be32(be32_to_cpu(*n)+d);
 }
 
-static inline __u16 fs16_to_cpu(struct sysv_sb_info *sbi, __fs16 n)
+static inline u16 fs16_to_cpu(struct sysv_sb_info *sbi, u16 n)
 {
 	if (sbi->s_bytesex != BYTESEX_BE)
-		return le16_to_cpu((__force __le16)n);
+		return le16_to_cpu(n);
 	else
-		return be16_to_cpu((__force __be16)n);
+		return be16_to_cpu(n);
 }
 
-static inline __fs16 cpu_to_fs16(struct sysv_sb_info *sbi, __u16 n)
+static inline u16 cpu_to_fs16(struct sysv_sb_info *sbi, u16 n)
 {
 	if (sbi->s_bytesex != BYTESEX_BE)
-		return (__force __fs16)cpu_to_le16(n);
+		return cpu_to_le16(n);
 	else
-		return (__force __fs16)cpu_to_be16(n);
+		return cpu_to_be16(n);
 }
 
-static inline __fs16 fs16_add(struct sysv_sb_info *sbi, __fs16 *n, int d)
+static inline u16 fs16_add(struct sysv_sb_info *sbi, u16 *n, int d)
 {
 	if (sbi->s_bytesex != BYTESEX_BE)
-		le16_add_cpu((__le16 *)n, d);
+		return *n = cpu_to_le16(le16_to_cpu(*n)+d);
 	else
-		be16_add_cpu((__be16 *)n, d);
-	return *n;
+		return *n = cpu_to_be16(be16_to_cpu(*n)+d);
 }
 
 #endif /* _SYSV_H */

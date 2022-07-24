@@ -25,30 +25,27 @@
 /*
  * prototypes
  */
-static struct snd_emux_voice *get_voice(struct snd_emux *emu,
-					struct snd_emux_port *port);
-static int start_voice(struct snd_emux_voice *vp);
-static void trigger_voice(struct snd_emux_voice *vp);
-static void release_voice(struct snd_emux_voice *vp);
-static void update_voice(struct snd_emux_voice *vp, int update);
-static void reset_voice(struct snd_emux *emu, int ch);
-static void terminate_voice(struct snd_emux_voice *vp);
-static void sysex(struct snd_emux *emu, char *buf, int len, int parsed,
-		  struct snd_midi_channel_set *chset);
+static snd_emux_voice_t *get_voice(snd_emux_t *emu, snd_emux_port_t *port);
+static int start_voice(snd_emux_voice_t *vp);
+static void trigger_voice(snd_emux_voice_t *vp);
+static void release_voice(snd_emux_voice_t *vp);
+static void update_voice(snd_emux_voice_t *vp, int update);
+static void reset_voice(snd_emux_t *emu, int ch);
+static void terminate_voice(snd_emux_voice_t *vp);
+static void sysex(snd_emux_t *emu, char *buf, int len, int parsed, snd_midi_channel_set_t *chset);
 #ifdef CONFIG_SND_SEQUENCER_OSS
-static int oss_ioctl(struct snd_emux *emu, int cmd, int p1, int p2);
+static int oss_ioctl(snd_emux_t *emu, int cmd, int p1, int p2);
 #endif
-static int load_fx(struct snd_emux *emu, int type, int mode,
-		   const void __user *buf, long len);
+static int load_fx(snd_emux_t *emu, int type, int mode, const void *buf, long len);
 
-static void set_pitch(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void set_volume(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void set_pan(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void set_fmmod(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void set_tremfreq(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void set_fm2frq2(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void set_filterQ(struct snd_emu8000 *hw, struct snd_emux_voice *vp);
-static void snd_emu8000_tweak_voice(struct snd_emu8000 *emu, int ch);
+static void set_pitch(emu8000_t *hw, snd_emux_voice_t *vp);
+static void set_volume(emu8000_t *hw, snd_emux_voice_t *vp);
+static void set_pan(emu8000_t *hw, snd_emux_voice_t *vp);
+static void set_fmmod(emu8000_t *hw, snd_emux_voice_t *vp);
+static void set_tremfreq(emu8000_t *hw, snd_emux_voice_t *vp);
+static void set_fm2frq2(emu8000_t *hw, snd_emux_voice_t *vp);
+static void set_filterQ(emu8000_t *hw, snd_emux_voice_t *vp);
+static void snd_emu8000_tweak_voice(emu8000_t *emu, int ch);
 
 /*
  * Ensure a value is between two points
@@ -61,7 +58,7 @@ static void snd_emu8000_tweak_voice(struct snd_emu8000 *emu, int ch);
 /*
  * set up operators
  */
-static struct snd_emux_operators emu8000_ops = {
+static snd_emux_operators_t emu8000_ops = {
 	.owner =	THIS_MODULE,
 	.get_voice =	get_voice,
 	.prepare =	start_voice,
@@ -81,7 +78,7 @@ static struct snd_emux_operators emu8000_ops = {
 };
 
 void
-snd_emu8000_ops_setup(struct snd_emu8000 *hw)
+snd_emu8000_ops_setup(emu8000_t *hw)
 {
 	hw->emu->ops = emu8000_ops;
 }
@@ -92,12 +89,12 @@ snd_emu8000_ops_setup(struct snd_emu8000 *hw)
  * Terminate a voice
  */
 static void
-release_voice(struct snd_emux_voice *vp)
+release_voice(snd_emux_voice_t *vp)
 {
 	int dcysusv;
-	struct snd_emu8000 *hw;
+	emu8000_t *hw;
 
-	hw = vp->hw;
+	hw = snd_magic_cast(emu8000_t, vp->hw, return);
 	dcysusv = 0x8000 | (unsigned char)vp->reg.parm.modrelease;
 	EMU8000_DCYSUS_WRITE(hw, vp->ch, dcysusv);
 	dcysusv = 0x8000 | (unsigned char)vp->reg.parm.volrelease;
@@ -108,11 +105,11 @@ release_voice(struct snd_emux_voice *vp)
 /*
  */
 static void
-terminate_voice(struct snd_emux_voice *vp)
+terminate_voice(snd_emux_voice_t *vp)
 {
-	struct snd_emu8000 *hw; 
+	emu8000_t *hw; 
 
-	hw = vp->hw;
+	hw = snd_magic_cast(emu8000_t, vp->hw, return);
 	EMU8000_DCYSUSV_WRITE(hw, vp->ch, 0x807F);
 }
 
@@ -120,11 +117,11 @@ terminate_voice(struct snd_emux_voice *vp)
 /*
  */
 static void
-update_voice(struct snd_emux_voice *vp, int update)
+update_voice(snd_emux_voice_t *vp, int update)
 {
-	struct snd_emu8000 *hw;
+	emu8000_t *hw;
 
-	hw = vp->hw;
+	hw = snd_magic_cast(emu8000_t, vp->hw, return);
 	if (update & SNDRV_EMUX_UPDATE_VOLUME)
 		set_volume(hw, vp);
 	if (update & SNDRV_EMUX_UPDATE_PITCH)
@@ -152,12 +149,12 @@ update_voice(struct snd_emux_voice *vp, int update)
  * The channel index (vp->ch) must be initialized in this routine.
  * In Emu8k, it is identical with the array index.
  */
-static struct snd_emux_voice *
-get_voice(struct snd_emux *emu, struct snd_emux_port *port)
+static snd_emux_voice_t *
+get_voice(snd_emux_t *emu, snd_emux_port_t *port)
 {
 	int  i;
-	struct snd_emux_voice *vp;
-	struct snd_emu8000 *hw;
+	snd_emux_voice_t *vp;
+	emu8000_t *hw;
 
 	/* what we are looking for, in order of preference */
 	enum {
@@ -171,7 +168,7 @@ get_voice(struct snd_emux *emu, struct snd_emux_port *port)
 	} best[END];
 	struct best *bp;
 
-	hw = emu->hw;
+	hw = snd_magic_cast(emu8000_t, emu->hw, return NULL);
 
 	for (i = 0; i < END; i++) {
 		best[i].time = (unsigned int)(-1); /* XXX MAX_?INT really */;
@@ -230,15 +227,15 @@ get_voice(struct snd_emux *emu, struct snd_emux_port *port)
 /*
  */
 static int
-start_voice(struct snd_emux_voice *vp)
+start_voice(snd_emux_voice_t *vp)
 {
 	unsigned int temp;
 	int ch;
 	int addr;
-	struct snd_midi_channel *chan;
-	struct snd_emu8000 *hw;
+	snd_midi_channel_t *chan;
+	emu8000_t *hw;
 
-	hw = vp->hw;
+	hw = snd_magic_cast(emu8000_t, vp->hw, return -EINVAL);
 	ch = vp->ch;
 	chan = vp->chan;
 
@@ -310,13 +307,13 @@ start_voice(struct snd_emux_voice *vp)
  * Start envelope
  */
 static void
-trigger_voice(struct snd_emux_voice *vp)
+trigger_voice(snd_emux_voice_t *vp)
 {
 	int ch = vp->ch;
 	unsigned int temp;
-	struct snd_emu8000 *hw;
+	emu8000_t *hw;
 
-	hw = vp->hw;
+	hw = snd_magic_cast(emu8000_t, vp->hw, return);
 
 	/* set reverb and pitch target */
 	temp = vp->reg.parm.reverb;
@@ -332,11 +329,11 @@ trigger_voice(struct snd_emux_voice *vp)
  * reset voice parameters
  */
 static void
-reset_voice(struct snd_emux *emu, int ch)
+reset_voice(snd_emux_t *emu, int ch)
 {
-	struct snd_emu8000 *hw;
+	emu8000_t *hw;
 
-	hw = emu->hw;
+	hw = snd_magic_cast(emu8000_t, emu->hw, return);
 	EMU8000_DCYSUSV_WRITE(hw, ch, 0x807F);
 	snd_emu8000_tweak_voice(hw, ch);
 }
@@ -345,7 +342,7 @@ reset_voice(struct snd_emux *emu, int ch)
  * Set the pitch of a possibly playing note.
  */
 static void
-set_pitch(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_pitch(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	EMU8000_IP_WRITE(hw, vp->ch, vp->apitch);
 }
@@ -354,7 +351,7 @@ set_pitch(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
  * Set the volume of a possibly already playing note
  */
 static void
-set_volume(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_volume(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	int  ifatn;
 
@@ -368,7 +365,7 @@ set_volume(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
  * Set pan and loop start address.
  */
 static void
-set_pan(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_pan(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	unsigned int temp;
 
@@ -379,7 +376,7 @@ set_pan(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
 #define MOD_SENSE 18
 
 static void
-set_fmmod(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_fmmod(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	unsigned short fmmod;
 	short pitch;
@@ -397,14 +394,14 @@ set_fmmod(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
 
 /* set tremolo (lfo1) volume & frequency */
 static void
-set_tremfreq(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_tremfreq(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	EMU8000_TREMFRQ_WRITE(hw, vp->ch, vp->reg.parm.tremfrq);
 }
 
 /* set lfo2 pitch & frequency */
 static void
-set_fm2frq2(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_fm2frq2(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	unsigned short fm2frq2;
 	short pitch;
@@ -422,7 +419,7 @@ set_fm2frq2(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
 
 /* set filterQ */
 static void
-set_filterQ(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
+set_filterQ(emu8000_t *hw, snd_emux_voice_t *vp)
 {
 	unsigned int addr;
 	addr = EMU8000_CCCA_READ(hw, vp->ch) & 0xffffff;
@@ -434,7 +431,7 @@ set_filterQ(struct snd_emu8000 *hw, struct snd_emux_voice *vp)
  * set the envelope & LFO parameters to the default values
  */
 static void
-snd_emu8000_tweak_voice(struct snd_emu8000 *emu, int i)
+snd_emu8000_tweak_voice(emu8000_t *emu, int i)
 {
 	/* set all mod/vol envelope shape to minimum */
 	EMU8000_ENVVOL_WRITE(emu, i, 0x8000);
@@ -456,11 +453,11 @@ snd_emu8000_tweak_voice(struct snd_emu8000 *emu, int i)
  * sysex callback
  */
 static void
-sysex(struct snd_emux *emu, char *buf, int len, int parsed, struct snd_midi_channel_set *chset)
+sysex(snd_emux_t *emu, char *buf, int len, int parsed, snd_midi_channel_set_t *chset)
 {
-	struct snd_emu8000 *hw;
+	emu8000_t *hw;
 
-	hw = emu->hw;
+	hw = snd_magic_cast(emu8000_t, emu->hw, return);
 
 	switch (parsed) {
 	case SNDRV_MIDI_SYSEX_GS_CHORUS_MODE:
@@ -481,11 +478,11 @@ sysex(struct snd_emux *emu, char *buf, int len, int parsed, struct snd_midi_chan
  * OSS ioctl callback
  */
 static int
-oss_ioctl(struct snd_emux *emu, int cmd, int p1, int p2)
+oss_ioctl(snd_emux_t *emu, int cmd, int p1, int p2)
 {
-	struct snd_emu8000 *hw;
+	emu8000_t *hw;
 
-	hw = emu->hw;
+	hw = snd_magic_cast(emu8000_t, emu->hw, return -EINVAL);
 
 	switch (cmd) {
 	case _EMUX_OSS_REVERB_MODE:
@@ -526,14 +523,10 @@ oss_ioctl(struct snd_emux *emu, int cmd, int p1, int p2)
  */
 
 static int
-load_fx(struct snd_emux *emu, int type, int mode, const void __user *buf, long len)
+load_fx(snd_emux_t *emu, int type, int mode, const void *buf, long len)
 {
-	struct snd_emu8000 *hw;
-	hw = emu->hw;
-
-	/* skip header */
-	buf += 16;
-	len -= 16;
+	emu8000_t *hw;
+	hw = snd_magic_cast(emu8000_t, emu->hw, return -EINVAL);
 
 	switch (type) {
 	case SNDRV_EMU8000_LOAD_CHORUS_FX:

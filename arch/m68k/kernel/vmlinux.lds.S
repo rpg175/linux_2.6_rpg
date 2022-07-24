@@ -1,5 +1,7 @@
-#ifdef CONFIG_MMU
-#include "vmlinux.lds_mm.S"
+#include <linux/config.h>
+
+#ifdef CONFIG_SUN3
+#include "vmlinux-sun3.lds"
 #else
-#include "vmlinux.lds_no.S"
+#include "vmlinux-std.lds"
 #endif

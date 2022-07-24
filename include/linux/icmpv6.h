@@ -1,24 +1,23 @@
 #ifndef _LINUX_ICMPV6_H
 #define _LINUX_ICMPV6_H
 
-#include <linux/types.h>
 #include <asm/byteorder.h>
 
 struct icmp6hdr {
 
 	__u8		icmp6_type;
 	__u8		icmp6_code;
-	__sum16		icmp6_cksum;
+	__u16		icmp6_cksum;
 
 
 	union {
-		__be32			un_data32[1];
-		__be16			un_data16[2];
+		__u32			un_data32[1];
+		__u16			un_data16[2];
 		__u8			un_data8[4];
 
 		struct icmpv6_echo {
-			__be16		identifier;
-			__be16		sequence;
+			__u16		identifier;
+			__u16		sequence;
 		} u_echo;
 
                 struct icmpv6_nd_advt {
@@ -41,22 +40,18 @@ struct icmp6hdr {
                 struct icmpv6_nd_ra {
 			__u8		hop_limit;
 #if defined(__LITTLE_ENDIAN_BITFIELD)
-			__u8		reserved:3,
-					router_pref:2,
-					home_agent:1,
+			__u8		reserved:6,
 					other:1,
 					managed:1;
 
 #elif defined(__BIG_ENDIAN_BITFIELD)
 			__u8		managed:1,
 					other:1,
-					home_agent:1,
-					router_pref:2,
-					reserved:3;
+					reserved:6;
 #else
 #error	"Please fix <asm/byteorder.h>"
 #endif
-			__be16		rt_lifetime;
+			__u16		rt_lifetime;
                 } u_nd_ra;
 
 	} icmp6_dataun;
@@ -75,22 +70,8 @@ struct icmp6hdr {
 #define icmp6_addrconf_managed	icmp6_dataun.u_nd_ra.managed
 #define icmp6_addrconf_other	icmp6_dataun.u_nd_ra.other
 #define icmp6_rt_lifetime	icmp6_dataun.u_nd_ra.rt_lifetime
-#define icmp6_router_pref	icmp6_dataun.u_nd_ra.router_pref
 };
 
-#ifdef __KERNEL__
-#include <linux/skbuff.h>
-
-static inline struct icmp6hdr *icmp6_hdr(const struct sk_buff *skb)
-{
-	return (struct icmp6hdr *)skb_transport_header(skb);
-}
-#endif
-
-#define ICMPV6_ROUTER_PREF_LOW		0x3
-#define ICMPV6_ROUTER_PREF_MEDIUM	0x0
-#define ICMPV6_ROUTER_PREF_HIGH		0x1
-#define ICMPV6_ROUTER_PREF_INVALID	0x2
 
 #define ICMPV6_DEST_UNREACH		1
 #define ICMPV6_PKT_TOOBIG		2
@@ -105,15 +86,18 @@ static inline struct icmp6hdr *icmp6_hdr(const struct sk_buff *skb)
 #define ICMPV6_MGM_REPORT       	131
 #define ICMPV6_MGM_REDUCTION    	132
 
-#define ICMPV6_NI_QUERY			139
-#define ICMPV6_NI_REPLY			140
+/* definitions for MLDv2 */
 
-#define ICMPV6_MLD2_REPORT		143
+#define MLD2_MODE_IS_INCLUDE	1
+#define MLD2_MODE_IS_EXCLUDE	2
+#define MLD2_CHANGE_TO_INCLUDE	3
+#define MLD2_CHANGE_TO_EXCLUDE	4
+#define MLD2_ALLOW_NEW_SOURCES	5
+#define MLD2_BLOCK_OLD_SOURCES	6
 
-#define ICMPV6_DHAAD_REQUEST		144
-#define ICMPV6_DHAAD_REPLY		145
-#define ICMPV6_MOBILE_PREFIX_SOL	146
-#define ICMPV6_MOBILE_PREFIX_ADV	147
+/* this must be an IANA-assigned value; 206 for testing only */
+#define ICMPV6_MLD2_REPORT		206
+#define MLD2_ALL_MCR_INIT { { { 0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x16 } } }
 
 /*
  *	Codes for Destination Unreachable
@@ -156,41 +140,23 @@ struct icmp6_filter {
 	__u32		data[8];
 };
 
-/*
- *	Definitions for MLDv2
- */
-#define MLD2_MODE_IS_INCLUDE	1
-#define MLD2_MODE_IS_EXCLUDE	2
-#define MLD2_CHANGE_TO_INCLUDE	3
-#define MLD2_CHANGE_TO_EXCLUDE	4
-#define MLD2_ALLOW_NEW_SOURCES	5
-#define MLD2_BLOCK_OLD_SOURCES	6
-
-#define MLD2_ALL_MCR_INIT { { { 0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x16 } } }
-
 #ifdef __KERNEL__
 
 #include <linux/netdevice.h>
+#include <linux/skbuff.h>
+
 
 extern void				icmpv6_send(struct sk_buff *skb,
-						    u8 type, u8 code,
-						    __u32 info);
+						    int type, int code,
+						    __u32 info, 
+						    struct net_device *dev);
 
-extern int				icmpv6_init(void);
-extern int				icmpv6_err_convert(u8 type, u8 code,
+extern int				icmpv6_init(struct net_proto_family *ops);
+extern int				icmpv6_err_convert(int type, int code,
 							   int *err);
 extern void				icmpv6_cleanup(void);
 extern void				icmpv6_param_prob(struct sk_buff *skb,
-							  u8 code, int pos);
-
-struct flowi6;
-struct in6_addr;
-extern void				icmpv6_flow_init(struct sock *sk,
-							 struct flowi6 *fl6,
-							 u8 type,
-							 const struct in6_addr *saddr,
-							 const struct in6_addr *daddr,
-							 int oif);
+							  int code, int pos);
 #endif
 
 #endif

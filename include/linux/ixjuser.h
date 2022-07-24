@@ -42,6 +42,8 @@
  *
  *****************************************************************************/
 
+static char ixjuser_h_rcsid[] = "$Id: ixjuser.h,v 4.1 2001/08/05 00:17:37 craigs Exp $";
+
 #include <linux/telephony.h>
 
 
@@ -50,7 +52,7 @@
 * IOCTL's used for the Quicknet Telephony Cards
 *
 * If you use the IXJCTL_TESTRAM command, the card must be power cycled to
-* reset the SRAM values before further use.
+* reset the SRAM values before futher use.
 *
 ******************************************************************************/
 
@@ -315,7 +317,7 @@ typedef struct {
 * structures.  If the freq0 variable is non-zero, the tone table contents
 * for the tone_index are updated to the frequencies and gains defined.  It
 * should be noted that DTMF tones cannot be reassigned, so if DTMF tone
-* table indexes are used in a cadence the frequency and gain variables will
+* table indexs are used in a cadence the frequency and gain variables will
 * be ignored.
 *
 * If the array elements contain frequency parameters the driver will
@@ -348,7 +350,7 @@ typedef enum {
 typedef struct {
 	int elements_used;
 	IXJ_CADENCE_TERM termination;
-	IXJ_CADENCE_ELEMENT __user *ce;
+	IXJ_CADENCE_ELEMENT *ce;
 } IXJ_CADENCE;
 
 #define IXJCTL_TONE_CADENCE		_IOW ('q', 0xCA, IXJ_CADENCE *)

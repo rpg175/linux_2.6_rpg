@@ -3,14 +3,11 @@
  *
  * Author : Stephen Smalley, <sds@epoch.ncsc.mil>
  */
-#include <linux/kernel.h>
-#include <linux/string.h>
-#include <linux/errno.h>
 #include "symtab.h"
 
-static unsigned int symhash(struct hashtab *h, const void *key)
+static unsigned int symhash(struct hashtab *h, void *key)
 {
-	const char *p, *keyp;
+	char *p, *keyp;
 	unsigned int size;
 	unsigned int val;
 
@@ -22,9 +19,9 @@ static unsigned int symhash(struct hashtab *h, const void *key)
 	return val & (h->size - 1);
 }
 
-static int symcmp(struct hashtab *h, const void *key1, const void *key2)
+static int symcmp(struct hashtab *h, void *key1, void *key2)
 {
-	const char *keyp1, *keyp2;
+	char *keyp1, *keyp2;
 
 	keyp1 = key1;
 	keyp2 = key2;
@@ -36,7 +33,7 @@ int symtab_init(struct symtab *s, unsigned int size)
 {
 	s->table = hashtab_create(symhash, symcmp, size);
 	if (!s->table)
-		return -ENOMEM;
+		return -1;
 	s->nprim = 0;
 	return 0;
 }

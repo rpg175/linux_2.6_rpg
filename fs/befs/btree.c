@@ -5,7 +5,7 @@
  *
  * Licensed under the GNU GPL. See the file COPYING for details.
  *
- * 2002-02-05: Sergey S. Kostyliov added binary search within
+ * 2002-02-05: Sergey S. Kostyliov added binary search withing
  * 		btree nodes.
  *
  * Many thanks to:
@@ -30,6 +30,7 @@
 #include "befs.h"
 #include "btree.h"
 #include "datastream.h"
+#include "endian.h"
 
 /*
  * The btree functions in this file are built on top of the
@@ -79,7 +80,7 @@
  * In memory structure of each btree node
  */
 typedef struct {
-	befs_host_btree_nodehead head;	/* head of node converted to cpu byteorder */
+	befs_btree_nodehead head;	/* head of node converted to cpu byteorder */
 	struct buffer_head *bh;
 	befs_btree_nodehead *od_node;	/* on disk node */
 } befs_btree_node;
@@ -101,9 +102,9 @@ static int befs_bt_read_node(struct super_block *sb, befs_data_stream * ds,
 
 static int befs_leafnode(befs_btree_node * node);
 
-static fs16 *befs_bt_keylen_index(befs_btree_node * node);
+static u16 *befs_bt_keylen_index(befs_btree_node * node);
 
-static fs64 *befs_bt_valarray(befs_btree_node * node);
+static befs_off_t *befs_bt_valarray(befs_btree_node * node);
 
 static char *befs_bt_keydata(befs_btree_node * node);
 
@@ -135,7 +136,7 @@ befs_bt_read_super(struct super_block *sb, befs_data_stream * ds,
 		   befs_btree_super * sup)
 {
 	struct buffer_head *bh = NULL;
-	befs_disk_btree_super *od_sup = NULL;
+	befs_btree_super *od_sup = NULL;
 
 	befs_debug(sb, "---> befs_btree_read_super()");
 
@@ -145,7 +146,7 @@ befs_bt_read_super(struct super_block *sb, befs_data_stream * ds,
 		befs_error(sb, "Couldn't read index header.");
 		goto error;
 	}
-	od_sup = (befs_disk_btree_super *) bh->b_data;
+	od_sup = (befs_btree_super *) bh->b_data;
 	befs_dump_index_entry(sb, od_sup);
 
 	sup->magic = fs32_to_cpu(sb, od_sup->magic);
@@ -232,7 +233,7 @@ befs_bt_read_node(struct super_block *sb, befs_data_stream * ds,
  * @key: Key string to lookup in btree
  * @value: Value stored with @key
  *
- * On success, returns BEFS_OK and sets *@value to the value stored
+ * On sucess, returns BEFS_OK and sets *@value to the value stored
  * with @key (usually the disk block number of an inode).
  *
  * On failure, returns BEFS_ERR or BEFS_BT_NOT_FOUND.
@@ -260,7 +261,7 @@ befs_btree_find(struct super_block *sb, befs_data_stream * ds,
 		goto error;
 	}
 
-	this_node = kmalloc(sizeof (befs_btree_node),
+	this_node = (befs_btree_node *) kmalloc(sizeof (befs_btree_node),
 						GFP_NOFS);
 	if (!this_node) {
 		befs_error(sb, "befs_btree_find() failed to allocate %u "
@@ -341,7 +342,7 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
 	u16 keylen;
 	int findkey_len;
 	char *thiskey;
-	fs64 *valarray;
+	befs_off_t *valarray;
 
 	befs_debug(sb, "---> befs_find_key() %s", findkey);
 
@@ -371,12 +372,12 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
 		thiskey = befs_bt_get_key(sb, node, mid, &keylen);
 		eq = befs_compare_strings(thiskey, keylen, findkey,
 					  findkey_len);
+		*value = fs64_to_cpu(sb, valarray[mid]);
 
 		if (eq == 0) {
 			befs_debug(sb, "<--- befs_find_key() found %s at %d",
 				   thiskey, mid);
 
-			*value = fs64_to_cpu(sb, valarray[mid]);
 			return BEFS_BT_MATCH;
 		}
 		if (eq > 0)
@@ -386,8 +387,6 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
 	}
 	if (eq < 0)
 		*value = fs64_to_cpu(sb, valarray[mid + 1]);
-	else
-		*value = fs64_to_cpu(sb, valarray[mid]);
 	befs_debug(sb, "<--- befs_find_key() found %s at %d", thiskey, mid);
 	return BEFS_BT_PARMATCH;
 }
@@ -421,7 +420,7 @@ befs_btree_read(struct super_block *sb, befs_data_stream * ds,
 	befs_btree_super bt_super;
 	befs_off_t node_off = 0;
 	int cur_key;
-	fs64 *valarray;
+	befs_off_t *valarray;
 	char *keystart;
 	u16 keylen;
 	int res;
@@ -571,7 +570,7 @@ befs_btree_seekleaf(struct super_block *sb, befs_data_stream * ds,
 				   this_node->head.overflow);
 			*node_off = this_node->head.overflow;
 		} else {
-			fs64 *valarray = befs_bt_valarray(this_node);
+			befs_off_t *valarray = befs_bt_valarray(this_node);
 			*node_off = fs64_to_cpu(sb, valarray[0]);
 		}
 		if (befs_bt_read_node(sb, ds, this_node, *node_off) != BEFS_OK) {
@@ -621,7 +620,7 @@ befs_leafnode(befs_btree_node * node)
  *
  * Except that rounding up to 8 works, and rounding up to 4 doesn't.
  */
-static fs16 *
+static u16 *
 befs_bt_keylen_index(befs_btree_node * node)
 {
 	const int keylen_align = 8;
@@ -632,7 +631,7 @@ befs_bt_keylen_index(befs_btree_node * node)
 	if (tmp)
 		off += keylen_align - tmp;
 
-	return (fs16 *) ((void *) node->od_node + off);
+	return (u16 *) ((void *) node->od_node + off);
 }
 
 /**
@@ -642,13 +641,13 @@ befs_bt_keylen_index(befs_btree_node * node)
  * Returns a pointer to the start of the value array
  * of the node pointed to by the node header
  */
-static fs64 *
+static befs_off_t *
 befs_bt_valarray(befs_btree_node * node)
 {
 	void *keylen_index_start = (void *) befs_bt_keylen_index(node);
-	size_t keylen_index_size = node->head.all_key_count * sizeof (fs16);
+	size_t keylen_index_size = node->head.all_key_count * sizeof (u16);
 
-	return (fs64 *) (keylen_index_start + keylen_index_size);
+	return (befs_off_t *) (keylen_index_start + keylen_index_size);
 }
 
 /**
@@ -680,7 +679,7 @@ befs_bt_get_key(struct super_block *sb, befs_btree_node * node,
 {
 	int prev_key_end;
 	char *keystart;
-	fs16 *keylen_index;
+	u16 *keylen_index;
 
 	if (index < 0 || index > node->head.all_key_count) {
 		*keylen = 0;

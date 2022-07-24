@@ -1,21 +1,18 @@
-/*
- * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+/* 
+ * Copyright (C) 2001, 2002 Jeff Dike (jdike@karaya.com)
  * Licensed under the GPL
  */
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <string.h>
 #include <termios.h>
-#include <sys/stat.h>
 #include "chan_user.h"
-#include "kern_constants.h"
-#include "os.h"
-#include "um_malloc.h"
 #include "user.h"
+#include "user_util.h"
+#include "kern_util.h"
 
 struct pty_chan {
 	void (*announce)(char *dev_name, int dev);
@@ -25,143 +22,127 @@ struct pty_chan {
 	char dev_name[sizeof("/dev/pts/0123456\0")];
 };
 
-static void *pty_chan_init(char *str, int device, const struct chan_opts *opts)
+void *pty_chan_init(char *str, int device, struct chan_opts *opts)
 {
 	struct pty_chan *data;
 
-	data = uml_kmalloc(sizeof(*data), UM_GFP_KERNEL);
-	if (data == NULL)
-		return NULL;
-
-	*data = ((struct pty_chan) { .announce  	= opts->announce,
+	if((data = um_kmalloc(sizeof(*data))) == NULL) return(NULL);
+	*data = ((struct pty_chan) { .announce  	= opts->announce, 
 				     .dev  		= device,
 				     .raw  		= opts->raw });
-	return data;
+	return(data);
 }
 
-static int pts_open(int input, int output, int primary, void *d,
-		    char **dev_out)
+int pts_open(int input, int output, int primary, void *d, char **dev_out)
 {
 	struct pty_chan *data = d;
 	char *dev;
-	int fd, err;
+	int fd;
 
-	fd = get_pty();
-	if (fd < 0) {
-		err = -errno;
-		printk(UM_KERN_ERR "open_pts : Failed to open pts\n");
-		return err;
+	if((fd = get_pty()) < 0){
+		printk("open_pts : Failed to open pts\n");
+		return(-errno);
 	}
-
-	if (data->raw) {
-		CATCH_EINTR(err = tcgetattr(fd, &data->tt));
-		if (err)
-			goto out_close;
-
-		err = raw(fd);
-		if (err)
-			goto out_close;
+	if(data->raw){
+		tcgetattr(fd, &data->tt);
+		raw(fd, 0);
 	}
 
 	dev = ptsname(fd);
 	sprintf(data->dev_name, "%s", dev);
 	*dev_out = data->dev_name;
-
-	if (data->announce)
-		(*data->announce)(dev, data->dev);
-
-	return fd;
-
-out_close:
-	close(fd);
-	return err;
+	if(data->announce) (*data->announce)(dev, data->dev);
+	return(fd);
 }
 
-static int getmaster(char *line)
+int getmaster(char *line)
 {
-	struct stat buf;
+	struct stat stb;
 	char *pty, *bank, *cp;
-	int master, err;
+	int master;
 
 	pty = &line[strlen("/dev/ptyp")];
 	for (bank = "pqrs"; *bank; bank++) {
 		line[strlen("/dev/pty")] = *bank;
 		*pty = '0';
-		/* Did we hit the end ? */
-		if ((stat(line, &buf) < 0) && (errno == ENOENT))
+		if (stat(line, &stb) < 0)
 			break;
-
 		for (cp = "0123456789abcdef"; *cp; cp++) {
 			*pty = *cp;
 			master = open(line, O_RDWR);
 			if (master >= 0) {
 				char *tp = &line[strlen("/dev/")];
+				int ok;
 
 				/* verify slave side is usable */
 				*tp = 't';
-				err = access(line, R_OK | W_OK);
+				ok = access(line, R_OK|W_OK) == 0;
 				*tp = 'p';
-				if (!err)
-					return master;
-				close(master);
+				if (ok) return(master);
+				(void) close(master);
 			}
 		}
 	}
-
-	printk(UM_KERN_ERR "getmaster - no usable host pty devices\n");
-	return -ENOENT;
+	return(-1);
 }
 
-static int pty_open(int input, int output, int primary, void *d,
-		    char **dev_out)
+int pty_open(int input, int output, int primary, void *d, char **dev_out)
 {
 	struct pty_chan *data = d;
-	int fd, err;
+	int fd;
 	char dev[sizeof("/dev/ptyxx\0")] = "/dev/ptyxx";
 
 	fd = getmaster(dev);
-	if (fd < 0)
-		return fd;
-
-	if (data->raw) {
-		err = raw(fd);
-		if (err) {
-			close(fd);
-			return err;
-		}
-	}
-
-	if (data->announce)
-		(*data->announce)(dev, data->dev);
+	if(fd < 0) return(-errno);
+	
+	if(data->raw) raw(fd, 0);
+	if(data->announce) (*data->announce)(dev, data->dev);
 
 	sprintf(data->dev_name, "%s", dev);
 	*dev_out = data->dev_name;
-
-	return fd;
+	return(fd);
 }
 
-const struct chan_ops pty_ops = {
+int pty_console_write(int fd, const char *buf, int n, void *d)
+{
+	struct pty_chan *data = d;
+
+	return(generic_console_write(fd, buf, n, &data->tt));
+}
+
+struct chan_ops pty_ops = {
 	.type		= "pty",
 	.init		= pty_chan_init,
 	.open		= pty_open,
 	.close		= generic_close,
 	.read		= generic_read,
 	.write		= generic_write,
-	.console_write	= generic_console_write,
+	.console_write	= pty_console_write,
 	.window_size	= generic_window_size,
 	.free		= generic_free,
 	.winch		= 0,
 };
 
-const struct chan_ops pts_ops = {
+struct chan_ops pts_ops = {
 	.type		= "pts",
 	.init		= pty_chan_init,
 	.open		= pts_open,
 	.close		= generic_close,
 	.read		= generic_read,
 	.write		= generic_write,
-	.console_write	= generic_console_write,
+	.console_write	= pty_console_write,
 	.window_size	= generic_window_size,
 	.free		= generic_free,
 	.winch		= 0,
 };
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-file-style: "linux"
+ * End:
+ */

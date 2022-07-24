@@ -9,18 +9,20 @@
  * Code common to all T2 core logic chips.
  */
 
-#define __EXTERN_INLINE
-#include <asm/io.h>
-#include <asm/core_t2.h>
-#undef __EXTERN_INLINE
-
+#include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
+#include <asm/system.h>
 #include <asm/delay.h>
+
+#define __EXTERN_INLINE
+#include <asm/io.h>
+#include <asm/core_t2.h>
+#undef __EXTERN_INLINE
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -336,7 +338,10 @@ t2_direct_map_window1(unsigned long base, unsigned long length)
 
 #if DEBUG_PRINT_FINAL_SETTINGS
 	printk("%s: setting WBASE1=0x%lx WMASK1=0x%lx TBASE1=0x%lx\n",
-	       __func__, *(vulp)T2_WBASE1, *(vulp)T2_WMASK1, *(vulp)T2_TBASE1);
+	       __FUNCTION__,
+	       *(vulp)T2_WBASE1,
+	       *(vulp)T2_WMASK1,
+	       *(vulp)T2_TBASE1);
 #endif
 }
 
@@ -363,7 +368,10 @@ t2_sg_map_window2(struct pci_controller *hose,
 
 #if DEBUG_PRINT_FINAL_SETTINGS
 	printk("%s: setting WBASE2=0x%lx WMASK2=0x%lx TBASE2=0x%lx\n",
-	       __func__, *(vulp)T2_WBASE2, *(vulp)T2_WMASK2, *(vulp)T2_TBASE2);
+	       __FUNCTION__,
+	       *(vulp)T2_WBASE2,
+	       *(vulp)T2_WMASK2,
+	       *(vulp)T2_TBASE2);
 #endif
 }
 
@@ -371,15 +379,15 @@ static void __init
 t2_save_configuration(void)
 {
 #if DEBUG_PRINT_INITIAL_SETTINGS
-	printk("%s: HAE_1 was 0x%lx\n", __func__, srm_hae); /* HW is 0 */
-	printk("%s: HAE_2 was 0x%lx\n", __func__, *(vulp)T2_HAE_2);
-	printk("%s: HAE_3 was 0x%lx\n", __func__, *(vulp)T2_HAE_3);
-	printk("%s: HAE_4 was 0x%lx\n", __func__, *(vulp)T2_HAE_4);
-	printk("%s: HBASE was 0x%lx\n", __func__, *(vulp)T2_HBASE);
+	printk("%s: HAE_1 was 0x%lx\n", __FUNCTION__, srm_hae); /* HW is 0 */
+	printk("%s: HAE_2 was 0x%lx\n", __FUNCTION__, *(vulp)T2_HAE_2);
+	printk("%s: HAE_3 was 0x%lx\n", __FUNCTION__, *(vulp)T2_HAE_3);
+	printk("%s: HAE_4 was 0x%lx\n", __FUNCTION__, *(vulp)T2_HAE_4);
+	printk("%s: HBASE was 0x%lx\n", __FUNCTION__, *(vulp)T2_HBASE);
 
-	printk("%s: WBASE1=0x%lx WMASK1=0x%lx TBASE1=0x%lx\n", __func__,
+	printk("%s: WBASE1=0x%lx WMASK1=0x%lx TBASE1=0x%lx\n", __FUNCTION__, 
 	       *(vulp)T2_WBASE1, *(vulp)T2_WMASK1, *(vulp)T2_TBASE1);
-	printk("%s: WBASE2=0x%lx WMASK2=0x%lx TBASE2=0x%lx\n", __func__,
+	printk("%s: WBASE2=0x%lx WMASK2=0x%lx TBASE2=0x%lx\n", __FUNCTION__, 
 	       *(vulp)T2_WBASE2, *(vulp)T2_WMASK2, *(vulp)T2_TBASE2);
 #endif
 
@@ -404,7 +412,6 @@ void __init
 t2_init_arch(void)
 {
 	struct pci_controller *hose;
-	struct resource *hae_mem;
 	unsigned long temp;
 	unsigned int i;
 
@@ -432,13 +439,7 @@ t2_init_arch(void)
 	 */
 	pci_isa_hose = hose = alloc_pci_controller();
 	hose->io_space = &ioport_resource;
-	hae_mem = alloc_resource();
-	hae_mem->start = 0;
-	hae_mem->end = T2_MEM_R1_MASK;
-	hae_mem->name = pci_hae0_name;
-	if (request_resource(&iomem_resource, hae_mem) < 0)
-		printk(KERN_ERR "Failed to request HAE_MEM\n");
-	hose->mem_space = hae_mem;
+	hose->mem_space = &iomem_resource;
 	hose->index = 0;
 
 	hose->sparse_mem_base = T2_SPARSE_MEM - IDENT_ADDR;
@@ -552,7 +553,8 @@ t2_clear_errors(int cpu)
  * Hence all the taken/expected/any_expected/last_taken stuff...
  */
 void
-t2_machine_check(unsigned long vector, unsigned long la_ptr)
+t2_machine_check(unsigned long vector, unsigned long la_ptr,
+		 struct pt_regs * regs)
 {
 	int cpu = smp_processor_id();
 #ifdef CONFIG_VERBOSE_MCHECK
@@ -618,5 +620,5 @@ t2_machine_check(unsigned long vector, unsigned long la_ptr)
 	}
 #endif
 
-	process_mcheck_info(vector, la_ptr, "T2", mcheck_expected(cpu));
+	process_mcheck_info(vector, la_ptr, regs, "T2", mcheck_expected(cpu));
 }

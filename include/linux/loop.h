@@ -17,7 +17,6 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/spinlock.h>
-#include <linux/mutex.h>
 
 /* Possible states of device */
 enum {
@@ -35,9 +34,8 @@ struct loop_device {
 	loff_t		lo_sizelimit;
 	int		lo_flags;
 	int		(*transfer)(struct loop_device *, int cmd,
-				    struct page *raw_page, unsigned raw_off,
-				    struct page *loop_page, unsigned loop_off,
-				    int size, sector_t real_block);
+				    char *raw_buf, char *loop_buf, int size,
+				    sector_t real_block);
 	char		lo_file_name[LO_NAME_SIZE];
 	char		lo_crypt_name[LO_NAME_SIZE];
 	char		lo_encrypt_key[LO_KEY_SIZE];
@@ -53,18 +51,18 @@ struct loop_device {
 	unsigned	lo_blocksize;
 	void		*key_data; 
 
-	gfp_t		old_gfp_mask;
+	int		old_gfp_mask;
 
 	spinlock_t		lo_lock;
-	struct bio_list		lo_bio_list;
+	struct bio 		*lo_bio;
+	struct bio		*lo_biotail;
 	int			lo_state;
-	struct mutex		lo_ctl_mutex;
-	struct task_struct	*lo_thread;
-	wait_queue_head_t	lo_event;
+	struct semaphore	lo_sem;
+	struct semaphore	lo_ctl_mutex;
+	struct semaphore	lo_bh_mutex;
+	atomic_t		lo_pending;
 
-	struct request_queue	*lo_queue;
-	struct gendisk		*lo_disk;
-	struct list_head	lo_list;
+	request_queue_t		*lo_queue;
 };
 
 #endif /* __KERNEL__ */
@@ -72,14 +70,11 @@ struct loop_device {
 /*
  * Loop flags
  */
-enum {
-	LO_FLAGS_READ_ONLY	= 1,
-	LO_FLAGS_USE_AOPS	= 2,
-	LO_FLAGS_AUTOCLEAR	= 4,
-};
+#define LO_FLAGS_DO_BMAP	1
+#define LO_FLAGS_READ_ONLY	2
 
 #include <asm/posix_types.h>	/* for __kernel_old_dev_t */
-#include <linux/types.h>	/* for __u64 */
+#include <asm/types.h>		/* for __u64 */
 
 /* Backwards compatibility version */
 struct loop_info {
@@ -133,10 +128,8 @@ struct loop_info64 {
 /* Support for loadable transfer modules */
 struct loop_func_table {
 	int number;	/* filter type */ 
-	int (*transfer)(struct loop_device *lo, int cmd,
-			struct page *raw_page, unsigned raw_off,
-			struct page *loop_page, unsigned loop_off,
-			int size, sector_t real_block);
+	int (*transfer)(struct loop_device *lo, int cmd, char *raw_buf,
+			char *loop_buf, int size, sector_t real_block);
 	int (*init)(struct loop_device *, const struct loop_info64 *); 
 	/* release is called from loop_unregister_transfer or clr_fd */
 	int (*release)(struct loop_device *); 
@@ -158,7 +151,5 @@ int loop_unregister_transfer(int number);
 #define LOOP_GET_STATUS		0x4C03
 #define LOOP_SET_STATUS64	0x4C04
 #define LOOP_GET_STATUS64	0x4C05
-#define LOOP_CHANGE_FD		0x4C06
-#define LOOP_SET_CAPACITY	0x4C07
 
 #endif

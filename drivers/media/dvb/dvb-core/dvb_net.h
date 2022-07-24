@@ -1,4 +1,4 @@
-/*
+/* 
  * dvb_net.h
  *
  * Copyright (C) 2001 Ralph Metzler for convergence integrated media GmbH
@@ -36,7 +36,6 @@ struct dvb_net {
 	struct dvb_device *dvbdev;
 	struct net_device *device[DVB_NET_DEVICES_MAX];
 	int state[DVB_NET_DEVICES_MAX];
-	unsigned int exit:1;
 	struct dmx_demux *demux;
 };
 
@@ -45,3 +44,4 @@ void dvb_net_release(struct dvb_net *);
 int  dvb_net_init(struct dvb_adapter *, struct dvb_net *, struct dmx_demux *);
 
 #endif
+

@@ -8,23 +8,21 @@
  * for more details.
  */
 
+#include <linux/config.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/init.h>
 #include <linux/string.h>
-#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/amigahw.h>
 
-static unsigned short *snd_data;
+static unsigned short *snd_data = NULL;
 static const signed char sine_data[] = {
 	0,  39,  75,  103,  121,  127,  121,  103,  75,  39,
 	0, -39, -75, -103, -121, -127, -121, -103, -75, -39
 };
-#define DATA_SIZE	ARRAY_SIZE(sine_data)
-
-#define custom amiga_custom
+#define DATA_SIZE	(sizeof(sine_data)/sizeof(sine_data[0]))
 
     /*
      * The minimum period for audio may be modified by the frame buffer
@@ -32,7 +30,6 @@ static const signed char sine_data[] = {
      */
 
 volatile unsigned short amiga_audio_min_period = 124; /* Default for pre-OCS */
-EXPORT_SYMBOL(amiga_audio_min_period);
 
 #define MAX_PERIOD	(65535)
 
@@ -42,13 +39,12 @@ EXPORT_SYMBOL(amiga_audio_min_period);
      */
 
 unsigned short amiga_audio_period = MAX_PERIOD;
-EXPORT_SYMBOL(amiga_audio_period);
 
 static unsigned long clock_constant;
 
 void __init amiga_init_sound(void)
 {
-	static struct resource beep_res = { .name = "Beep" };
+	static struct resource beep_res = { "Beep" };
 
 	snd_data = amiga_chip_alloc_res(sizeof(sine_data), &beep_res);
 	if (!snd_data) {
@@ -67,7 +63,7 @@ void __init amiga_init_sound(void)
 }
 
 static void nosound( unsigned long ignored );
-static DEFINE_TIMER(sound_timer, nosound, 0, 0);
+static struct timer_list sound_timer = TIMER_INITIALIZER(nosound, 0, 0);
 
 void amiga_mksound( unsigned int hz, unsigned int ticks )
 {
@@ -92,7 +88,7 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		custom.aud[2].audlen = sizeof(sine_data)/2;
 		custom.aud[2].audper = (unsigned short)period;
 		custom.aud[2].audvol = 32; /* 50% of maxvol */
-
+	
 		if (ticks) {
 			sound_timer.expires = jiffies + ticks;
 			add_timer( &sound_timer );

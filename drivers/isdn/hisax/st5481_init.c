@@ -14,6 +14,7 @@
  * TODO:
  *
  * b layer1 delay?
+ * hdlc as module
  * hotplug / unregister issues
  * mod_inc/dec_use_count
  * unify parts of d/b channel usb handling
@@ -24,6 +25,8 @@
  * clean up debug
  */
 
+#include <linux/config.h>
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/usb.h>
@@ -35,16 +38,16 @@ MODULE_AUTHOR("Frode Isaksen");
 MODULE_LICENSE("GPL");
 
 static int protocol = 2;       /* EURO-ISDN Default */
-module_param(protocol, int, 0);
+MODULE_PARM(protocol, "i");
 
 static int number_of_leds = 2;       /* 2 LEDs on the adpater default */
-module_param(number_of_leds, int, 0);
+MODULE_PARM(number_of_leds, "i");
 
 #ifdef CONFIG_HISAX_DEBUG
-static int debug = 0;
-module_param(debug, int, 0);
-#endif
+static int debug = 0x1;
+MODULE_PARM(debug, "i");
 int st5481_debug;
+#endif
 
 static LIST_HEAD(adapter_list);
 
@@ -65,13 +68,14 @@ static int probe_st5481(struct usb_interface *intf,
 	int retval, i;
 
 	printk(KERN_INFO "st541: found adapter VendorId %04x, ProductId %04x, LEDs %d\n",
-	     le16_to_cpu(dev->descriptor.idVendor),
-	     le16_to_cpu(dev->descriptor.idProduct),
+	     dev->descriptor.idVendor, dev->descriptor.idProduct,
 	     number_of_leds);
 
-	adapter = kzalloc(sizeof(struct st5481_adapter), GFP_KERNEL);
+	adapter = kmalloc(sizeof(struct st5481_adapter), GFP_KERNEL);
 	if (!adapter)
 		return -ENOMEM;
+
+	memset(adapter, 0, sizeof(struct st5481_adapter));
 
 	adapter->number_of_leds = number_of_leds;
 	adapter->usb_dev = dev;
@@ -107,17 +111,12 @@ static int probe_st5481(struct usb_interface *intf,
 	for (i = 0; i < 2; i++)
 		b_if[i] = &adapter->bcs[i].b_if;
 
-	if (hisax_register(&adapter->hisax_d_if, b_if, "st5481_usb",
-			protocol) != 0)
-		goto err_b1;
-
+	hisax_register(&adapter->hisax_d_if, b_if, "st5481_usb", protocol);
 	st5481_start(adapter);
 
 	usb_set_intfdata(intf, adapter);
 	return 0;
 
- err_b1:
-	st5481_release_b(&adapter->bcs[1]);
  err_b:
 	st5481_release_b(&adapter->bcs[0]);
  err_d:
@@ -141,7 +140,7 @@ static void disconnect_st5481(struct usb_interface *intf)
 	usb_set_intfdata(intf, NULL);
 	if (!adapter)
 		return;
-	
+
 	list_del(&adapter->list);
 
 	st5481_stop(adapter);
@@ -182,6 +181,7 @@ static struct usb_device_id st5481_ids[] = {
 MODULE_DEVICE_TABLE (usb, st5481_ids);
 
 static struct usb_driver st5481_usb_driver = {
+	.owner =	THIS_MODULE,
 	.name =		"st5481_usb",
 	.probe =	probe_st5481,
 	.disconnect =	disconnect_st5481,
@@ -196,7 +196,7 @@ static int __init st5481_usb_init(void)
 	st5481_debug = debug;
 #endif
 
-	printk(KERN_INFO "hisax_st5481: ST5481 USB ISDN driver $Revision: 2.4.2.3 $\n");
+	printk(KERN_INFO "hisax_st5481: ST5481 USB ISDN driver v0.1.0\n");
 
 	retval = st5481_d_init();
 	if (retval < 0)

@@ -1,16 +1,17 @@
 #ifndef __CODA_PSDEV_H
 #define __CODA_PSDEV_H
 
-#include <linux/magic.h>
-
 #define CODA_PSDEV_MAJOR 67
 #define MAX_CODADEVS  5	   /* how many do we allow */
 
-#ifdef __KERNEL__
-#include <linux/backing-dev.h>
-#include <linux/mutex.h>
+#define CODA_SUPER_MAGIC	0x73757245
 
 struct kstatfs;
+
+struct coda_sb_info
+{
+	struct venus_comm *sbi_vcomm;
+};
 
 /* communication pending/processing queues */
 struct venus_comm {
@@ -20,15 +21,14 @@ struct venus_comm {
 	struct list_head    vc_processing;
 	int                 vc_inuse;
 	struct super_block *vc_sb;
-	struct backing_dev_info bdi;
-	struct mutex	    vc_mutex;
 };
 
 
-static inline struct venus_comm *coda_vcp(struct super_block *sb)
+static inline struct coda_sb_info *coda_sbp(struct super_block *sb)
 {
-	return (struct venus_comm *)((sb)->s_fs_info);
+    return ((struct coda_sb_info *)((sb)->s_fs_info));
 }
+
 
 /* upcalls */
 int venus_rootfid(struct super_block *sb, struct CodaFid *fidp);
@@ -38,6 +38,9 @@ int venus_setattr(struct super_block *, struct CodaFid *, struct coda_vattr *);
 int venus_lookup(struct super_block *sb, struct CodaFid *fid, 
 		 const char *name, int length, int *type, 
 		 struct CodaFid *resfid);
+int venus_store(struct super_block *sb, struct CodaFid *fid, int flags,
+		vuid_t uid);
+int venus_release(struct super_block *sb, struct CodaFid *fid, int flags);
 int venus_close(struct super_block *sb, struct CodaFid *fid, int flags,
 		vuid_t uid);
 int venus_open(struct super_block *sb, struct CodaFid *fid, int flags,
@@ -46,7 +49,7 @@ int venus_mkdir(struct super_block *sb, struct CodaFid *dirfid,
 		const char *name, int length, 
 		struct CodaFid *newfid, struct coda_vattr *attrs);
 int venus_create(struct super_block *sb, struct CodaFid *dirfid, 
-		 const char *name, int length, int excl, int mode,
+		 const char *name, int length, int excl, int mode, dev_t rdev,
 		 struct CodaFid *newfid, struct coda_vattr *attrs) ;
 int venus_rmdir(struct super_block *sb, struct CodaFid *dirfid, 
 		const char *name, int length);
@@ -65,18 +68,14 @@ int venus_symlink(struct super_block *sb, struct CodaFid *fid,
 int venus_access(struct super_block *sb, struct CodaFid *fid, int mask);
 int venus_pioctl(struct super_block *sb, struct CodaFid *fid,
 		 unsigned int cmd, struct PioctlData *data);
-int coda_downcall(struct venus_comm *vcp, int opcode, union outputArgs *out);
+int coda_downcall(int opcode, union outputArgs *out, struct super_block *sb);
 int venus_fsync(struct super_block *sb, struct CodaFid *fid);
-int venus_statfs(struct dentry *dentry, struct kstatfs *sfs);
+int venus_statfs(struct super_block *sb, struct kstatfs *sfs);
 
-/*
- * Statistics
- */
-
-extern struct venus_comm coda_comms[];
-#endif /* __KERNEL__ */
 
 /* messages between coda filesystem in kernel and Venus */
+extern int coda_hard;
+extern unsigned long coda_timeout;
 struct upc_req {
 	struct list_head    uc_chain;
 	caddr_t	            uc_data;
@@ -86,11 +85,19 @@ struct upc_req {
 	u_short	            uc_opcode;  /* copied from data to save lookup */
 	int		    uc_unique;
 	wait_queue_head_t   uc_sleep;   /* process' wait queue */
+	unsigned long       uc_posttime;
 };
 
-#define CODA_REQ_ASYNC  0x1
-#define CODA_REQ_READ   0x2
-#define CODA_REQ_WRITE  0x4
-#define CODA_REQ_ABORT  0x8
+#define REQ_ASYNC  0x1
+#define REQ_READ   0x2
+#define REQ_WRITE  0x4
+#define REQ_ABORT  0x8
+
+
+/*
+ * Statistics
+ */
+
+extern struct venus_comm coda_comms[];
 
 #endif

@@ -1,35 +1,35 @@
 /* 
- * Copyright (C) 2001 - 2007 Jeff Dike (jdike@{addtoit,linux.intel}.com)
+ * Copyright (C) 2002 Jeff Dike (jdike@karaya.com)
  * Licensed under the GPL
  */
 
-#include <linux/slab.h>
-#include <linux/completion.h>
-#include <linux/irqreturn.h>
-#include <asm/irq.h>
-#include "irq_kern.h"
+#include "linux/errno.h"
+#include "linux/slab.h"
+#include "asm/semaphore.h"
+#include "asm/irq.h"
+#include "irq_user.h"
+#include "kern_util.h"
 #include "os.h"
+#include "xterm.h"
 
 struct xterm_wait {
-	struct completion ready;
+	struct semaphore sem;
 	int fd;
 	int pid;
 	int new_fd;
 };
 
-static irqreturn_t xterm_interrupt(int irq, void *data)
+static void xterm_interrupt(int irq, void *data, struct pt_regs *regs)
 {
 	struct xterm_wait *xterm = data;
 	int fd;
 
 	fd = os_rcv_fd(xterm->fd, &xterm->pid);
-	if (fd == -EAGAIN)
-		return IRQ_NONE;
+	if(fd == -EAGAIN)
+		return;
 
 	xterm->new_fd = fd;
-	complete(&xterm->ready);
-
-	return IRQ_HANDLED;
+	up(&xterm->sem);
 }
 
 int xterm_fd(int socket, int *pid_out)
@@ -38,39 +38,42 @@ int xterm_fd(int socket, int *pid_out)
 	int err, ret;
 
 	data = kmalloc(sizeof(*data), GFP_KERNEL);
-	if (data == NULL) {
+	if(data == NULL){
 		printk(KERN_ERR "xterm_fd : failed to allocate xterm_wait\n");
-		return -ENOMEM;
+		return(-ENOMEM);
 	}
+	*data = ((struct xterm_wait) 
+		{ .sem  	= __SEMAPHORE_INITIALIZER(data->sem, 0),
+		  .fd 		= socket,
+		  .pid 		= -1,
+		  .new_fd 	= -1 });
 
-	/* This is a locked semaphore... */
-	*data = ((struct xterm_wait) { .fd 		= socket,
-				       .pid 		= -1,
-				       .new_fd	 	= -1 });
-	init_completion(&data->ready);
-
-	err = um_request_irq(XTERM_IRQ, socket, IRQ_READ, xterm_interrupt,
-			     IRQF_DISABLED | IRQF_SHARED | IRQF_SAMPLE_RANDOM,
+	err = um_request_irq(XTERM_IRQ, socket, IRQ_READ, xterm_interrupt, 
+			     SA_INTERRUPT | SA_SHIRQ | SA_SAMPLE_RANDOM, 
 			     "xterm", data);
-	if (err) {
+	if(err){
 		printk(KERN_ERR "xterm_fd : failed to get IRQ for xterm, "
 		       "err = %d\n",  err);
-		ret = err;
-		goto out;
+		return(err);
 	}
-
-	/* ... so here we wait for an xterm interrupt.
-	 *
-	 * XXX Note, if the xterm doesn't work for some reason (eg. DISPLAY
-	 * isn't set) this will hang... */
-	wait_for_completion(&data->ready);
+	down(&data->sem);
 
 	free_irq(XTERM_IRQ, data);
 
 	ret = data->new_fd;
 	*pid_out = data->pid;
- out:
 	kfree(data);
 
-	return ret;
+	return(ret);
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-file-style: "linux"
+ * End:
+ */

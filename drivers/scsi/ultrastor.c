@@ -137,16 +137,15 @@
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
 #include <linux/stat.h>
-#include <linux/bitops.h>
-#include <linux/delay.h>
 
 #include <asm/io.h>
+#include <asm/bitops.h>
 #include <asm/system.h>
 #include <asm/dma.h>
 
 #define ULTRASTOR_PRIVATE	/* Get the private stuff from ultrastor.h */
 #include "scsi.h"
-#include <scsi/scsi_host.h>
+#include "hosts.h"
 #include "ultrastor.h"
 
 #define FALSE 0
@@ -197,8 +196,8 @@ struct mscp {
   u32 sense_data PACKED;
   /* The following fields are for software only.  They are included in
      the MSCP structure because they are associated with SCSI requests.  */
-  void (*done) (struct scsi_cmnd *);
-  struct scsi_cmnd *SCint;
+  void (*done)(Scsi_Cmnd *);
+  Scsi_Cmnd *SCint;
   ultrastor_sg_list sglist[ULTRASTOR_24F_MAX_SG]; /* use larger size for 24F */
 };
 
@@ -260,7 +259,7 @@ static struct ultrastor_config
 } config = {0};
 
 /* Set this to 1 to reset the SCSI bus on error.  */
-static int ultrastor_bus_reset;
+int ultrastor_bus_reset;
 
 
 /* Allowed BIOS base addresses (NULL indicates reserved) */
@@ -288,9 +287,9 @@ static const unsigned short ultrastor_ports_14f[] = {
 };
 #endif
 
-static void ultrastor_interrupt(void *);
-static irqreturn_t do_ultrastor_interrupt(int, void *);
-static inline void build_sg_list(struct mscp *, struct scsi_cmnd *SCpnt);
+static void ultrastor_interrupt(int, void *, struct pt_regs *);
+static irqreturn_t do_ultrastor_interrupt(int, void *, struct pt_regs *);
+static inline void build_sg_list(struct mscp *, Scsi_Cmnd *SCpnt);
 
 
 /* Always called with host lock held */
@@ -299,16 +298,9 @@ static inline int find_and_clear_bit_16(unsigned long *field)
 {
   int rv;
 
-  if (*field == 0)
-    panic("No free mscp");
-
-  asm volatile (
-	"xorl %0,%0\n\t"
-	"0: bsfw %1,%w0\n\t"
-	"btr %0,%1\n\t"
-	"jnc 0b"
-	: "=&r" (rv), "=m" (*field) :);
-
+  if (*field == 0) panic("No free mscp");
+  asm("xorl %0,%0\n0:\tbsfw %1,%w0\n\tbtr %0,%1\n\tjnc 0b"
+      : "=&r" (rv), "=m" (*field) : "1" (*field));
   return rv;
 }
 
@@ -351,7 +343,7 @@ static void log_ultrastor_abort(struct ultrastor_config *config,
 }
 #endif
 
-static int ultrastor_14f_detect(struct scsi_host_template * tpnt)
+static int ultrastor_14f_detect(Scsi_Host_Template * tpnt)
 {
     size_t i;
     unsigned char in_byte, version_byte = 0;
@@ -533,7 +525,7 @@ out_release_port:
     return FALSE;
 }
 
-static int ultrastor_24f_detect(struct scsi_host_template * tpnt)
+static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
 {
   int i;
   struct Scsi_Host * shpnt = NULL;
@@ -645,7 +637,7 @@ static int ultrastor_24f_detect(struct scsi_host_template * tpnt)
   return FALSE;
 }
 
-static int ultrastor_detect(struct scsi_host_template * tpnt)
+static int ultrastor_detect(Scsi_Host_Template * tpnt)
 {
 	tpnt->proc_name = "ultrastor";
 	return ultrastor_14f_detect(tpnt) || ultrastor_24f_detect(tpnt);
@@ -681,17 +673,18 @@ static const char *ultrastor_info(struct Scsi_Host * shpnt)
     return buf;
 }
 
-static inline void build_sg_list(struct mscp *mscp, struct scsi_cmnd *SCpnt)
+static inline void build_sg_list(struct mscp *mscp, Scsi_Cmnd *SCpnt)
 {
-	struct scatterlist *sg;
+	struct scatterlist *sl;
 	long transfer_length = 0;
 	int i, max;
 
-	max = scsi_sg_count(SCpnt);
-	scsi_for_each_sg(SCpnt, sg, max, i) {
-		mscp->sglist[i].address = isa_page_to_bus(sg_page(sg)) + sg->offset;
-		mscp->sglist[i].num_bytes = sg->length;
-		transfer_length += sg->length;
+	sl = (struct scatterlist *) SCpnt->request_buffer;
+	max = SCpnt->use_sg;
+	for (i = 0; i < max; i++) {
+		mscp->sglist[i].address = isa_page_to_bus(sl[i].page) + sl[i].offset;
+		mscp->sglist[i].num_bytes = sl[i].length;
+		transfer_length += sl[i].length;
 	}
 	mscp->number_of_sg_list = max;
 	mscp->transfer_data = isa_virt_to_bus(mscp->sglist);
@@ -701,8 +694,7 @@ static inline void build_sg_list(struct mscp *mscp, struct scsi_cmnd *SCpnt)
 	mscp->transfer_data_length = transfer_length;
 }
 
-static int ultrastor_queuecommand_lck(struct scsi_cmnd *SCpnt,
-				void (*done) (struct scsi_cmnd *))
+static int ultrastor_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 {
     struct mscp *my_mscp;
 #if ULTRASTOR_MAX_CMDS > 1
@@ -737,19 +729,19 @@ static int ultrastor_queuecommand_lck(struct scsi_cmnd *SCpnt,
     my_mscp->target_id = SCpnt->device->id;
     my_mscp->ch_no = 0;
     my_mscp->lun = SCpnt->device->lun;
-    if (scsi_sg_count(SCpnt)) {
+    if (SCpnt->use_sg) {
 	/* Set scatter/gather flag in SCSI command packet */
 	my_mscp->sg = TRUE;
 	build_sg_list(my_mscp, SCpnt);
     } else {
 	/* Unset scatter/gather flag in SCSI command packet */
 	my_mscp->sg = FALSE;
-	my_mscp->transfer_data = isa_virt_to_bus(scsi_sglist(SCpnt));
-	my_mscp->transfer_data_length = scsi_bufflen(SCpnt);
+	my_mscp->transfer_data = isa_virt_to_bus(SCpnt->request_buffer);
+	my_mscp->transfer_data_length = SCpnt->request_bufflen;
     }
     my_mscp->command_link = 0;		/*???*/
     my_mscp->scsi_command_link_id = 0;	/*???*/
-    my_mscp->length_of_sense_byte = SCSI_SENSE_BUFFERSIZE;
+    my_mscp->length_of_sense_byte = sizeof SCpnt->sense_buffer;
     my_mscp->length_of_scsi_cdbs = SCpnt->cmd_len;
     memcpy(my_mscp->scsi_cdbs, SCpnt->cmnd, my_mscp->length_of_scsi_cdbs);
     my_mscp->adapter_status = 0;
@@ -826,8 +818,6 @@ retry:
     return 0;
 }
 
-static DEF_SCSI_QCMD(ultrastor_queuecommand)
-
 /* This code must deal with 2 cases:
 
    1. The command has not been written to the OGM.  In this case, set
@@ -843,7 +833,7 @@ static DEF_SCSI_QCMD(ultrastor_queuecommand)
 
  */
 
-static int ultrastor_abort(struct scsi_cmnd *SCpnt)
+static int ultrastor_abort(Scsi_Cmnd *SCpnt)
 {
 #if ULTRASTOR_DEBUG & UD_ABORT
     char out[108];
@@ -853,7 +843,7 @@ static int ultrastor_abort(struct scsi_cmnd *SCpnt)
     unsigned int mscp_index;
     unsigned char old_aborted;
     unsigned long flags;
-    void (*done)(struct scsi_cmnd *);
+    void (*done)(Scsi_Cmnd *);
     struct Scsi_Host *host = SCpnt->device->host;
 
     if(config.slot) 
@@ -889,7 +879,7 @@ static int ultrastor_abort(struct scsi_cmnd *SCpnt)
 	ogm_addr = (unsigned int)isa_bus_to_virt(inl(port0 + 23));
 	icm_status = inb(port0 + 27);
 	icm_addr = (unsigned int)isa_bus_to_virt(inl(port0 + 28));
-	spin_unlock_irqrestore(host->host_lock, flags);
+	spin_lock_irqsave(host->host_lock, flags);
       }
 
     /* First check to see if an interrupt is pending.  I suspect the SiS
@@ -902,7 +892,7 @@ static int ultrastor_abort(struct scsi_cmnd *SCpnt)
 	
 	spin_lock_irqsave(host->host_lock, flags);
 	/* FIXME: Ewww... need to think about passing host around properly */
-	ultrastor_interrupt(NULL);
+	ultrastor_interrupt(0, NULL, NULL);
 	spin_unlock_irqrestore(host->host_lock, flags);
 	return SUCCESS;
       }
@@ -954,23 +944,25 @@ static int ultrastor_abort(struct scsi_cmnd *SCpnt)
 	printk("abort: command mismatch, %p != %p\n",
 	       config.mscp[mscp_index].SCint, SCpnt);
 #endif
-    if (config.mscp[mscp_index].SCint == NULL)
-	return FAILED;
+    if (config.mscp[mscp_index].SCint == 0)
+	return SCSI_ABORT_NOT_RUNNING;
 
     if (config.mscp[mscp_index].SCint != SCpnt) panic("Bad abort");
-    config.mscp[mscp_index].SCint = NULL;
+    config.mscp[mscp_index].SCint = 0;
     done = config.mscp[mscp_index].done;
-    config.mscp[mscp_index].done = NULL;
+    config.mscp[mscp_index].done = 0;
     SCpnt->result = DID_ABORT << 16;
     
     /* Take the host lock to guard against scsi layer re-entry */
+    spin_lock_irqsave(host->host_lock, flags);
     done(SCpnt);
+    spin_unlock_irqrestore(host->host_lock, flags);
 
     /* Need to set a timeout here in case command never completes.  */
     return SUCCESS;
 }
 
-static int ultrastor_host_reset(struct scsi_cmnd * SCpnt)
+static int ultrastor_host_reset(Scsi_Cmnd * SCpnt)
 {
     unsigned long flags;
     int i;
@@ -1008,9 +1000,9 @@ static int ultrastor_host_reset(struct scsi_cmnd * SCpnt)
 	  {
 	    config.mscp[i].SCint->result = DID_RESET << 16;
 	    config.mscp[i].done(config.mscp[i].SCint);
-	    config.mscp[i].done = NULL;
+	    config.mscp[i].done = 0;
 	  }
-	config.mscp[i].SCint = NULL;
+	config.mscp[i].SCint = 0;
       }
 #endif
 
@@ -1028,7 +1020,7 @@ static int ultrastor_host_reset(struct scsi_cmnd * SCpnt)
 #endif
 
     spin_unlock_irqrestore(host->host_lock, flags);
-    return SUCCESS;
+    return SCSI_RESET_SUCCESS;
 
 }
 
@@ -1048,15 +1040,15 @@ int ultrastor_biosparam(struct scsi_device *sdev, struct block_device *bdev,
     return 0;
 }
 
-static void ultrastor_interrupt(void *dev_id)
+static void ultrastor_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     unsigned int status;
 #if ULTRASTOR_MAX_CMDS > 1
     unsigned int mscp_index;
 #endif
     struct mscp *mscp;
-    void (*done) (struct scsi_cmnd *);
-    struct scsi_cmnd *SCtmp;
+    void (*done)(Scsi_Cmnd *);
+    Scsi_Cmnd *SCtmp;
 
 #if ULTRASTOR_MAX_CMDS == 1
     mscp = &config.mscp[0];
@@ -1089,9 +1081,9 @@ static void ultrastor_interrupt(void *dev_id)
 	    return;
 	}
 	if (icm_status == 3) {
-	    void (*done)(struct scsi_cmnd *) = mscp->done;
+	    void (*done)(Scsi_Cmnd *) = mscp->done;
 	    if (done) {
-		mscp->done = NULL;
+		mscp->done = 0;
 		mscp->SCint->result = DID_ABORT << 16;
 		done(mscp->SCint);
 	    }
@@ -1104,7 +1096,7 @@ static void ultrastor_interrupt(void *dev_id)
     SCtmp = mscp->SCint;
     mscp->SCint = NULL;
 
-    if (!SCtmp)
+    if (SCtmp == 0)
       {
 #if ULTRASTOR_DEBUG & (UD_ABORT|UD_INTERRUPT)
 	printk("MSCP %d (%x): no command\n", mscp_index, (unsigned int) mscp);
@@ -1122,7 +1114,7 @@ static void ultrastor_interrupt(void *dev_id)
        once we call done, we may get another command queued before this
        interrupt service routine can return. */
     done = mscp->done;
-    mscp->done = NULL;
+    mscp->done = 0;
 
     /* Let the higher levels know that we're done */
     switch (mscp->adapter_status)
@@ -1146,7 +1138,7 @@ static void ultrastor_interrupt(void *dev_id)
 
     SCtmp->result = status | mscp->target_status;
 
-    SCtmp->host_scribble = NULL;
+    SCtmp->host_scribble = 0;
 
     /* Free up mscp block for next command */
 #if ULTRASTOR_MAX_CMDS == 1
@@ -1180,20 +1172,21 @@ static void ultrastor_interrupt(void *dev_id)
 #endif
 }
 
-static irqreturn_t do_ultrastor_interrupt(int irq, void *dev_id)
+static irqreturn_t do_ultrastor_interrupt(int irq, void *dev_id,
+						struct pt_regs *regs)
 {
     unsigned long flags;
     struct Scsi_Host *dev = dev_id;
     
     spin_lock_irqsave(dev->host_lock, flags);
-    ultrastor_interrupt(dev_id);
+    ultrastor_interrupt(irq, dev_id, regs);
     spin_unlock_irqrestore(dev->host_lock, flags);
     return IRQ_HANDLED;
 }
 
 MODULE_LICENSE("GPL");
 
-static struct scsi_host_template driver_template = {
+static Scsi_Host_Template driver_template = {
 	.name              = "UltraStor 14F/24F/34F",
 	.detect            = ultrastor_detect,
 	.release	   = ultrastor_release,

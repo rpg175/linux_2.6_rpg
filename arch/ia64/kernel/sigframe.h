@@ -17,9 +17,9 @@ struct sigframe {
 	 * End of architected state.
 	 */
 
-	void __user *handler;		/* pointer to the plabel of the signal handler */
+	void *handler;			/* pointer to the plabel of the signal handler */
 	struct siginfo info;
 	struct sigcontext sc;
 };
 
-extern void ia64_do_signal (struct sigscratch *, long);
+extern long ia64_do_signal (sigset_t *, struct sigscratch *, long);

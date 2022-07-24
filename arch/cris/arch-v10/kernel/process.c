@@ -1,4 +1,5 @@
-/*
+/* $Id: process.c,v 1.3 2003/07/04 08:27:41 starvik Exp $
+ * 
  *  linux/arch/cris/kernel/process.c
  *
  *  Copyright (C) 1995  Linus Torvalds
@@ -10,12 +11,11 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
-#include <linux/slab.h>
 #include <linux/err.h>
 #include <linux/fs.h>
-#include <arch/svinto.h>
-#include <linux/init.h>
+#include <linux/slab.h>
 
 #ifdef CONFIG_ETRAX_GPIO
 void etrax_gpio_wake_up_check(void); /* drivers/gpio.c */
@@ -30,15 +30,6 @@ void default_idle(void)
 #ifdef CONFIG_ETRAX_GPIO
   etrax_gpio_wake_up_check();
 #endif
-}
-
-/*
- * Free current thread data structures etc..
- */
-
-void exit_thread(void)
-{
-	/* Nothing needs to be done.  */
 }
 
 /* if the watchdog is enabled, we can simply disable interrupts and go
@@ -63,7 +54,7 @@ void hard_reset_now (void)
 #if defined(CONFIG_ETRAX_WATCHDOG) && !defined(CONFIG_SVINTO_SIM)
 	cause_of_death = 0xbedead;
 #else
-	/* Since we dont plan to keep on resetting the watchdog,
+	/* Since we dont plan to keep on reseting the watchdog,
 	   the key can be arbitrary hence three */
 	*R_WATCHDOG = IO_FIELD(R_WATCHDOG, key, 3) |
 		IO_STATE(R_WATCHDOG, enable, start);
@@ -77,7 +68,7 @@ void hard_reset_now (void)
  */
 unsigned long thread_saved_pc(struct task_struct *t)
 {
-	return task_pt_regs(t)->irp;
+	return (unsigned long)user_regs(t->thread_info)->irp;
 }
 
 static void kernel_thread_helper(void* dummy, int (*fn)(void *), void * arg)
@@ -99,7 +90,6 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 	regs.r11 = (unsigned long)fn;
 	regs.r12 = (unsigned long)arg;
 	regs.irp = (unsigned long)kernel_thread_helper;
-	regs.dccr = 1 << I_DCCR_BITNR;
 
 	/* Ok, create the new process.. */
         return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
@@ -115,7 +105,7 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
  */
 asmlinkage void ret_from_fork(void);
 
-int copy_thread(unsigned long clone_flags, unsigned long usp,
+int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
@@ -126,12 +116,12 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 	 * remember that the task_struct doubles as the kernel stack for the task
 	 */
 
-	childregs = task_pt_regs(p);
+	childregs = user_regs(p->thread_info);        
         
 	*childregs = *regs;  /* struct copy of pt_regs */
         
         p->set_child_tid = p->clear_child_tid = NULL;
-
+	
         childregs->r10 = 0;  /* child returns 0 after a fork/clone */
 	
 	/* put the switch stack right below the pt_regs */
@@ -188,7 +178,7 @@ asmlinkage int sys_clone(unsigned long newusp, unsigned long flags,
 {
 	if (!newusp)
 		newusp = rdusp();
-	return do_fork(flags, newusp, regs, 0, parent_tid, child_tid);
+	return do_fork(flags & ~CLONE_IDLETASK, newusp, regs, 0, parent_tid, child_tid);
 }
 
 /* vfork is a system call in i386 because of register-pressure - maybe
@@ -204,9 +194,7 @@ asmlinkage int sys_vfork(long r10, long r11, long r12, long r13, long mof, long 
 /*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(const char *fname,
-			  const char *const *argv,
-			  const char *const *envp,
+asmlinkage int sys_execve(const char *fname, char **argv, char **envp,
 			  long r13, long mof, long srp, 
 			  struct pt_regs *regs)
 {
@@ -223,6 +211,15 @@ asmlinkage int sys_execve(const char *fname,
  out:
 	return error;
 }
+
+/*
+ * These bracket the sleeping functions..
+ */
+
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+#define first_sched     ((unsigned long) scheduling_functions_start_here)
+#define last_sched      ((unsigned long) scheduling_functions_end_here)
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -244,8 +241,8 @@ unsigned long get_wchan(struct task_struct *p)
                 if (ebp < stack_page || ebp > 8184+stack_page)
                         return 0;
                 eip = *(unsigned long *) (ebp+4);
-		if (!in_sched_functions(eip))
-			return eip;
+                if (eip < first_sched || eip >= last_sched)
+                        return eip;
                 ebp = *(unsigned long *) ebp;
         } while (count++ < 16);
 #endif
@@ -253,19 +250,3 @@ unsigned long get_wchan(struct task_struct *p)
 }
 #undef last_sched
 #undef first_sched
-
-void show_regs(struct pt_regs * regs)
-{
-	unsigned long usp = rdusp();
-	printk("IRP: %08lx SRP: %08lx DCCR: %08lx USP: %08lx MOF: %08lx\n",
-	       regs->irp, regs->srp, regs->dccr, usp, regs->mof );
-	printk(" r0: %08lx  r1: %08lx   r2: %08lx  r3: %08lx\n",
-	       regs->r0, regs->r1, regs->r2, regs->r3);
-	printk(" r4: %08lx  r5: %08lx   r6: %08lx  r7: %08lx\n",
-	       regs->r4, regs->r5, regs->r6, regs->r7);
-	printk(" r8: %08lx  r9: %08lx  r10: %08lx r11: %08lx\n",
-	       regs->r8, regs->r9, regs->r10, regs->r11);
-	printk("r12: %08lx r13: %08lx oR10: %08lx\n",
-	       regs->r12, regs->r13, regs->orig_r10);
-}
-

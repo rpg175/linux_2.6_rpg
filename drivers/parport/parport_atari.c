@@ -84,7 +84,7 @@ parport_atari_frob_control(struct parport *p, unsigned char mask,
 static unsigned char
 parport_atari_read_status(struct parport *p)
 {
-	return ((st_mfp.par_dt_reg & 1 ? 0 : PARPORT_STATUS_BUSY) |
+	return ((mfp.par_dt_reg & 1 ? 0 : PARPORT_STATUS_BUSY) |
 		PARPORT_STATUS_SELECT | PARPORT_STATUS_ERROR);
 }
 
@@ -101,6 +101,13 @@ parport_atari_save_state(struct parport *p, struct parport_state *s)
 static void
 parport_atari_restore_state(struct parport *p, struct parport_state *s)
 {
+}
+
+static irqreturn_t
+parport_atari_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+{
+	parport_generic_irq(irq, (struct parport *) dev_id, regs);
+	return IRQ_HANDLED;
 }
 
 static void
@@ -178,7 +185,8 @@ static struct parport_operations parport_atari_ops = {
 };
 
 
-static int __init parport_atari_init(void)
+int __init
+parport_atari_init(void)
 {
 	struct parport *p;
 	unsigned long flags;
@@ -193,41 +201,50 @@ static int __init parport_atari_init(void)
 		sound_ym.wd_data = sound_ym.rd_data_reg_sel | (1 << 5);
 		local_irq_restore(flags);
 		/* MFP port I0 as input. */
-		st_mfp.data_dir &= ~1;
+		mfp.data_dir &= ~1;
 		/* MFP port I0 interrupt on high->low edge. */
-		st_mfp.active_edge &= ~1;
+		mfp.active_edge &= ~1;
 		p = parport_register_port((unsigned long)&sound_ym.wd_data,
 					  IRQ_MFP_BUSY, PARPORT_DMA_NONE,
 					  &parport_atari_ops);
 		if (!p)
-			return -ENODEV;
-		if (request_irq(IRQ_MFP_BUSY, parport_irq_handler,
+			return 0;
+		if (request_irq(IRQ_MFP_BUSY, parport_atari_interrupt,
 				IRQ_TYPE_SLOW, p->name, p)) {
-			parport_put_port (p);
-			return -ENODEV;
+			parport_unregister_port (p);
+			return 0;
 		}
 
 		this_port = p;
 		printk(KERN_INFO "%s: Atari built-in port using irq\n", p->name);
+		parport_proc_register(p);
+
 		parport_announce_port (p);
 
-		return 0;
+		return 1;
 	}
-	return -ENODEV;
+	return 0;
 }
 
-static void __exit parport_atari_exit(void)
-{
-	parport_remove_port(this_port);
-	if (this_port->irq != PARPORT_IRQ_NONE)
-		free_irq(IRQ_MFP_BUSY, this_port);
-	parport_put_port(this_port);
-}
+#ifdef MODULE
 
 MODULE_AUTHOR("Andreas Schwab");
 MODULE_DESCRIPTION("Parport Driver for Atari builtin Port");
 MODULE_SUPPORTED_DEVICE("Atari builtin Parallel Port");
 MODULE_LICENSE("GPL");
 
-module_init(parport_atari_init)
-module_exit(parport_atari_exit)
+int
+init_module(void)
+{
+	return parport_atari_init() ? 0 : -ENODEV;
+}
+
+void
+cleanup_module(void)
+{
+	if (this_port->irq != PARPORT_IRQ_NONE)
+		free_irq(IRQ_MFP_BUSY, this_port);
+	parport_proc_unregister(this_port);
+	parport_unregister_port(this_port);
+}
+#endif

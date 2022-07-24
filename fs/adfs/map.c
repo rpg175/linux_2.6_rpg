@@ -7,8 +7,14 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#include <linux/errno.h>
+#include <linux/fs.h>
+#include <linux/adfs_fs.h>
+#include <linux/spinlock.h>
 #include <linux/buffer_head.h>
+
 #include <asm/unaligned.h>
+
 #include "adfs.h"
 
 /*
@@ -47,16 +53,16 @@
 /*
  * For the future...
  */
-static DEFINE_RWLOCK(adfs_map_lock);
+static rwlock_t adfs_map_lock = RW_LOCK_UNLOCKED;
 
 /*
  * This is fun.  We need to load up to 19 bits from the map at an
- * arbitrary bit alignment.  (We're limited to 19 bits by F+ version 2).
+ * arbitary bit alignment.  (We're limited to 19 bits by F+ version 2).
  */
 #define GET_FRAG_ID(_map,_start,_idmask)				\
 	({								\
 		unsigned char *_m = _map + (_start >> 3);		\
-		u32 _frag = get_unaligned_le32(_m);			\
+		u32 _frag = get_unaligned((u32 *)_m);			\
 		_frag >>= (_start & 7);					\
 		_frag & _idmask;					\
 	})
@@ -86,8 +92,9 @@ lookup_zone(const struct adfs_discmap *dm, const unsigned int idlen,
 		 * find end of fragment
 		 */
 		{
-			__le32 *_map = (__le32 *)map;
-			u32 v = le32_to_cpu(_map[mapptr >> 5]) >> (mapptr & 31);
+			u32 v, *_map = (u32 *)map;
+
+			v = le32_to_cpu(_map[mapptr >> 5]) >> (mapptr & 31);
 			while (v == 0) {
 				mapptr = (mapptr & ~31) + 32;
 				if (mapptr >= mapsize)
@@ -164,8 +171,9 @@ scan_free_map(struct adfs_sb_info *asb, struct adfs_discmap *dm)
 		 * find end of fragment
 		 */
 		{
-			__le32 *_map = (__le32 *)map;
-			u32 v = le32_to_cpu(_map[mapptr >> 5]) >> (mapptr & 31);
+			u32 v, *_map = (u32 *)map;
+
+			v = le32_to_cpu(_map[mapptr >> 5]) >> (mapptr & 31);
 			while (v == 0) {
 				mapptr = (mapptr & ~31) + 32;
 				if (mapptr >= mapsize)

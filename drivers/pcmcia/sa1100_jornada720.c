@@ -6,115 +6,119 @@
  */
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 
-#include <mach/hardware.h>
+#include <asm/hardware.h>
 #include <asm/hardware/sa1111.h>
 #include <asm/mach-types.h>
 
 #include "sa1111_generic.h"
 
-/* Does SOCKET1_3V actually do anything? */
-#define SOCKET0_POWER	GPIO_GPIO0
-#define SOCKET0_3V	GPIO_GPIO2
-#define SOCKET1_POWER	(GPIO_GPIO1 | GPIO_GPIO3)
+#define SOCKET0_POWER   GPIO_GPIO0
+#define SOCKET0_3V      GPIO_GPIO2
+#define SOCKET1_POWER   (GPIO_GPIO1 | GPIO_GPIO3)
+#warning *** Does SOCKET1_3V actually do anything?
 #define SOCKET1_3V	GPIO_GPIO3
 
-static int
-jornada720_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state_t *state)
+static int jornada720_pcmcia_hw_init(struct sa1100_pcmcia_socket *skt)
 {
-	struct sa1111_pcmcia_socket *s = to_skt(skt);
-	unsigned int pa_dwr_mask, pa_dwr_set;
-	int ret;
+  /*
+   * What is all this crap for?
+   */
+  GRER |= 0x00000002;
+  /* Set GPIO_A<3:1> to be outputs for PCMCIA/CF power controller: */
+  PA_DDR = 0;
+  PA_DWR = 0;
+  PA_SDR = 0;
+  PA_SSR = 0;
 
-	printk(KERN_INFO "%s(): config socket %d vcc %d vpp %d\n", __func__,
-		skt->nr, state->Vcc, state->Vpp);
+  PB_DDR = 0;
+  PB_DWR = 0x01;
+  PB_SDR = 0;
+  PB_SSR = 0;
 
-	switch (skt->nr) {
-	case 0:
-		pa_dwr_mask = SOCKET0_POWER | SOCKET0_3V;
+  PC_DDR = 0x88;
+  PC_DWR = 0x20;
+  PC_SDR = 0;
+  PC_SSR = 0;
 
-		switch (state->Vcc) {
-		default:
-		case  0:
-			pa_dwr_set = 0;
-			break;
-		case 33:
-			pa_dwr_set = SOCKET0_POWER | SOCKET0_3V;
-			break;
-		case 50:
-			pa_dwr_set = SOCKET0_POWER;
-			break;
-		}
-		break;
+  return sa1111_pcmcia_hw_init(skt);
+}
 
-	case 1:
-		pa_dwr_mask = SOCKET1_POWER;
+static int
+jornada720_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt, const socket_state_t *state)
+{
+  unsigned int pa_dwr_mask, pa_dwr_set;
+  int ret;
 
-		switch (state->Vcc) {
-		default:
-		case 0:
-			pa_dwr_set = 0;
-			break;
-		case 33:
-			pa_dwr_set = SOCKET1_POWER;
-			break;
-		case 50:
-			pa_dwr_set = SOCKET1_POWER;
-			break;
-		}
-		break;
+printk("%s(): config socket %d vcc %d vpp %d\n", __FUNCTION__,
+	skt->nr, state->Vcc, state->Vpp);
 
-	default:
-		return -1;
-	}
+  switch (skt->nr) {
+  case 0:
+    pa_dwr_mask = SOCKET0_POWER | SOCKET0_3V;
 
-	if (state->Vpp != state->Vcc && state->Vpp != 0) {
-		printk(KERN_ERR "%s(): slot cannot support VPP %u\n",
-			__func__, state->Vpp);
-		return -EPERM;
-	}
+    switch (state->Vcc) {
+    default:
+    case 0:	pa_dwr_set = 0;					break;
+    case 33:	pa_dwr_set = SOCKET0_POWER | SOCKET0_3V;	break;
+    case 50:	pa_dwr_set = SOCKET0_POWER;			break;
+    }
+    break;
 
-	ret = sa1111_pcmcia_configure_socket(skt, state);
-	if (ret == 0) {
-		unsigned long flags;
+  case 1:
+    pa_dwr_mask = SOCKET1_POWER;
 
-		local_irq_save(flags);
-		sa1111_set_io(s->dev, pa_dwr_mask, pa_dwr_set);
-		local_irq_restore(flags);
-	}
+    switch (state->Vcc) {
+    default:
+    case 0:	pa_dwr_set = 0;					break;
+    case 33:	pa_dwr_set = SOCKET1_POWER;			break;
+    case 50:	pa_dwr_set = SOCKET1_POWER;			break;
+    }
+    break;
 
-	return ret;
+  default:
+    return -1;
+  }
+
+  if (state->Vpp != state->Vcc && state->Vpp != 0) {
+    printk(KERN_ERR "%s(): slot cannot support VPP %u\n",
+	   __FUNCTION__, state->Vpp);
+    return -1;
+  }
+
+  ret = sa1111_pcmcia_configure_socket(skt, state);
+  if (ret == 0) {
+    unsigned long flags;
+
+    local_irq_save(flags);
+    PA_DWR = (PA_DWR & ~pa_dwr_mask) | pa_dwr_set;
+    local_irq_restore(flags);
+  }
+
+  return ret;
 }
 
 static struct pcmcia_low_level jornada720_pcmcia_ops = {
-	.owner			= THIS_MODULE,
-	.configure_socket	= jornada720_pcmcia_configure_socket,
-	.socket_init		= sa1111_pcmcia_socket_init,
-	.first			= 0,
-	.nr			= 2,
+  .owner		= THIS_MODULE,
+  .hw_init		= jornada720_pcmcia_hw_init,
+  .hw_shutdown		= sa1111_pcmcia_hw_shutdown,
+  .socket_state		= sa1111_pcmcia_socket_state,
+  .configure_socket	= jornada720_pcmcia_configure_socket,
+
+  .socket_init		= sa1111_pcmcia_socket_init,
+  .socket_suspend	= sa1111_pcmcia_socket_suspend,
 };
 
-int __devinit pcmcia_jornada720_init(struct device *dev)
+int __init pcmcia_jornada720_init(struct device *dev)
 {
 	int ret = -ENODEV;
 
-	if (machine_is_jornada720()) {
-		unsigned int pin = GPIO_A0 | GPIO_A1 | GPIO_A2 | GPIO_A3;
-
-		GRER |= 0x00000002;
-
-		/* Set GPIO_A<3:1> to be outputs for PCMCIA/CF power controller: */
-		sa1111_set_io_dir(dev, pin, 0, 0);
-		sa1111_set_io(dev, pin, 0);
-		sa1111_set_sleep_io(dev, pin, 0);
-
-		sa11xx_drv_pcmcia_ops(&jornada720_pcmcia_ops);
-		ret = sa1111_pcmcia_add(dev, &jornada720_pcmcia_ops,
-				sa11xx_drv_pcmcia_add_one);
-	}
+	if (machine_is_jornada720())
+		ret = sa11xx_drv_pcmcia_probe(dev, &jornada720_pcmcia_ops, 0, 2);
 
 	return ret;
 }

@@ -2,9 +2,8 @@
 #define __LINUX_MATROXFB_H__
 
 #include <asm/ioctl.h>
-#include <linux/types.h>
+#include <asm/types.h>
 #include <linux/videodev2.h>
-#include <linux/fb.h>
 
 struct matroxioc_output_mode {
 	__u32	output;		/* which output */
@@ -37,6 +36,8 @@ enum matroxfb_ctrl_id {
   MATROXFB_CID_DEFLICKER,
   MATROXFB_CID_LAST
 };
+
+#define FBIO_WAITFORVSYNC	_IOW('F', 0x20, u_int32_t)
 
 #endif
 

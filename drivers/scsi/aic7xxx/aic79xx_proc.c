@@ -37,7 +37,7 @@
  * String handling code courtesy of Gerard Roudier's <groudier@club-internet.fr>
  * sym driver.
  *
- * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic79xx_proc.c#19 $
+ * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic79xx_proc.c#17 $
  */
 #include "aic79xx_osm.h"
 #include "aic79xx_inline.h"
@@ -47,52 +47,11 @@ static int	copy_info(struct info_str *info, char *fmt, ...);
 static void	ahd_dump_target_state(struct ahd_softc *ahd,
 				      struct info_str *info,
 				      u_int our_id, char channel,
-				      u_int target_id);
+				      u_int target_id, u_int target_offset);
 static void	ahd_dump_device_state(struct info_str *info,
-				      struct scsi_device *sdev);
+				      struct ahd_linux_device *dev);
 static int	ahd_proc_write_seeprom(struct ahd_softc *ahd,
 				       char *buffer, int length);
-
-/*
- * Table of syncrates that don't follow the "divisible by 4"
- * rule. This table will be expanded in future SCSI specs.
- */
-static const struct {
-	u_int period_factor;
-	u_int period;	/* in 100ths of ns */
-} scsi_syncrates[] = {
-	{ 0x08, 625 },	/* FAST-160 */
-	{ 0x09, 1250 },	/* FAST-80 */
-	{ 0x0a, 2500 },	/* FAST-40 40MHz */
-	{ 0x0b, 3030 },	/* FAST-40 33MHz */
-	{ 0x0c, 5000 }	/* FAST-20 */
-};
-
-/*
- * Return the frequency in kHz corresponding to the given
- * sync period factor.
- */
-static u_int
-ahd_calc_syncsrate(u_int period_factor)
-{
-	int i;
-
-	/* See if the period is in the "exception" table */
-	for (i = 0; i < ARRAY_SIZE(scsi_syncrates); i++) {
-
-		if (period_factor == scsi_syncrates[i].period_factor) {
-			/* Period in kHz */
-			return (100000000 / scsi_syncrates[i].period);
-		}
-	}
-
-	/*
-	 * Wasn't in the table, so use the standard
-	 * 4 times conversion.
-	 */
-	return (10000000 / (period_factor * 4 * 10));
-}
-
 
 static void
 copy_mem_info(struct info_str *info, char *data, int len)
@@ -136,7 +95,7 @@ copy_info(struct info_str *info, char *fmt, ...)
 	return (len);
 }
 
-static void
+void
 ahd_format_transinfo(struct info_str *info, struct ahd_transinfo *tinfo)
 {
 	u_int speed;
@@ -150,7 +109,7 @@ ahd_format_transinfo(struct info_str *info, struct ahd_transinfo *tinfo)
         speed = 3300;
         freq = 0;
 	if (tinfo->offset != 0) {
-		freq = ahd_calc_syncsrate(tinfo->period);
+		freq = aic_calc_syncsrate(tinfo->period);
 		speed = freq;
 	}
 	speed *= (0x01 << tinfo->width);
@@ -204,9 +163,10 @@ ahd_format_transinfo(struct info_str *info, struct ahd_transinfo *tinfo)
 
 static void
 ahd_dump_target_state(struct ahd_softc *ahd, struct info_str *info,
-		      u_int our_id, char channel, u_int target_id)
+		      u_int our_id, char channel, u_int target_id,
+		      u_int target_offset)
 {
-	struct  scsi_target *starget;
+	struct	ahd_linux_target *targ;
 	struct	ahd_initiator_tinfo *tinfo;
 	struct	ahd_tmode_tstate *tstate;
 	int	lun;
@@ -216,19 +176,20 @@ ahd_dump_target_state(struct ahd_softc *ahd, struct info_str *info,
 	copy_info(info, "Target %d Negotiation Settings\n", target_id);
 	copy_info(info, "\tUser: ");
 	ahd_format_transinfo(info, &tinfo->user);
-	starget = ahd->platform_data->starget[target_id];
-	if (starget == NULL)
+	targ = ahd->platform_data->targets[target_offset];
+	if (targ == NULL)
 		return;
 
 	copy_info(info, "\tGoal: ");
 	ahd_format_transinfo(info, &tinfo->goal);
 	copy_info(info, "\tCurr: ");
 	ahd_format_transinfo(info, &tinfo->curr);
+	copy_info(info, "\tTransmission Errors %ld\n", targ->errors_detected);
 
 	for (lun = 0; lun < AHD_NUM_LUNS; lun++) {
-		struct scsi_device *dev;
+		struct ahd_linux_device *dev;
 
-		dev = scsi_device_lookup_by_target(starget, lun);
+		dev = targ->devices[lun];
 
 		if (dev == NULL)
 			continue;
@@ -238,13 +199,10 @@ ahd_dump_target_state(struct ahd_softc *ahd, struct info_str *info,
 }
 
 static void
-ahd_dump_device_state(struct info_str *info, struct scsi_device *sdev)
+ahd_dump_device_state(struct info_str *info, struct ahd_linux_device *dev)
 {
-	struct ahd_linux_device *dev = scsi_transport_device_data(sdev);
-
 	copy_info(info, "\tChannel %c Target %d Lun %d Settings\n",
-		  sdev->sdev_target->channel + 'A',
-		  sdev->sdev_target->id, sdev->lun);
+		  dev->target->channel + 'A', dev->target->target, dev->lun);
 
 	copy_info(info, "\t\tCommands Queued %ld\n", dev->commands_issued);
 	copy_info(info, "\t\tCommands Active %d\n", dev->active);
@@ -272,32 +230,33 @@ ahd_proc_write_seeprom(struct ahd_softc *ahd, char *buffer, int length)
 	saved_modes = ahd_save_modes(ahd);
 	ahd_set_modes(ahd, AHD_MODE_SCSI, AHD_MODE_SCSI);
 	if (length != sizeof(struct seeprom_config)) {
-		printk("ahd_proc_write_seeprom: incorrect buffer size\n");
+		printf("ahd_proc_write_seeprom: incorrect buffer size\n");
 		goto done;
 	}
 
 	have_seeprom = ahd_verify_cksum((struct seeprom_config*)buffer);
 	if (have_seeprom == 0) {
-		printk("ahd_proc_write_seeprom: cksum verification failed\n");
+		printf("ahd_proc_write_seeprom: cksum verification failed\n");
 		goto done;
 	}
 
 	have_seeprom = ahd_acquire_seeprom(ahd);
 	if (!have_seeprom) {
-		printk("ahd_proc_write_seeprom: No Serial EEPROM\n");
+		printf("ahd_proc_write_seeprom: No Serial EEPROM\n");
 		goto done;
 	} else {
 		u_int start_addr;
 
 		if (ahd->seep_config == NULL) {
-			ahd->seep_config = kmalloc(sizeof(*ahd->seep_config), GFP_ATOMIC);
+			ahd->seep_config = malloc(sizeof(*ahd->seep_config),
+						  M_DEVBUF, M_NOWAIT);
 			if (ahd->seep_config == NULL) {
-				printk("aic79xx: Unable to allocate serial "
+				printf("aic79xx: Unable to allocate serial "
 				       "eeprom buffer.  Write failing\n");
 				goto done;
 			}
 		}
-		printk("aic79xx: Writing Serial EEPROM\n");
+		printf("aic79xx: Writing Serial EEPROM\n");
 		start_addr = 32 * (ahd->channel - 'A');
 		ahd_write_seeprom(ahd, (u_int16_t *)buffer, start_addr,
 				  sizeof(struct seeprom_config)/2);
@@ -319,15 +278,26 @@ done:
  * Return information to handle /proc support for the driver.
  */
 int
-ahd_linux_proc_info(struct Scsi_Host *shost, char *buffer, char **start,
-		    off_t offset, int length, int inout)
+ahd_linux_proc_info(struct Scsi_Host *shost, char *buffer, char **start, off_t offset,
+		  int length, int inout)
 {
-	struct	ahd_softc *ahd = *(struct ahd_softc **)shost->hostdata;
+	struct	ahd_softc *ahd;
 	struct	info_str info;
 	char	ahd_info[256];
+	u_long	l;
 	u_int	max_targ;
 	u_int	i;
 	int	retval;
+
+	retval = -EINVAL;
+	ahd_list_lock(&l);
+	TAILQ_FOREACH(ahd, &ahd_tailq, links) {
+		if (ahd->platform_data->host == shost)
+			break;
+	}
+
+	if (ahd == NULL)
+		goto done;
 
 	 /* Has data been written to the file? */ 
 	if (inout == TRUE) {
@@ -351,7 +321,7 @@ ahd_linux_proc_info(struct Scsi_Host *shost, char *buffer, char **start,
 	copy_info(&info, "Allocated SCBs: %d, SG List Length: %d\n\n",
 		  ahd->scb_data.numscbs, AHD_NSEG);
 
-	max_targ = 16;
+	max_targ = 15;
 
 	if (ahd->seep_config == NULL)
 		copy_info(&info, "No Serial EEPROM\n");
@@ -369,14 +339,15 @@ ahd_linux_proc_info(struct Scsi_Host *shost, char *buffer, char **start,
 	copy_info(&info, "\n");
 
 	if ((ahd->features & AHD_WIDE) == 0)
-		max_targ = 8;
+		max_targ = 7;
 
-	for (i = 0; i < max_targ; i++) {
+	for (i = 0; i <= max_targ; i++) {
 
 		ahd_dump_target_state(ahd, &info, ahd->our_id, 'A',
-				      /*target_id*/i);
+				      /*target_id*/i, /*target_offset*/i);
 	}
 	retval = info.pos > info.offset ? info.pos - info.offset : 0;
 done:
+	ahd_list_unlock(&l);
 	return (retval);
 }

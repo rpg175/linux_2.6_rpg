@@ -18,76 +18,107 @@
  */
 
 #include "opl4_local.h"
-#include <linux/vmalloc.h>
 #include <sound/info.h>
 
 #ifdef CONFIG_PROC_FS
 
-static int snd_opl4_mem_proc_open(struct snd_info_entry *entry,
+static int snd_opl4_mem_proc_open(snd_info_entry_t *entry,
 				  unsigned short mode, void **file_private_data)
 {
-	struct snd_opl4 *opl4 = entry->private_data;
+	opl4_t *opl4 = snd_magic_cast(opl4_t, entry->private_data, return -ENXIO);
 
-	mutex_lock(&opl4->access_mutex);
+	down(&opl4->access_mutex);
 	if (opl4->memory_access) {
-		mutex_unlock(&opl4->access_mutex);
+		up(&opl4->access_mutex);
 		return -EBUSY;
 	}
 	opl4->memory_access++;
-	mutex_unlock(&opl4->access_mutex);
+	up(&opl4->access_mutex);
 	return 0;
 }
 
-static int snd_opl4_mem_proc_release(struct snd_info_entry *entry,
+static int snd_opl4_mem_proc_release(snd_info_entry_t *entry,
 				     unsigned short mode, void *file_private_data)
 {
-	struct snd_opl4 *opl4 = entry->private_data;
+	opl4_t *opl4 = snd_magic_cast(opl4_t, entry->private_data, return -ENXIO);
 
-	mutex_lock(&opl4->access_mutex);
+	down(&opl4->access_mutex);
 	opl4->memory_access--;
-	mutex_unlock(&opl4->access_mutex);
+	up(&opl4->access_mutex);
 	return 0;
 }
 
-static ssize_t snd_opl4_mem_proc_read(struct snd_info_entry *entry,
-				      void *file_private_data,
-				      struct file *file, char __user *_buf,
-				      size_t count, loff_t pos)
+static long snd_opl4_mem_proc_read(snd_info_entry_t *entry, void *file_private_data,
+				   struct file *file, char *_buf, long count)
 {
-	struct snd_opl4 *opl4 = entry->private_data;
+	opl4_t *opl4 = snd_magic_cast(opl4_t, entry->private_data, return -ENXIO);
+	long size;
 	char* buf;
 
-	buf = vmalloc(count);
-	if (!buf)
-		return -ENOMEM;
-	snd_opl4_read_memory(opl4, buf, pos, count);
-	if (copy_to_user(_buf, buf, count)) {
-		vfree(buf);
-		return -EFAULT;
+	size = count;
+	if (file->f_pos + size > entry->size)
+		size = entry->size - file->f_pos;
+	if (size > 0) {
+		buf = kmalloc(size, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+		snd_opl4_read_memory(opl4, buf, file->f_pos, size);
+		if (copy_to_user(_buf, buf, size)) {
+			kfree(buf);
+			return -EFAULT;
+		}
+		kfree(buf);
+		file->f_pos += size;
+		return size;
 	}
-	vfree(buf);
-	return count;
+	return 0;
 }
 
-static ssize_t snd_opl4_mem_proc_write(struct snd_info_entry *entry,
-				       void *file_private_data,
-				       struct file *file,
-				       const char __user *_buf,
-				       size_t count, loff_t pos)
+static long snd_opl4_mem_proc_write(snd_info_entry_t *entry, void *file_private_data,
+				    struct file *file, const char *_buf, long count)
 {
-	struct snd_opl4 *opl4 = entry->private_data;
+	opl4_t *opl4 = snd_magic_cast(opl4_t, entry->private_data, return -ENXIO);
+	long size;
 	char *buf;
 
-	buf = vmalloc(count);
-	if (!buf)
-		return -ENOMEM;
-	if (copy_from_user(buf, _buf, count)) {
-		vfree(buf);
-		return -EFAULT;
+	size = count;
+	if (file->f_pos + size > entry->size)
+		size = entry->size - file->f_pos;
+	if (size > 0) {
+		buf = kmalloc(size, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+		if (copy_from_user(buf, _buf, size)) {
+			kfree(buf);
+			return -EFAULT;
+		}
+		snd_opl4_write_memory(opl4, buf, file->f_pos, size);
+		kfree(buf);
+		file->f_pos += size;
+		return size;
 	}
-	snd_opl4_write_memory(opl4, buf, pos, count);
-	vfree(buf);
-	return count;
+	return 0;
+}
+
+static long long snd_opl4_mem_proc_llseek(snd_info_entry_t *entry, void *file_private_data,
+					  struct file *file, long long offset, int orig)
+{
+	switch (orig) {
+	case 0: /* SEEK_SET */
+		file->f_pos = offset;
+		break;
+	case 1: /* SEEK_CUR */
+		file->f_pos += offset;
+		break;
+	case 2: /* SEEK_END, offset is negative */
+		file->f_pos = entry->size + offset;
+		break;
+	default:
+		return -EINVAL;
+	}
+	if (file->f_pos > entry->size)
+		file->f_pos = entry->size;
+	return file->f_pos;
 }
 
 static struct snd_info_entry_ops snd_opl4_mem_proc_ops = {
@@ -95,11 +126,12 @@ static struct snd_info_entry_ops snd_opl4_mem_proc_ops = {
 	.release = snd_opl4_mem_proc_release,
 	.read = snd_opl4_mem_proc_read,
 	.write = snd_opl4_mem_proc_write,
+	.llseek = snd_opl4_mem_proc_llseek,
 };
 
-int snd_opl4_create_proc(struct snd_opl4 *opl4)
+int snd_opl4_create_proc(opl4_t *opl4)
 {
-	struct snd_info_entry *entry;
+	snd_info_entry_t *entry;
 
 	entry = snd_info_create_card_entry(opl4->card, "opl4-mem", opl4->card->proc_root);
 	if (entry) {
@@ -124,9 +156,10 @@ int snd_opl4_create_proc(struct snd_opl4 *opl4)
 	return 0;
 }
 
-void snd_opl4_free_proc(struct snd_opl4 *opl4)
+void snd_opl4_free_proc(opl4_t *opl4)
 {
-	snd_info_free_entry(opl4->proc_entry);
+	if (opl4->proc_entry)
+		snd_info_unregister(opl4->proc_entry);
 }
 
 #endif /* CONFIG_PROC_FS */

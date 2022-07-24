@@ -5,7 +5,9 @@
  *
  *		INET protocol dispatch tables.
  *
- * Authors:	Ross Biro
+ * Version:	$Id: protocol.c,v 1.14 2001/05/18 02:25:49 davem Exp $
+ *
+ * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
  * Fixes:
@@ -22,40 +24,78 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
-#include <linux/cache.h>
-#include <linux/module.h>
-#include <linux/netdevice.h>
-#include <linux/spinlock.h>
-#include <net/protocol.h>
 
-const struct net_protocol __rcu *inet_protos[MAX_INET_PROTOS] __read_mostly;
+#include <asm/uaccess.h>
+#include <asm/system.h>
+#include <linux/module.h>
+#include <linux/types.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/string.h>
+#include <linux/config.h>
+#include <linux/socket.h>
+#include <linux/in.h>
+#include <linux/inet.h>
+#include <linux/netdevice.h>
+#include <linux/timer.h>
+#include <net/ip.h>
+#include <net/protocol.h>
+#include <net/tcp.h>
+#include <linux/skbuff.h>
+#include <net/sock.h>
+#include <net/icmp.h>
+#include <net/udp.h>
+#include <net/ipip.h>
+#include <linux/igmp.h>
+
+struct inet_protocol *inet_protos[MAX_INET_PROTOS];
+static spinlock_t inet_proto_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  *	Add a protocol handler to the hash tables
  */
 
-int inet_add_protocol(const struct net_protocol *prot, unsigned char protocol)
+int inet_add_protocol(struct inet_protocol *prot, unsigned char protocol)
 {
-	int hash = protocol & (MAX_INET_PROTOS - 1);
+	int hash, ret;
 
-	return !cmpxchg((const struct net_protocol **)&inet_protos[hash],
-			NULL, prot) ? 0 : -1;
+	hash = protocol & (MAX_INET_PROTOS - 1);
+
+	spin_lock_bh(&inet_proto_lock);
+	if (inet_protos[hash]) {
+		ret = -1;
+	} else {
+		inet_protos[hash] = prot;
+		ret = 0;
+	}
+	spin_unlock_bh(&inet_proto_lock);
+
+	return ret;
 }
-EXPORT_SYMBOL(inet_add_protocol);
 
 /*
  *	Remove a protocol from the hash tables.
  */
-
-int inet_del_protocol(const struct net_protocol *prot, unsigned char protocol)
+ 
+int inet_del_protocol(struct inet_protocol *prot, unsigned char protocol)
 {
-	int ret, hash = protocol & (MAX_INET_PROTOS - 1);
+	int hash, ret;
 
-	ret = (cmpxchg((const struct net_protocol **)&inet_protos[hash],
-		       prot, NULL) == prot) ? 0 : -1;
+	hash = protocol & (MAX_INET_PROTOS - 1);
+
+	spin_lock_bh(&inet_proto_lock);
+	if (inet_protos[hash] == prot) {
+		inet_protos[hash] = NULL;
+		ret = 0;
+	} else {
+		ret = -1;
+	}
+	spin_unlock_bh(&inet_proto_lock);
 
 	synchronize_net();
 
 	return ret;
 }
+
+EXPORT_SYMBOL(inet_add_protocol);
 EXPORT_SYMBOL(inet_del_protocol);

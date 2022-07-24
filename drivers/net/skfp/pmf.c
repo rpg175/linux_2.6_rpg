@@ -32,22 +32,24 @@
 static const char ID_sccs[] = "@(#)pmf.c	1.37 97/08/04 (C) SK " ;
 #endif
 
-static int smt_authorize(struct s_smc *smc, struct smt_header *sm);
-static int smt_check_set_count(struct s_smc *smc, struct smt_header *sm);
-static const struct s_p_tab* smt_get_ptab(u_short para);
-static int smt_mib_phys(struct s_smc *smc);
-static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
-			int local, int set);
-void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
-		  int index, int local);
-static SMbuf *smt_build_pmf_response(struct s_smc *smc, struct smt_header *req,
-				     int set, int local);
-static int port_to_mib(struct s_smc *smc, int p);
+static int smt_authorize() ;
+static int smt_check_set_count() ;
+static const struct s_p_tab *smt_get_ptab() ;
+static int smt_mib_phys() ;
+int smt_set_para() ;
+void smt_add_para() ;
 
-#define MOFFSS(e)	offsetof(struct fddi_mib, e)
-#define MOFFMS(e)	offsetof(struct fddi_mib_m, e)
-#define MOFFAS(e)	offsetof(struct fddi_mib_a, e)
-#define MOFFPS(e)	offsetof(struct fddi_mib_p, e)
+#define MOFFSS(e)	((int)&(((struct fddi_mib *)0)->e))
+#define MOFFSA(e)	((int) (((struct fddi_mib *)0)->e))
+
+#define MOFFMS(e)	((int)&(((struct fddi_mib_m *)0)->e))
+#define MOFFMA(e)	((int) (((struct fddi_mib_m *)0)->e))
+
+#define MOFFAS(e)	((int)&(((struct fddi_mib_a *)0)->e))
+#define MOFFAA(e)	((int) (((struct fddi_mib_a *)0)->e))
+
+#define MOFFPS(e)	((int)&(((struct fddi_mib_p *)0)->e))
+#define MOFFPA(e)	((int) (((struct fddi_mib_p *)0)->e))
 
 
 #define AC_G	0x01		/* Get */
@@ -80,8 +82,8 @@ static const struct s_p_tab {
 	{ SMT_P100D,AC_G,	MOFFSS(fddiSMTOpVersionId),	"S"	} ,
 	{ SMT_P100E,AC_G,	MOFFSS(fddiSMTHiVersionId),	"S"	} ,
 	{ SMT_P100F,AC_G,	MOFFSS(fddiSMTLoVersionId),	"S"	} ,
-	{ SMT_P1010,AC_G,	MOFFSS(fddiSMTManufacturerData), "D" } ,
-	{ SMT_P1011,AC_GR,	MOFFSS(fddiSMTUserData),	"D"	} ,
+	{ SMT_P1010,AC_G,	MOFFSA(fddiSMTManufacturerData), "D" } ,
+	{ SMT_P1011,AC_GR,	MOFFSA(fddiSMTUserData),	"D"	} ,
 	{ SMT_P1012,AC_G,	MOFFSS(fddiSMTMIBVersionId),	"S"	} ,
 
 	/* StationConfigGrp */
@@ -96,7 +98,7 @@ static const struct s_p_tab {
 	{ SMT_P101D,AC_GR,	MOFFSS(fddiSMTTT_Notify),	"wS"	} ,
 	{ SMT_P101E,AC_GR,	MOFFSS(fddiSMTStatRptPolicy),	"bB"	} ,
 	{ SMT_P101F,AC_GR,	MOFFSS(fddiSMTTrace_MaxExpiration),"lL"	} ,
-	{ SMT_P1020,AC_G,	MOFFSS(fddiSMTPORTIndexes),	"II"	} ,
+	{ SMT_P1020,AC_G,	MOFFSA(fddiSMTPORTIndexes),	"II"	} ,
 	{ SMT_P1021,AC_G,	MOFFSS(fddiSMTMACIndexes),	"I"	} ,
 	{ SMT_P1022,AC_G,	MOFFSS(fddiSMTBypassPresent),	"F"	} ,
 
@@ -110,8 +112,8 @@ static const struct s_p_tab {
 
 	/* MIBOperationGrp */
 	{ SMT_P1032,AC_GROUP	} ,
-	{ SMT_P1033,AC_G,	MOFFSS(fddiSMTTimeStamp),"P"		} ,
-	{ SMT_P1034,AC_G,	MOFFSS(fddiSMTTransitionTimeStamp),"P"	} ,
+	{ SMT_P1033,AC_G,	MOFFSA(fddiSMTTimeStamp),"P"		} ,
+	{ SMT_P1034,AC_G,	MOFFSA(fddiSMTTransitionTimeStamp),"P"	} ,
 	/* NOTE : SMT_P1035 is already swapped ! SMT_P_SETCOUNT */
 	{ SMT_P1035,AC_G,	MOFFSS(fddiSMTSetCount),"4P"		} ,
 	{ SMT_P1036,AC_G,	MOFFSS(fddiSMTLastSetStationId),"8"	} ,
@@ -122,7 +124,7 @@ static const struct s_p_tab {
 	 * PRIVATE EXTENSIONS
 	 * only accessible locally to get/set passwd
 	 */
-	{ SMT_P10F0,AC_GR,	MOFFSS(fddiPRPMFPasswd),	"8"	} ,
+	{ SMT_P10F0,AC_GR,	MOFFSA(fddiPRPMFPasswd),	"8"	} ,
 	{ SMT_P10F1,AC_GR,	MOFFSS(fddiPRPMFStation),	"8"	} ,
 #ifdef	ESS
 	{ SMT_P10F2,AC_GR,	MOFFSS(fddiESSPayload),		"lL"	} ,
@@ -238,7 +240,7 @@ static const struct s_p_tab {
 	{ SMT_P400E,AC_GR,	MOFFPS(fddiPORTConnectionPolicies),"bB"	} ,
 	{ SMT_P400F,AC_G,	MOFFPS(fddiPORTMacIndicated),	"2"	} ,
 	{ SMT_P4010,AC_G,	MOFFPS(fddiPORTCurrentPath),	"E"	} ,
-	{ SMT_P4011,AC_GR,	MOFFPS(fddiPORTRequestedPaths),	"l4"	} ,
+	{ SMT_P4011,AC_GR,	MOFFPA(fddiPORTRequestedPaths),	"l4"	} ,
 	{ SMT_P4012,AC_G,	MOFFPS(fddiPORTMACPlacement),	"S"	} ,
 	{ SMT_P4013,AC_G,	MOFFPS(fddiPORTAvailablePaths),	"B"	} ,
 	{ SMT_P4016,AC_G,	MOFFPS(fddiPORTPMDClass),	"E"	} ,
@@ -278,7 +280,13 @@ static const struct s_p_tab {
 	{ 0 }
 } ;
 
-void smt_pmf_received_pack(struct s_smc *smc, SMbuf *mb, int local)
+
+static SMbuf *smt_build_pmf_response() ;
+
+void smt_pmf_received_pack(smc,mb,local)
+struct s_smc *smc ;
+SMbuf *mb ;
+int local ;
 {
 	struct smt_header	*sm ;
 	SMbuf		*reply ;
@@ -308,8 +316,13 @@ void smt_pmf_received_pack(struct s_smc *smc, SMbuf *mb, int local)
 	}
 }
 
-static SMbuf *smt_build_pmf_response(struct s_smc *smc, struct smt_header *req,
-				     int set, int local)
+extern	SMbuf	*smt_get_mbuf() ;
+
+static SMbuf *smt_build_pmf_response(smc,req,set,local)
+struct s_smc *smc ;
+struct smt_header *req ;
+int	set ;
+int	local ;
 {
 	SMbuf			*mb ;
 	struct smt_header	*smt ;
@@ -328,7 +341,7 @@ static SMbuf *smt_build_pmf_response(struct s_smc *smc, struct smt_header *req,
 	 * build SMT header
 	 */
 	if (!(mb = smt_get_mbuf(smc)))
-		return mb;
+		return(mb) ;
 
 	smt = smtod(mb, struct smt_header *) ;
 	smt->smt_dest = req->smt_source ;	/* DA == source of request */
@@ -493,10 +506,14 @@ static SMbuf *smt_build_pmf_response(struct s_smc *smc, struct smt_header *req,
 		smt_add_para(smc,&set_pcon,(u_short) SMT_P1035,0,0) ;
 		smt_add_para(smc,&set_pcon,(u_short) SMT_P1036,0,0) ;
 	}
-	return mb;
+	return(mb) ;
 }
 
-static int smt_authorize(struct s_smc *smc, struct smt_header *sm)
+extern void *sm_to_para() ;
+
+static int smt_authorize(smc,sm)
+struct s_smc *smc ;
+struct smt_header *sm ;
 {
 	struct smt_para	*pa ;
 	int		i ;
@@ -511,7 +528,7 @@ static int smt_authorize(struct s_smc *smc, struct smt_header *sm)
 	if (i != 8) {
 		if (memcmp((char *) &sm->smt_sid,
 			(char *) &smc->mib.fddiPRPMFStation,8))
-			return 1;
+			return(1) ;
 	}
 	/*
 	 * check authoriziation parameter if passwd not zero
@@ -522,16 +539,18 @@ static int smt_authorize(struct s_smc *smc, struct smt_header *sm)
 	if (i != 8) {
 		pa = (struct smt_para *) sm_to_para(smc,sm,SMT_P_AUTHOR) ;
 		if (!pa)
-			return 1;
+			return(1) ;
 		if (pa->p_len != 8)
-			return 1;
+			return(1) ;
 		if (memcmp((char *)(pa+1),(char *)smc->mib.fddiPRPMFPasswd,8))
-			return 1;
+			return(1) ;
 	}
-	return 0;
+	return(0) ;
 }
 
-static int smt_check_set_count(struct s_smc *smc, struct smt_header *sm)
+static int smt_check_set_count(smc,sm)
+struct s_smc *smc ;
+struct smt_header *sm ;
 {
 	struct smt_para	*pa ;
 	struct smt_p_setcount	*sc ;
@@ -542,18 +561,22 @@ static int smt_check_set_count(struct s_smc *smc, struct smt_header *sm)
 		if ((smc->mib.fddiSMTSetCount.count != sc->count) ||
 			memcmp((char *) smc->mib.fddiSMTSetCount.timestamp,
 			(char *)sc->timestamp,8))
-			return 1;
+			return(1) ;
 	}
-	return 0;
+	return(0) ;
 }
 
-void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
-		  int index, int local)
+void smt_add_para(smc,pcon,para,index,local)
+struct s_smc *smc ;
+struct s_pcon *pcon ;
+u_short para ;
+int index ;
+int local ;
 {
 	struct smt_para	*pa ;
 	const struct s_p_tab	*pt ;
-	struct fddi_mib_m *mib_m = NULL;
-	struct fddi_mib_p *mib_p = NULL;
+	struct fddi_mib_m *mib_m = 0 ;
+	struct fddi_mib_p *mib_p = 0 ;
 	int		len ;
 	int		plen ;
 	char		*from ;
@@ -568,7 +591,7 @@ void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
 	int		sp_len ;
 
 	/*
-	 * skip if error
+	 * skip if errror
 	 */
 	if (pcon->pc_err)
 		return ;
@@ -638,7 +661,7 @@ void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
 	/*
 	 * check special paras
 	 */
-	swap = NULL;
+	swap = 0 ;
 	switch (para) {
 	case SMT_P10F0 :
 	case SMT_P10F1 :
@@ -807,9 +830,9 @@ void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
 				mib_p->fddiPORTLerFlag ;
 			sp->p4050_pad = 0 ;
 			sp->p4050_cutoff =
-				mib_p->fddiPORTLer_Cutoff ;
+				mib_p->fddiPORTLer_Cutoff ; ;
 			sp->p4050_alarm =
-				mib_p->fddiPORTLer_Alarm ;
+				mib_p->fddiPORTLer_Alarm ; ;
 			sp->p4050_estimate =
 				mib_p->fddiPORTLer_Estimate ;
 			sp->p4050_reject_ct =
@@ -829,7 +852,7 @@ void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
 			sp->p4051_porttype =
 				mib_p->fddiPORTMy_Type ;
 			sp->p4051_connectstate =
-				mib_p->fddiPORTConnectState ;
+				mib_p->fddiPORTConnectState ; ;
 			sp->p4051_pc_neighbor =
 				mib_p->fddiPORTNeighborType ;
 			sp->p4051_pc_withhold =
@@ -853,7 +876,7 @@ void smt_add_para(struct s_smc *smc, struct s_pcon *pcon, u_short para,
 			struct smt_p_4053	*sp ;
 			sp = (struct smt_p_4053 *) to ;
 			sp->p4053_multiple =
-				mib_p->fddiPORTMultiple_P ;
+				mib_p->fddiPORTMultiple_P ; ;
 			sp->p4053_availablepaths =
 				mib_p->fddiPORTAvailablePaths ;
 			sp->p4053_currentpath =
@@ -1072,8 +1095,12 @@ wrong_error:
 /*
  * set parameter
  */
-static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
-			int local, int set)
+int smt_set_para(smc,pa,index,local,set)
+struct s_smc *smc ;
+struct smt_para	*pa ;
+int index ;
+int local ;
+int set ;
 {
 #define IFSET(x)	if (set) (x)
 
@@ -1085,9 +1112,9 @@ static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
 	char		c ;
 	char		*mib_addr ;
 	struct fddi_mib	*mib ;
-	struct fddi_mib_m	*mib_m = NULL;
-	struct fddi_mib_a	*mib_a = NULL;
-	struct fddi_mib_p	*mib_p = NULL;
+	struct fddi_mib_m	*mib_m = 0 ;
+	struct fddi_mib_a	*mib_a = 0 ;
+	struct fddi_mib_p	*mib_p = 0 ;
 	int		mac ;
 	int		path ;
 	int		port ;
@@ -1109,7 +1136,7 @@ static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
 		break ;
 	case 0x2000 :
 		if (mac < 0 || mac >= NUMMACS) {
-			return SMT_RDF_NOPARAM;
+			return(SMT_RDF_NOPARAM) ;
 		}
 		mib_m = &smc->mib.m[mac] ;
 		mib_addr = (char *) mib_m ;
@@ -1118,7 +1145,7 @@ static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
 		break ;
 	case 0x3000 :
 		if (path < 0 || path >= NUMPATHS) {
-			return SMT_RDF_NOPARAM;
+			return(SMT_RDF_NOPARAM) ;
 		}
 		mib_a = &smc->mib.a[path] ;
 		mib_addr = (char *) mib_a ;
@@ -1127,7 +1154,7 @@ static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
 		break ;
 	case 0x4000 :
 		if (port < 0 || port >= smt_mib_phys(smc)) {
-			return SMT_RDF_NOPARAM;
+			return(SMT_RDF_NOPARAM) ;
 		}
 		mib_p = &smc->mib.p[port_to_mib(smc,port)] ;
 		mib_addr = (char *) mib_p ;
@@ -1151,20 +1178,22 @@ static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
 	case SMT_P10F9 :
 #endif
 	case SMT_P20F1 :
-		if (!local)
-			return SMT_RDF_NOPARAM;
+		if (!local) {
+			return(SMT_RDF_NOPARAM) ;
+		}
 		break ;
 	}
 	pt = smt_get_ptab(pa->p_type) ;
-	if (!pt)
-		return (pa->p_type & 0xff00) ? SMT_RDF_NOPARAM :
-					       SMT_RDF_ILLEGAL;
+	if (!pt) {
+		return( (pa->p_type & 0xff00) ? SMT_RDF_NOPARAM :
+						SMT_RDF_ILLEGAL ) ;
+	}
 	switch (pt->p_access) {
 	case AC_GR :
 	case AC_S :
 		break ;
 	default :
-		return SMT_RDF_ILLEGAL;
+		return(SMT_RDF_ILLEGAL) ;
 	}
 	to = mib_addr + pt->p_offset ;
 	swap = pt->p_swap ;		/* pointer to swap string */
@@ -1290,7 +1319,7 @@ static int smt_set_para(struct s_smc *smc, struct smt_para *pa, int index,
 			break ;
 		default :
 			SMT_PANIC(smc,SMT_E0120, SMT_E0120_MSG) ;
-			return SMT_RDF_ILLEGAL;
+			return(SMT_RDF_ILLEGAL) ;
 		}
 	}
 	/*
@@ -1499,15 +1528,15 @@ change_mac_para:
 	default :
 		break ;
 	}
-	return 0;
+	return(0) ;
 
 val_error:
 	/* parameter value in frame is out of range */
-	return SMT_RDF_RANGE;
+	return(SMT_RDF_RANGE) ;
 
 len_error:
 	/* parameter value in frame is too short */
-	return SMT_RDF_LENGTH;
+	return(SMT_RDF_LENGTH) ;
 
 #if	0
 no_author_error:
@@ -1516,48 +1545,55 @@ no_author_error:
 	 *  because SBA denied is not a valid return code in the
 	 * PMF protocol.
 	 */
-	return SMT_RDF_AUTHOR;
+	return(SMT_RDF_AUTHOR) ;
 #endif
 }
 
-static const struct s_p_tab *smt_get_ptab(u_short para)
+static const struct s_p_tab *smt_get_ptab(para)
+u_short para ;
 {
 	const struct s_p_tab	*pt ;
 	for (pt = p_tab ; pt->p_num && pt->p_num != para ; pt++)
 		;
-	return pt->p_num ? pt : NULL;
+	return(pt->p_num ? pt : 0) ;
 }
 
-static int smt_mib_phys(struct s_smc *smc)
+static int smt_mib_phys(smc)
+struct s_smc *smc ;
 {
 #ifdef	CONCENTRATOR
 	SK_UNUSED(smc) ;
 
-	return NUMPHYS;
+	return(NUMPHYS) ;
 #else
 	if (smc->s.sas == SMT_SAS)
-		return 1;
-	return NUMPHYS;
+		return(1) ;
+	return(NUMPHYS) ;
 #endif
 }
 
-static int port_to_mib(struct s_smc *smc, int p)
+int port_to_mib(smc,p)
+struct s_smc *smc ;
+int p ;
 {
 #ifdef	CONCENTRATOR
 	SK_UNUSED(smc) ;
 
-	return p;
+	return(p) ;
 #else
 	if (smc->s.sas == SMT_SAS)
-		return PS;
-	return p;
+		return(PS) ;
+	return(p) ;
 #endif
 }
 
 
 #ifdef	DEBUG
 #ifndef	BOOT
-void dump_smt(struct s_smc *smc, struct smt_header *sm, char *text)
+void dump_smt(smc,sm,text)
+struct s_smc *smc ;
+struct smt_header *sm ;
+char *text ;
 {
 	int	len ;
 	struct smt_para	*pa ;
@@ -1644,7 +1680,9 @@ void dump_smt(struct s_smc *smc, struct smt_header *sm, char *text)
 	printf("-------------------------------------------------\n\n") ;
 }
 
-void dump_hex(char *p, int len)
+void dump_hex(p,len)
+char *p ;
+int len ;
 {
 	int	n = 0 ;
 	while (len--) {

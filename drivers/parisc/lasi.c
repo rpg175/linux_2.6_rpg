@@ -11,15 +11,16 @@
  *      (at your option) any later version.
  *
  *	by Alan Cox <alan@redhat.com> and 
- * 	   Alex deVries <alex@onefishtwo.ca>
+ * 	   Alex deVries <adevries@thepuffingroup.com> 
  */
 
 #include <linux/errno.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/slab.h>
 #include <linux/module.h>
 #include <linux/pm.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include <asm/io.h>
@@ -34,30 +35,33 @@
 #define LASI_IO_CONF	0x7FFFE	/* LASI primary configuration register */
 #define LASI_IO_CONF2	0x7FFFF	/* LASI secondary configuration register */
 
-static void lasi_choose_irq(struct parisc_device *dev, void *ctrl)
+static int lasi_choose_irq(struct parisc_device *dev)
 {
 	int irq;
 
+	/*
+	** "irq" bits below are numbered relative to most significant bit.
+	*/
 	switch (dev->id.sversion) {
-		case 0x74:	irq =  7; break; /* Centronics */
-		case 0x7B:	irq = 13; break; /* Audio */
-		case 0x81:	irq = 14; break; /* Lasi itself */
-		case 0x82:	irq =  9; break; /* SCSI */
-		case 0x83:	irq = 20; break; /* Floppy */
-		case 0x84:	irq = 26; break; /* PS/2 Keyboard */
-		case 0x87:	irq = 18; break; /* ISDN */
-		case 0x8A:	irq =  8; break; /* LAN */
-		case 0x8C:	irq =  5; break; /* RS232 */
-		case 0x8D:	irq = (dev->hw_path == 13) ? 16 : 17; break;
-						 /* Telephone */
-		default: 	return;		 /* unknown */
+		case 0x74:	irq = 24; break; /* Centronics */
+		case 0x7B:	irq = 18; break; /* Audio */
+		case 0x81:	irq = 17; break; /* Lasi itself */
+		case 0x82:	irq = 22; break; /* SCSI */
+		case 0x83:	irq = 11; break; /* Floppy */
+		case 0x84:	irq =  5; break; /* PS/2 Keyboard */
+		case 0x87:	irq = 13; break; /* ISDN */
+		case 0x8A:	irq = 23; break; /* LAN */
+		case 0x8C:	irq = 26; break; /* RS232 */
+		case 0x8D:	irq = (dev->hw_path == 13) ? 15 : 14;
+						break; /* Telephone */
+		default: 	irq = -1; break; /* unknown */
 	}
 
-	gsc_asic_assign_irq(ctrl, irq, &dev->irq);
+	return irq;
 }
 
 static void __init
-lasi_init_irq(struct gsc_asic *this_lasi)
+lasi_init_irq(struct busdevice *this_lasi)
 {
 	unsigned long lasi_base = this_lasi->hpa;
 
@@ -107,7 +111,7 @@ lasi_init_irq(struct gsc_asic *this_lasi)
 
 #else
 
-static void __init lasi_led_init(unsigned long lasi_hpa)
+void __init lasi_led_init(unsigned long lasi_hpa)
 {
 	unsigned long datareg;
 
@@ -138,7 +142,7 @@ static void __init lasi_led_init(unsigned long lasi_hpa)
 		break;
 	}
 
-	register_led_driver(DISPLAY_MODEL_LASI, LED_CMD_REG_NONE, datareg);
+	register_led_driver(DISPLAY_MODEL_LASI, LED_CMD_REG_NONE, (char *)datareg);
 }
 #endif
 
@@ -150,7 +154,7 @@ static void __init lasi_led_init(unsigned long lasi_hpa)
  * 
  */
 
-static unsigned long lasi_power_off_hpa __read_mostly;
+static unsigned long lasi_power_off_hpa;
 
 static void lasi_power_off(void)
 {
@@ -163,19 +167,19 @@ static void lasi_power_off(void)
 	gsc_writel(0x02, datareg);
 }
 
-static int __init lasi_init_chip(struct parisc_device *dev)
+int __init
+lasi_init_chip(struct parisc_device *dev)
 {
-	extern void (*chassis_power_off)(void);
-	struct gsc_asic *lasi;
+	struct busdevice *lasi;
 	struct gsc_irq gsc_irq;
-	int ret;
+	int irq, ret;
 
-	lasi = kzalloc(sizeof(*lasi), GFP_KERNEL);
+	lasi = kmalloc(sizeof(struct busdevice), GFP_KERNEL);
 	if (!lasi)
 		return -ENOMEM;
 
 	lasi->name = "Lasi";
-	lasi->hpa = dev->hpa.start;
+	lasi->hpa = dev->hpa;
 
 	/* Check the 4-bit (yes, only 4) version register */
 	lasi->version = gsc_readl(lasi->hpa + LASI_VER) & 0xf;
@@ -189,40 +193,43 @@ static int __init lasi_init_chip(struct parisc_device *dev)
 	lasi_init_irq(lasi);
 
 	/* the IRQ lasi should use */
-	dev->irq = gsc_alloc_irq(&gsc_irq);
-	if (dev->irq < 0) {
+	irq = gsc_alloc_irq(&gsc_irq);
+	if (irq < 0) {
 		printk(KERN_ERR "%s(): cannot get GSC irq\n",
-				__func__);
+				__FUNCTION__);
 		kfree(lasi);
 		return -EBUSY;
 	}
 
-	lasi->eim = ((u32) gsc_irq.txn_addr) | gsc_irq.txn_data;
-
-	ret = request_irq(gsc_irq.irq, gsc_asic_intr, 0, "lasi", lasi);
+	ret = request_irq(gsc_irq.irq, busdev_barked, 0, "lasi", lasi);
 	if (ret < 0) {
 		kfree(lasi);
 		return ret;
 	}
 
+	/* Save this for debugging later */
+	lasi->parent_irq = gsc_irq.irq;
+	lasi->eim = ((u32) gsc_irq.txn_addr) | gsc_irq.txn_data;
+
 	/* enable IRQ's for devices below LASI */
 	gsc_writel(lasi->eim, lasi->hpa + OFFSET_IAR);
 
 	/* Done init'ing, register this driver */
-	ret = gsc_common_setup(dev, lasi);
+	ret = gsc_common_irqsetup(dev, lasi);
 	if (ret) {
 		kfree(lasi);
 		return ret;
 	}    
 
-	gsc_fixup_irqs(dev, lasi, lasi_choose_irq);
+	fixup_child_irqs(dev, lasi->busdev_region->data.irqbase,
+			lasi_choose_irq);
 
 	/* initialize the power off function */
 	/* FIXME: Record the LASI HPA for the power off function.  This should
 	 * ensure that only the first LASI (the one controlling the power off)
 	 * should set the HPA here */
 	lasi_power_off_hpa = lasi->hpa;
-	chassis_power_off = lasi_power_off;
+	pm_power_off = lasi_power_off;
 	
 	return ret;
 }
@@ -233,7 +240,7 @@ static struct parisc_device_id lasi_tbl[] = {
 };
 
 struct parisc_driver lasi_driver = {
-	.name =		"lasi",
+	.name =		"Lasi",
 	.id_table =	lasi_tbl,
 	.probe =	lasi_init_chip,
 };

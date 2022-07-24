@@ -23,12 +23,34 @@
 
 #include <sound/vx_core.h>
 
+#include <pcmcia/cs_types.h>
+#include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
 
+struct snd_vxp_entry {
+	dev_info_t *dev_info;
+
+	/* module parameters */
+	int *index_table;
+	char **id_table;
+	int *enable_table;
+	unsigned int *irq_mask_p;
+	int *irq_list;
+	int *ibl;
+
+	/* h/w config */
+	struct snd_vx_hardware *hardware;
+	struct snd_vx_ops *ops;
+
+	/* slots */
+	vx_core_t *card_list[SNDRV_CARDS];
+	dev_link_t *dev_list;		/* Linked list of devices */
+};
+
 struct snd_vxpocket {
 
-	struct vx_core core;
+	vx_core_t core;
 
 	unsigned long port;
 
@@ -37,18 +59,27 @@ struct snd_vxpocket {
 	unsigned int regCDSP;	/* current CDSP register */
 	unsigned int regDIALOG;	/* current DIALOG register */
 
-	int index;	/* card index */
+	int index;
+	struct snd_vxp_entry *hw_entry;
 
 	/* pcmcia stuff */
-	struct pcmcia_device	*p_dev;
+	dev_link_t link;
+	dev_node_t node;
 };
 
 extern struct snd_vx_ops snd_vxpocket_ops;
 
-void vx_set_mic_boost(struct vx_core *chip, int boost);
-void vx_set_mic_level(struct vx_core *chip, int level);
+void vx_set_mic_boost(vx_core_t *chip, int boost);
+void vx_set_mic_level(vx_core_t *chip, int level);
 
-int vxp_add_mic_controls(struct vx_core *chip);
+/*
+ * pcmcia stuff
+ */
+dev_link_t *snd_vxpocket_attach(struct snd_vxp_entry *hw);
+void snd_vxpocket_detach(struct snd_vxp_entry *hw, dev_link_t *link);
+void snd_vxpocket_detach_all(struct snd_vxp_entry *hw);
+
+int vxp_add_mic_controls(vx_core_t *chip);
 
 /* Constants used to access the CDSP register (0x08). */
 #define CDSP_MAGIC	0xA7	/* magic value (for read) */

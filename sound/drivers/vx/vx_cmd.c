@@ -20,6 +20,7 @@
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <sound/driver.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/vx_core.h>
@@ -28,7 +29,7 @@
 /*
  * Array of DSP commands
  */
-static struct vx_cmd_info vx_dsp_cmds[] = {
+struct vx_cmd_info vx_dsp_cmds[] = {
 [CMD_VERSION] =			{ 0x010000, 2, RMH_SSIZE_FIXED, 1 },
 [CMD_SUPPORTED] =		{ 0x020000, 1, RMH_SSIZE_FIXED, 2 },
 [CMD_TEST_IT] =			{ 0x040000, 1, RMH_SSIZE_FIXED, 1 },
@@ -99,8 +100,7 @@ static struct vx_cmd_info vx_dsp_cmds[] = {
  */
 void vx_init_rmh(struct vx_rmh *rmh, unsigned int cmd)
 {
-	if (snd_BUG_ON(cmd >= CMD_LAST_INDEX))
-		return;
+	snd_assert(cmd < CMD_LAST_INDEX, return);
 	rmh->LgCmd = vx_dsp_cmds[cmd].length;
 	rmh->LgStat = vx_dsp_cmds[cmd].st_length;
 	rmh->DspStat = vx_dsp_cmds[cmd].st_type;

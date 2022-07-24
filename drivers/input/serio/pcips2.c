@@ -15,7 +15,6 @@
 #include <linux/ioport.h>
 #include <linux/input.h>
 #include <linux/pci.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/serio.h>
 #include <linux/delay.h>
@@ -39,14 +38,14 @@
 #define PS2_STAT_TXEMPTY	(1<<7)
 
 struct pcips2_data {
-	struct serio	*io;
+	struct serio	io;
 	unsigned int	base;
 	struct pci_dev	*dev;
 };
 
 static int pcips2_write(struct serio *io, unsigned char val)
 {
-	struct pcips2_data *ps2if = io->port_data;
+	struct pcips2_data *ps2if = io->driver;
 	unsigned int stat;
 
 	do {
@@ -59,7 +58,7 @@ static int pcips2_write(struct serio *io, unsigned char val)
 	return 0;
 }
 
-static irqreturn_t pcips2_interrupt(int irq, void *devid)
+static irqreturn_t pcips2_interrupt(int irq, void *devid, struct pt_regs *regs)
 {
 	struct pcips2_data *ps2if = devid;
 	unsigned char status, scancode;
@@ -81,7 +80,7 @@ static irqreturn_t pcips2_interrupt(int irq, void *devid)
 		if (hweight8(scancode) & 1)
 			flag ^= SERIO_PARITY;
 
-		serio_interrupt(ps2if->io, scancode, flag);
+		serio_interrupt(&ps2if->io, scancode, flag, regs);
 	} while (1);
 	return IRQ_RETVAL(handled);
 }
@@ -102,13 +101,13 @@ static void pcips2_flush_input(struct pcips2_data *ps2if)
 
 static int pcips2_open(struct serio *io)
 {
-	struct pcips2_data *ps2if = io->port_data;
+	struct pcips2_data *ps2if = io->driver;
 	int ret, val = 0;
 
 	outb(PS2_CTRL_ENABLE, ps2if->base);
 	pcips2_flush_input(ps2if);
 
-	ret = request_irq(ps2if->dev->irq, pcips2_interrupt, IRQF_SHARED,
+	ret = request_irq(ps2if->dev->irq, pcips2_interrupt, SA_SHIRQ,
 			  "pcips2", ps2if);
 	if (ret == 0)
 		val = PS2_CTRL_ENABLE | PS2_CTRL_RXIRQ;
@@ -120,7 +119,7 @@ static int pcips2_open(struct serio *io)
 
 static void pcips2_close(struct serio *io)
 {
-	struct pcips2_data *ps2if = io->port_data;
+	struct pcips2_data *ps2if = io->driver;
 
 	outb(0, ps2if->base);
 
@@ -130,49 +129,46 @@ static void pcips2_close(struct serio *io)
 static int __devinit pcips2_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct pcips2_data *ps2if;
-	struct serio *serio;
 	int ret;
 
 	ret = pci_enable_device(dev);
 	if (ret)
-		goto out;
+		return ret;
 
-	ret = pci_request_regions(dev, "pcips2");
-	if (ret)
+	if (!request_region(pci_resource_start(dev, 0),
+			    pci_resource_len(dev, 0), "pcips2")) {
+		ret = -EBUSY;
 		goto disable;
+	}
 
-	ps2if = kzalloc(sizeof(struct pcips2_data), GFP_KERNEL);
-	serio = kzalloc(sizeof(struct serio), GFP_KERNEL);
-	if (!ps2if || !serio) {
+	ps2if = kmalloc(sizeof(struct pcips2_data), GFP_KERNEL);
+	if (!ps2if) {
 		ret = -ENOMEM;
 		goto release;
 	}
 
+	memset(ps2if, 0, sizeof(struct pcips2_data));
 
-	serio->id.type		= SERIO_8042;
-	serio->write		= pcips2_write;
-	serio->open		= pcips2_open;
-	serio->close		= pcips2_close;
-	strlcpy(serio->name, pci_name(dev), sizeof(serio->name));
-	strlcpy(serio->phys, dev_name(&dev->dev), sizeof(serio->phys));
-	serio->port_data	= ps2if;
-	serio->dev.parent	= &dev->dev;
-	ps2if->io		= serio;
+	ps2if->io.type		= SERIO_8042;
+	ps2if->io.write		= pcips2_write;
+	ps2if->io.open		= pcips2_open;
+	ps2if->io.close		= pcips2_close;
+	ps2if->io.name		= pci_name(dev);
+	ps2if->io.phys		= dev->dev.bus_id;
+	ps2if->io.driver	= ps2if;
 	ps2if->dev		= dev;
 	ps2if->base		= pci_resource_start(dev, 0);
 
 	pci_set_drvdata(dev, ps2if);
 
-	serio_register_port(ps2if->io);
+	serio_register_port(&ps2if->io);
 	return 0;
 
  release:
-	kfree(ps2if);
-	kfree(serio);
-	pci_release_regions(dev);
+	release_region(pci_resource_start(dev, 0),
+		       pci_resource_len(dev, 0));
  disable:
 	pci_disable_device(dev);
- out:
 	return ret;
 }
 
@@ -180,14 +176,15 @@ static void __devexit pcips2_remove(struct pci_dev *dev)
 {
 	struct pcips2_data *ps2if = pci_get_drvdata(dev);
 
-	serio_unregister_port(ps2if->io);
+	serio_unregister_port(&ps2if->io);
+	release_region(pci_resource_start(dev, 0),
+		       pci_resource_len(dev, 0));
 	pci_set_drvdata(dev, NULL);
 	kfree(ps2if);
-	pci_release_regions(dev);
 	pci_disable_device(dev);
 }
 
-static const struct pci_device_id pcips2_ids[] = {
+static struct pci_device_id pcips2_ids[] = {
 	{
 		.vendor		= 0x14f2,	/* MOBILITY */
 		.device		= 0x0123,	/* Keyboard */
@@ -216,7 +213,7 @@ static struct pci_driver pcips2_driver = {
 
 static int __init pcips2_init(void)
 {
-	return pci_register_driver(&pcips2_driver);
+	return pci_module_init(&pcips2_driver);
 }
 
 static void __exit pcips2_exit(void)

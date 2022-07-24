@@ -68,6 +68,15 @@ typedef u32 u32_le;
 typedef u16 u16_le;
 
 /*
+ * MACRO
+ */
+#define NUMBER(arr) ((int) (sizeof(arr) / sizeof(arr[0])))
+#define BIT(x)      (1UL << (x))
+#ifndef MIN
+# define MIN(a,b)   ((a) > (b) ? (b) : (a))
+#endif
+
+/*
  * BASIC Definitions
  */
 #ifndef TRUE
@@ -494,7 +503,7 @@ typedef struct _nsp32_autoparam {
 #define MSGIN03			BIT(1)		/* Auto Msg In 03 Flag  */
 
 typedef struct _nsp32_lunt {
-	struct scsi_cmnd	*SCpnt;	    /* Current Handling struct scsi_cmnd */
+	Scsi_Cmnd	*SCpnt;	    /* Current Handling Scsi_Cmnd */
 	unsigned long	 save_datp;  /* Save Data Pointer - saved position from initial address */
 	int		 msgin03;	/* auto msg in 03 flag     */
 	unsigned int	 sg_num;	/* Total number of SG entries */
@@ -507,7 +516,7 @@ typedef struct _nsp32_lunt {
 /*
  * SCSI TARGET/LUN definition
  */
-#define NSP32_HOST_SCSIID    7  /* SCSI initiator is every time defined as 7 */
+#define NSP32_HOST_SCSIID    7  /* SCSI initiator is everytime defined as 7 */
 #define MAX_TARGET	     8
 #define MAX_LUN		     8	/* XXX: In SPI3, max number of LUN is 64. */
 
@@ -558,11 +567,11 @@ typedef struct _nsp32_hw_data {
 	int           IrqNumber;
 	int           BaseAddress;
 	int           NumAddress;
-	void __iomem *MmioAddress;
+	unsigned long MmioAddress;
 #define NSP32_MMIO_OFFSET 0x0800
 	unsigned long MmioLength;
 
-	struct scsi_cmnd *CurrentSC;
+	Scsi_Cmnd *CurrentSC;
 
 	struct pci_dev             *Pci;
 	const struct pci_device_id *pci_devid;
@@ -600,6 +609,9 @@ typedef struct _nsp32_hw_data {
 	unsigned char msginbuf [MSGINBUF_MAX];	/* megin buffer     */
 	char	      msgin_len;		/* msginbuf length  */
 
+#ifdef CONFIG_PM
+	u32           PciState[16];     /* save PCI state to this area */
+#endif
 } nsp32_hw_data;
 
 /*
@@ -612,6 +624,53 @@ typedef struct _nsp32_hw_data {
 #define ARBIT_TIMEOUT_TIME	100	/* 100us */
 #define REQSACK_TIMEOUT_TIME	10000	/* max wait time for REQ/SACK assertion
 					   or negation, 10000us == 10ms */
+
+/**************************************************************************
+ * Compatibility functions
+ */
+
+/* for Kernel 2.4 */
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0))
+# define scsi_register_host(template) 	scsi_register_module(MODULE_SCSI_HA, template)
+# define scsi_unregister_host(template) scsi_unregister_module(MODULE_SCSI_HA, template)
+# define scsi_host_put(host)            scsi_unregister(host)
+# define pci_name(pci_dev)              ((pci_dev)->slot_name)
+
+typedef void irqreturn_t;
+# define IRQ_NONE      /* */
+# define IRQ_HANDLED   /* */
+# define IRQ_RETVAL(x) /* */
+
+/* This is ad-hoc version of scsi_host_get_next() */
+static inline struct Scsi_Host *scsi_host_get_next(struct Scsi_Host *host)
+{
+	if (host == NULL) {
+		return scsi_hostlist;
+	} else {
+		return host->next;
+	}
+}
+
+/* This is ad-hoc version of scsi_host_hn_get() */
+static inline struct Scsi_Host *scsi_host_hn_get(unsigned short hostno)
+{
+	struct Scsi_Host *host;
+
+	for (host = scsi_host_get_next(NULL); host != NULL;
+	     host = scsi_host_get_next(host)) {
+		if (host->host_no == hostno) {
+			break;
+		}
+	}
+
+	return host;
+}
+#endif
+
+/* for Kernel 2.6 */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0))
+# define __devinitdata /* */
+#endif
 
 #endif /* _NSP32_H */
 /* end */

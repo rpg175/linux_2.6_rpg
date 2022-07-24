@@ -311,10 +311,10 @@ struct qe_init_block {
 struct sunqe;
 
 struct sunqec {
-	void __iomem		*gregs;		/* QEC Global Registers         */
+	unsigned long		gregs;		/* QEC Global Registers         */
 	struct sunqe		*qes[4];	/* Each child MACE              */
 	unsigned int            qec_bursts;	/* Support burst sizes          */
-	struct platform_device	*op;		/* QEC's OF device              */
+	struct sbus_dev		*qec_sdev;	/* QEC's SBUS device            */
 	struct sunqec		*next_module;	/* List of all QECs in system   */
 };
 
@@ -331,8 +331,8 @@ struct sunqe_buffers {
 ((__u32)((unsigned long)(&(((struct sunqe_buffers *)0)->mem[elem][0]))))
 
 struct sunqe {
-	void __iomem			*qcregs;		/* QEC per-channel Registers   */
-	void __iomem			*mregs;		/* Per-channel MACE Registers  */
+	unsigned long			qcregs;		/* QEC per-channel Registers   */
+	unsigned long			mregs;		/* Per-channel MACE Registers  */
 	struct qe_init_block      	*qe_block;	/* RX and TX descriptors       */
 	__u32                      	qblock_dvma;	/* RX and TX descriptors       */
 	spinlock_t			lock;		/* Protects txfull state       */
@@ -342,7 +342,8 @@ struct sunqe {
 	__u32				buffers_dvma;	/* DVMA visible address.       */
 	struct sunqec			*parent;
 	u8				mconfig;	/* Base MACE mconfig value     */
-	struct platform_device		*op;		/* QE's OF device struct       */
+	struct net_device_stats		net_stats;	/* Statistical counters        */
+	struct sbus_dev			*qe_sdev;	/* QE's SBUS device struct     */
 	struct net_device		*dev;		/* QE's netdevice struct       */
 	int				channel;	/* Who am I?                   */
 };

@@ -1,6 +1,6 @@
 /*
  *   ALSA sequencer Priority Queue
- *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@coil.demon.nl>
+ *   Copyright (c) 1998-1999 by Frank van de Pol <fvdpol@home.nl>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -19,6 +19,7 @@
  *
  */
 
+#include <sound/driver.h>
 #include <linux/time.h>
 #include <linux/slab.h>
 #include <sound/core.h>
@@ -54,11 +55,11 @@
 
 
 /* create new prioq (constructor) */
-struct snd_seq_prioq *snd_seq_prioq_new(void)
+prioq_t *snd_seq_prioq_new(void)
 {
-	struct snd_seq_prioq *f;
+	prioq_t *f;
 
-	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	f = snd_kcalloc(sizeof(prioq_t), GFP_KERNEL);
 	if (f == NULL) {
 		snd_printd("oops: malloc failed for snd_seq_prioq_new()\n");
 		return NULL;
@@ -73,9 +74,9 @@ struct snd_seq_prioq *snd_seq_prioq_new(void)
 }
 
 /* delete prioq (destructor) */
-void snd_seq_prioq_delete(struct snd_seq_prioq **fifo)
+void snd_seq_prioq_delete(prioq_t **fifo)
 {
-	struct snd_seq_prioq *f = *fifo;
+	prioq_t *f = *fifo;
 	*fifo = NULL;
 
 	if (f == NULL) {
@@ -100,8 +101,7 @@ void snd_seq_prioq_delete(struct snd_seq_prioq **fifo)
 
 /* compare timestamp between events */
 /* return 1 if a >= b; 0 */
-static inline int compare_timestamp(struct snd_seq_event *a,
-				    struct snd_seq_event *b)
+static inline int compare_timestamp(snd_seq_event_t * a, snd_seq_event_t * b)
 {
 	if ((a->flags & SNDRV_SEQ_TIME_STAMP_MASK) == SNDRV_SEQ_TIME_STAMP_TICK) {
 		/* compare ticks */
@@ -117,8 +117,7 @@ static inline int compare_timestamp(struct snd_seq_event *a,
  *        zero     if a = b;
  *        positive if a > b;
  */
-static inline int compare_timestamp_rel(struct snd_seq_event *a,
-					struct snd_seq_event *b)
+static inline int compare_timestamp_rel(snd_seq_event_t *a, snd_seq_event_t *b)
 {
 	if ((a->flags & SNDRV_SEQ_TIME_STAMP_MASK) == SNDRV_SEQ_TIME_STAMP_TICK) {
 		/* compare ticks */
@@ -145,16 +144,15 @@ static inline int compare_timestamp_rel(struct snd_seq_event *a,
 }
 
 /* enqueue cell to prioq */
-int snd_seq_prioq_cell_in(struct snd_seq_prioq * f,
-			  struct snd_seq_event_cell * cell)
+int snd_seq_prioq_cell_in(prioq_t * f, snd_seq_event_cell_t * cell)
 {
-	struct snd_seq_event_cell *cur, *prev;
+	snd_seq_event_cell_t *cur, *prev;
 	unsigned long flags;
 	int count;
 	int prior;
 
-	if (snd_BUG_ON(!f || !cell))
-		return -EINVAL;
+	snd_assert(f, return -EINVAL);
+	snd_assert(cell, return -EINVAL);
 	
 	/* check flags */
 	prior = (cell->event.flags & SNDRV_SEQ_PRIORITY_MASK);
@@ -217,9 +215,9 @@ int snd_seq_prioq_cell_in(struct snd_seq_prioq * f,
 }
 
 /* dequeue cell from prioq */
-struct snd_seq_event_cell *snd_seq_prioq_cell_out(struct snd_seq_prioq *f)
+snd_seq_event_cell_t *snd_seq_prioq_cell_out(prioq_t * f)
 {
-	struct snd_seq_event_cell *cell;
+	snd_seq_event_cell_t *cell;
 	unsigned long flags;
 
 	if (f == NULL) {
@@ -245,7 +243,7 @@ struct snd_seq_event_cell *snd_seq_prioq_cell_out(struct snd_seq_prioq *f)
 }
 
 /* return number of events available in prioq */
-int snd_seq_prioq_avail(struct snd_seq_prioq * f)
+int snd_seq_prioq_avail(prioq_t * f)
 {
 	if (f == NULL) {
 		snd_printd("oops: snd_seq_prioq_cell_in() called with NULL prioq\n");
@@ -256,7 +254,7 @@ int snd_seq_prioq_avail(struct snd_seq_prioq * f)
 
 
 /* peek at cell at the head of the prioq */
-struct snd_seq_event_cell *snd_seq_prioq_cell_peek(struct snd_seq_prioq * f)
+snd_seq_event_cell_t *snd_seq_prioq_cell_peek(prioq_t * f)
 {
 	if (f == NULL) {
 		snd_printd("oops: snd_seq_prioq_cell_in() called with NULL prioq\n");
@@ -266,8 +264,7 @@ struct snd_seq_event_cell *snd_seq_prioq_cell_peek(struct snd_seq_prioq * f)
 }
 
 
-static inline int prioq_match(struct snd_seq_event_cell *cell,
-			      int client, int timestamp)
+static inline int prioq_match(snd_seq_event_cell_t *cell, int client, int timestamp)
 {
 	if (cell->event.source.client == client ||
 	    cell->event.dest.client == client)
@@ -289,12 +286,12 @@ static inline int prioq_match(struct snd_seq_event_cell *cell,
 }
 
 /* remove cells for left client */
-void snd_seq_prioq_leave(struct snd_seq_prioq * f, int client, int timestamp)
+void snd_seq_prioq_leave(prioq_t * f, int client, int timestamp)
 {
-	register struct snd_seq_event_cell *cell, *next;
+	register snd_seq_event_cell_t *cell, *next;
 	unsigned long flags;
-	struct snd_seq_event_cell *prev = NULL;
-	struct snd_seq_event_cell *freefirst = NULL, *freeprev = NULL, *freenext;
+	snd_seq_event_cell_t *prev = NULL;
+	snd_seq_event_cell_t *freefirst = NULL, *freeprev = NULL, *freenext;
 
 	/* collect all removed cells */
 	spin_lock_irqsave(&f->lock, flags);
@@ -321,8 +318,7 @@ void snd_seq_prioq_leave(struct snd_seq_prioq * f, int client, int timestamp)
 			freeprev = cell;
 		} else {
 #if 0
-			printk(KERN_DEBUG "type = %i, source = %i, dest = %i, "
-			       "client = %i\n",
+			printk("type = %i, source = %i, dest = %i, client = %i\n",
 				cell->event.type,
 				cell->event.source.client,
 				cell->event.dest.client,
@@ -342,8 +338,8 @@ void snd_seq_prioq_leave(struct snd_seq_prioq * f, int client, int timestamp)
 	}
 }
 
-static int prioq_remove_match(struct snd_seq_remove_events *info,
-			      struct snd_seq_event *ev)
+static int prioq_remove_match(snd_seq_remove_events_t *info,
+	snd_seq_event_t *ev)
 {
 	int res;
 
@@ -398,13 +394,13 @@ static int prioq_remove_match(struct snd_seq_remove_events *info,
 }
 
 /* remove cells matching remove criteria */
-void snd_seq_prioq_remove_events(struct snd_seq_prioq * f, int client,
-				 struct snd_seq_remove_events *info)
+void snd_seq_prioq_remove_events(prioq_t * f, int client,
+	snd_seq_remove_events_t *info)
 {
-	struct snd_seq_event_cell *cell, *next;
+	register snd_seq_event_cell_t *cell, *next;
 	unsigned long flags;
-	struct snd_seq_event_cell *prev = NULL;
-	struct snd_seq_event_cell *freefirst = NULL, *freeprev = NULL, *freenext;
+	snd_seq_event_cell_t *prev = NULL;
+	snd_seq_event_cell_t *freefirst = NULL, *freeprev = NULL, *freenext;
 
 	/* collect all removed cells */
 	spin_lock_irqsave(&f->lock, flags);

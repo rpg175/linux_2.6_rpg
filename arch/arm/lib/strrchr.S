@@ -22,5 +22,4 @@ ENTRY(strrchr)
 		teq	r2, #0
 		bne	1b
 		mov	r0, r3
-		mov	pc, lr
-ENDPROC(strrchr)
+		RETINSTR(mov,pc,lr)

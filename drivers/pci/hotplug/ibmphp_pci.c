@@ -49,7 +49,7 @@ static u8 find_sec_number (u8 primary_busno, u8 slotno);
  */
 static void assign_alt_irq (struct pci_func * cur_func, u8 class_code)
 {
-	int j;
+	int j = 0;
 	for (j = 0; j < 4; j++) {
 		if (cur_func->irq[j] == 0xff) {
 			switch (class_code) {
@@ -92,7 +92,7 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 	u8 flag;
 	u8 valid_device = 0x00; /* to see if we are able to read from card any device info at all */
 
-	debug ("inside configure_card, func->busno = %x\n", func->busno);
+	debug ("inside configure_card, func->busno = %x \n", func->busno);
 
 	device = func->device;
 	cur_func = func;
@@ -130,7 +130,7 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 			pci_bus_read_config_dword (ibmphp_pci_bus, devfn, PCI_CLASS_REVISION, &class);
 
 			class_code = class >> 24;
-			debug ("hrd_type = %x, class = %x, class_code %x\n", hdr_type, class, class_code);
+			debug ("hrd_type = %x, class = %x, class_code %x \n", hdr_type, class, class_code);
 			class >>= 8;	/* to take revision out, class = class.subclass.prog i/f */
 			if (class == PCI_CLASS_NOT_DEFINED_VGA) {
 				err ("The device %x is VGA compatible and as is not supported for hot plugging. "
@@ -147,7 +147,7 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 					assign_alt_irq (cur_func, class_code);
 					if ((rc = configure_device (cur_func)) < 0) {
 						/* We need to do this in case some other BARs were properly inserted */
-						err ("was not able to configure devfunc %x on bus %x.\n",
+						err ("was not able to configure devfunc %x on bus %x. \n",
 						     cur_func->device, cur_func->busno);
 						cleanup_count = 6;
 						goto error;
@@ -164,11 +164,12 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 						cleanup_count = 6;
 						goto error;
 					}
-					newfunc = kzalloc(sizeof(*newfunc), GFP_KERNEL);
+					newfunc = (struct pci_func *) kmalloc (sizeof (struct pci_func), GFP_KERNEL);
 					if (!newfunc) {
-						err ("out of system memory\n");
+						err ("out of system memory \n");
 						return -ENOMEM;
 					}
+					memset (newfunc, 0, sizeof (struct pci_func));
 					newfunc->busno = cur_func->busno;
 					newfunc->device = device;
 					cur_func->next = newfunc;
@@ -187,7 +188,7 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 					rc = configure_bridge (&cur_func, slotno);
 					if (rc == -ENODEV) {
 						err ("You chose to insert Single Bridge, or nested bridges, this is not supported...\n");
-						err ("Bus %x, devfunc %x\n", cur_func->busno, cur_func->device);
+						err ("Bus %x, devfunc %x \n", cur_func->busno, cur_func->device);
 						return rc;
 					}
 					if (rc) {
@@ -199,14 +200,15 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 					}
 
 					pci_bus_read_config_byte (ibmphp_pci_bus, devfn, PCI_SECONDARY_BUS, &sec_number);
-					flag = 0;
+					flag = FALSE;
 					for (i = 0; i < 32; i++) {
 						if (func->devices[i]) {
-							newfunc = kzalloc(sizeof(*newfunc), GFP_KERNEL);
+							newfunc = (struct pci_func *) kmalloc (sizeof (struct pci_func), GFP_KERNEL);
 							if (!newfunc) {
-								err ("out of system memory\n");
+								err ("out of system memory \n");
 								return -ENOMEM;
 							}
+							memset (newfunc, 0, sizeof (struct pci_func));
 							newfunc->busno = sec_number;
 							newfunc->device = (u8) i;
 							for (j = 0; j < 4; j++)
@@ -226,15 +228,16 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 								cleanup_count = 2;
 								goto error;
 							}
-							flag = 1;
+							flag = TRUE;
 						}
 					}
 
-					newfunc = kzalloc(sizeof(*newfunc), GFP_KERNEL);
+					newfunc = (struct pci_func *) kmalloc (sizeof (struct pci_func), GFP_KERNEL);
 					if (!newfunc) {
-						err ("out of system memory\n");
+						err ("out of system memory \n");
 						return -ENOMEM;
 					}
+					memset (newfunc, 0, sizeof (struct pci_func));
 					newfunc->busno = cur_func->busno;
 					newfunc->device = device;
 					for (j = 0; j < 4; j++)
@@ -258,7 +261,7 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 					rc = configure_bridge (&cur_func, slotno);
 					if (rc == -ENODEV) {
 						err ("You chose to insert Single Bridge, or nested bridges, this is not supported...\n");
-						err ("Bus %x, devfunc %x\n", cur_func->busno, cur_func->device);
+						err ("Bus %x, devfunc %x \n", cur_func->busno, cur_func->device);
 						return rc;
 					}
 					if (rc) {
@@ -272,15 +275,16 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 						cur_func->busno, device, function);
 					pci_bus_read_config_byte (ibmphp_pci_bus, devfn, PCI_SECONDARY_BUS, &sec_number);
 					debug ("after configuring bridge..., sec_number = %x\n", sec_number);
-					flag = 0;
+					flag = FALSE;
 					for (i = 0; i < 32; i++) {
 						if (func->devices[i]) {
 							debug ("inside for loop, device is %x\n", i);
-							newfunc = kzalloc(sizeof(*newfunc), GFP_KERNEL);
+							newfunc = (struct pci_func *) kmalloc (sizeof (struct pci_func), GFP_KERNEL);
 							if (!newfunc) {
-								err (" out of system memory\n");
+								err (" out of system memory \n");
 								return -ENOMEM;
 							}
+							memset (newfunc, 0, sizeof (struct pci_func));
 							newfunc->busno = sec_number;
 							newfunc->device = (u8) i;
 							for (j = 0; j < 4; j++)
@@ -301,7 +305,7 @@ int ibmphp_configure_card (struct pci_func *func, u8 slotno)
 								cleanup_count = 2;
 								goto error;
 							}
-							flag = 1;
+							flag = TRUE;
 						}
 					}
 
@@ -364,7 +368,7 @@ static int configure_device (struct pci_func *func)
 	struct resource_node *pfmem[6];
 	unsigned int devfn;
 
-	debug ("%s - inside\n", __func__);
+	debug ("%s - inside\n", __FUNCTION__);
 
 	devfn = PCI_DEVFN(func->device, func->function);
 	ibmphp_pci_bus->number = func->busno;
@@ -401,15 +405,16 @@ static int configure_device (struct pci_func *func)
 
 			debug ("len[count] in IO %x, count %d\n", len[count], count);
 
-			io[count] = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
+			io[count] = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 
 			if (!io[count]) {
-				err ("out of system memory\n");
+				err ("out of system memory \n");
 				return -ENOMEM;
 			}
+			memset (io[count], 0, sizeof (struct resource_node));
 			io[count]->type = IO;
 			io[count]->busno = func->busno;
-			io[count]->devfunc = PCI_DEVFN(func->device, func->function);
+			io[count]->devfunc = ((func->device << 3) | (func->function & 0x7));
 			io[count]->len = len[count];
 			if (ibmphp_check_resource(io[count], 0) == 0) {
 				ibmphp_add_resource (io[count]);
@@ -439,27 +444,28 @@ static int configure_device (struct pci_func *func)
 
 				debug ("len[count] in PFMEM %x, count %d\n", len[count], count);
 
-				pfmem[count] = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
+				pfmem[count] = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 				if (!pfmem[count]) {
-					err ("out of system memory\n");
+					err ("out of system memory \n");
 					return -ENOMEM;
 				}
+				memset (pfmem[count], 0, sizeof (struct resource_node));
 				pfmem[count]->type = PFMEM;
 				pfmem[count]->busno = func->busno;
-				pfmem[count]->devfunc = PCI_DEVFN(func->device,
-							func->function);
+				pfmem[count]->devfunc = ((func->device << 3) | (func->function & 0x7));
 				pfmem[count]->len = len[count];
-				pfmem[count]->fromMem = 0;
+				pfmem[count]->fromMem = FALSE;
 				if (ibmphp_check_resource (pfmem[count], 0) == 0) {
 					ibmphp_add_resource (pfmem[count]);
 					func->pfmem[count] = pfmem[count];
 				} else {
-					mem_tmp = kzalloc(sizeof(*mem_tmp), GFP_KERNEL);
+					mem_tmp = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 					if (!mem_tmp) {
-						err ("out of system memory\n");
+						err ("out of system memory \n");
 						kfree (pfmem[count]);
 						return -ENOMEM;
 					}
+					memset (mem_tmp, 0, sizeof (struct resource_node));
 					mem_tmp->type = MEM;
 					mem_tmp->busno = pfmem[count]->busno;
 					mem_tmp->devfunc = pfmem[count]->devfunc;
@@ -467,7 +473,7 @@ static int configure_device (struct pci_func *func)
 					debug ("there's no pfmem... going into mem.\n");
 					if (ibmphp_check_resource (mem_tmp, 0) == 0) {
 						ibmphp_add_resource (mem_tmp);
-						pfmem[count]->fromMem = 1;
+						pfmem[count]->fromMem = TRUE;
 						pfmem[count]->rangeno = mem_tmp->rangeno;
 						pfmem[count]->start = mem_tmp->start;
 						pfmem[count]->end = mem_tmp->end;
@@ -505,15 +511,15 @@ static int configure_device (struct pci_func *func)
 
 				debug ("len[count] in Mem %x, count %d\n", len[count], count);
 
-				mem[count] = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
+				mem[count] = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 				if (!mem[count]) {
-					err ("out of system memory\n");
+					err ("out of system memory \n");
 					return -ENOMEM;
 				}
+				memset (mem[count], 0, sizeof (struct resource_node));
 				mem[count]->type = MEM;
 				mem[count]->busno = func->busno;
-				mem[count]->devfunc = PCI_DEVFN(func->device,
-							func->function);
+				mem[count]->devfunc = ((func->device << 3) | (func->function & 0x7));
 				mem[count]->len = len[count];
 				if (ibmphp_check_resource (mem[count], 0) == 0) {
 					ibmphp_add_resource (mem[count]);
@@ -550,7 +556,7 @@ static int configure_device (struct pci_func *func)
 	pci_bus_write_config_byte (ibmphp_pci_bus, devfn, PCI_CACHE_LINE_SIZE, CACHE);
 	pci_bus_write_config_byte (ibmphp_pci_bus, devfn, PCI_LATENCY_TIMER, LATENCY);
 
-	pci_bus_write_config_dword (ibmphp_pci_bus, devfn, PCI_ROM_ADDRESS, 0x00L);
+	pci_bus_write_config_word (ibmphp_pci_bus, devfn, PCI_ROM_ADDRESS, 0x00L);
 	pci_bus_write_config_word (ibmphp_pci_bus, devfn, PCI_COMMAND, DEVICEENABLE);
 
 	return 0;
@@ -571,11 +577,11 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 	u16 pfmem_base;
 	u32 bar[2];
 	u32 len[2];
-	u8 flag_io = 0;
-	u8 flag_mem = 0;
-	u8 flag_pfmem = 0;
-	u8 need_io_upper = 0;
-	u8 need_pfmem_upper = 0;
+	u8 flag_io = FALSE;
+	u8 flag_mem = FALSE;
+	u8 flag_pfmem = FALSE;
+	u8 need_io_upper = FALSE;
+	u8 need_pfmem_upper = FALSE;
 	struct res_needed *amount_needed = NULL;
 	struct resource_node *io = NULL;
 	struct resource_node *bus_io[2] = {NULL, NULL};
@@ -595,7 +601,7 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 	u8 irq;
 	int retval;
 
-	debug ("%s - enter\n", __func__);
+	debug ("%s - enter\n", __FUNCTION__);
 
 	devfn = PCI_DEVFN(func->function, func->device);
 	ibmphp_pci_bus->number = func->busno;
@@ -614,7 +620,7 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 	/* in EBDA, only get allocated 1 additional bus # per slot */
 	sec_number = find_sec_number (func->busno, slotno);
 	if (sec_number == 0xff) {
-		err ("cannot allocate secondary bus number for the bridged device\n");
+		err ("cannot allocate secondary bus number for the bridged device \n");
 		return -EINVAL;
 	}
 
@@ -669,17 +675,17 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 
 			debug ("len[count] in IO = %x\n", len[count]);
 
-			bus_io[count] = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
+			bus_io[count] = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 		
 			if (!bus_io[count]) {
-				err ("out of system memory\n");
+				err ("out of system memory \n");
 				retval = -ENOMEM;
 				goto error;
 			}
+			memset (bus_io[count], 0, sizeof (struct resource_node));
 			bus_io[count]->type = IO;
 			bus_io[count]->busno = func->busno;
-			bus_io[count]->devfunc = PCI_DEVFN(func->device,
-							func->function);
+			bus_io[count]->devfunc = ((func->device << 3) | (func->function & 0x7));
 			bus_io[count]->len = len[count];
 			if (ibmphp_check_resource (bus_io[count], 0) == 0) {
 				ibmphp_add_resource (bus_io[count]);
@@ -702,35 +708,36 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 
 				debug ("len[count] in PFMEM = %x\n", len[count]);
 
-				bus_pfmem[count] = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
+				bus_pfmem[count] = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 				if (!bus_pfmem[count]) {
-					err ("out of system memory\n");
+					err ("out of system memory \n");
 					retval = -ENOMEM;
 					goto error;
 				}
+				memset (bus_pfmem[count], 0, sizeof (struct resource_node));
 				bus_pfmem[count]->type = PFMEM;
 				bus_pfmem[count]->busno = func->busno;
-				bus_pfmem[count]->devfunc = PCI_DEVFN(func->device,
-							func->function);
+				bus_pfmem[count]->devfunc = ((func->device << 3) | (func->function & 0x7));
 				bus_pfmem[count]->len = len[count];
-				bus_pfmem[count]->fromMem = 0;
+				bus_pfmem[count]->fromMem = FALSE;
 				if (ibmphp_check_resource (bus_pfmem[count], 0) == 0) {
 					ibmphp_add_resource (bus_pfmem[count]);
 					func->pfmem[count] = bus_pfmem[count];
 				} else {
-					mem_tmp = kzalloc(sizeof(*mem_tmp), GFP_KERNEL);
+					mem_tmp = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 					if (!mem_tmp) {
-						err ("out of system memory\n");
+						err ("out of system memory \n");
 						retval = -ENOMEM;
 						goto error;
 					}
+					memset (mem_tmp, 0, sizeof (struct resource_node));
 					mem_tmp->type = MEM;
 					mem_tmp->busno = bus_pfmem[count]->busno;
 					mem_tmp->devfunc = bus_pfmem[count]->devfunc;
 					mem_tmp->len = bus_pfmem[count]->len;
 					if (ibmphp_check_resource (mem_tmp, 0) == 0) {
 						ibmphp_add_resource (mem_tmp);
-						bus_pfmem[count]->fromMem = 1;
+						bus_pfmem[count]->fromMem = TRUE;
 						bus_pfmem[count]->rangeno = mem_tmp->rangeno;
 						ibmphp_add_pfmem_from_mem (bus_pfmem[count]);
 						func->pfmem[count] = bus_pfmem[count];
@@ -759,16 +766,16 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 
 				debug ("len[count] in Memory is %x\n", len[count]);
 
-				bus_mem[count] = kzalloc(sizeof(struct resource_node), GFP_KERNEL);
+				bus_mem[count] = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 				if (!bus_mem[count]) {
-					err ("out of system memory\n");
+					err ("out of system memory \n");
 					retval = -ENOMEM;
 					goto error;
 				}
+				memset (bus_mem[count], 0, sizeof (struct resource_node));
 				bus_mem[count]->type = MEM;
 				bus_mem[count]->busno = func->busno;
-				bus_mem[count]->devfunc = PCI_DEVFN(func->device,
-							func->function);
+				bus_mem[count]->devfunc = ((func->device << 3) | (func->function & 0x7));
 				bus_mem[count]->len = len[count];
 				if (ibmphp_check_resource (bus_mem[count], 0) == 0) {
 					ibmphp_add_resource (bus_mem[count]);
@@ -806,7 +813,7 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 	debug ("amount_needed->pfmem =  %x\n", amount_needed->pfmem);
 
 	if (amount_needed->not_correct) {		
-		debug ("amount_needed is not correct\n");
+		debug ("amount_needed is not correct \n");
 		for (count = 0; address[count]; count++) {
 			/* for 2 BARs */
 			if (bus_io[count]) {
@@ -826,85 +833,89 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 
 	if (!amount_needed->io) {
 		debug ("it doesn't want IO?\n");
-		flag_io = 1;
+		flag_io = TRUE;
 	} else {
-		debug ("it wants %x IO behind the bridge\n", amount_needed->io);
-		io = kzalloc(sizeof(*io), GFP_KERNEL);
+		debug ("it wants %x IO behind the bridge \n", amount_needed->io);
+		io = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 		
 		if (!io) {
-			err ("out of system memory\n");
+			err ("out of system memory \n");
 			retval = -ENOMEM;
 			goto error;
 		}
+		memset (io, 0, sizeof (struct resource_node));
 		io->type = IO;
 		io->busno = func->busno;
-		io->devfunc = PCI_DEVFN(func->device, func->function);
+		io->devfunc = ((func->device << 3) | (func->function & 0x7));
 		io->len = amount_needed->io;
 		if (ibmphp_check_resource (io, 1) == 0) {
 			debug ("were we able to add io\n");
 			ibmphp_add_resource (io);
-			flag_io = 1;
+			flag_io = TRUE;
 		}
 	}
 
 	if (!amount_needed->mem) {
 		debug ("it doesn't want n.e.memory?\n");
-		flag_mem = 1;
+		flag_mem = TRUE;
 	} else {
 		debug ("it wants %x memory behind the bridge\n", amount_needed->mem);
-		mem = kzalloc(sizeof(*mem), GFP_KERNEL);
+		mem = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 		if (!mem) {
-			err ("out of system memory\n");
+			err ("out of system memory \n");
 			retval = -ENOMEM;
 			goto error;
 		}
+		memset (mem, 0, sizeof (struct resource_node));
 		mem->type = MEM;
 		mem->busno = func->busno;
-		mem->devfunc = PCI_DEVFN(func->device, func->function);
+		mem->devfunc = ((func->device << 3) | (func->function & 0x7));
 		mem->len = amount_needed->mem;
 		if (ibmphp_check_resource (mem, 1) == 0) {
 			ibmphp_add_resource (mem);
-			flag_mem = 1;
+			flag_mem = TRUE;
 			debug ("were we able to add mem\n");
 		}
 	}
 
 	if (!amount_needed->pfmem) {
 		debug ("it doesn't want n.e.pfmem mem?\n");
-		flag_pfmem = 1;
+		flag_pfmem = TRUE;
 	} else {
 		debug ("it wants %x pfmemory behind the bridge\n", amount_needed->pfmem);
-		pfmem = kzalloc(sizeof(*pfmem), GFP_KERNEL);
+		pfmem = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 		if (!pfmem) {
-			err ("out of system memory\n");
+			err ("out of system memory \n");
 			retval = -ENOMEM;
 			goto error;
 		}
+		memset (pfmem, 0, sizeof (struct resource_node));
 		pfmem->type = PFMEM;
 		pfmem->busno = func->busno;
-		pfmem->devfunc = PCI_DEVFN(func->device, func->function);
+		pfmem->devfunc = ((func->device << 3) | (func->function & 0x7));
 		pfmem->len = amount_needed->pfmem;
-		pfmem->fromMem = 0;
+		pfmem->fromMem = FALSE;
 		if (ibmphp_check_resource (pfmem, 1) == 0) {
 			ibmphp_add_resource (pfmem);
-			flag_pfmem = 1;
+			flag_pfmem = TRUE;
 		} else {
-			mem_tmp = kzalloc(sizeof(*mem_tmp), GFP_KERNEL);
+			mem_tmp = kmalloc (sizeof (struct resource_node), GFP_KERNEL);
 			if (!mem_tmp) {
-				err ("out of system memory\n");
+				err ("out of system memory \n");
 				retval = -ENOMEM;
 				goto error;
 			}
+			memset (mem_tmp, 0, sizeof (struct resource_node));
 			mem_tmp->type = MEM;
 			mem_tmp->busno = pfmem->busno;
 			mem_tmp->devfunc = pfmem->devfunc;
 			mem_tmp->len = pfmem->len;
 			if (ibmphp_check_resource (mem_tmp, 1) == 0) {
 				ibmphp_add_resource (mem_tmp);
-				pfmem->fromMem = 1;
+				pfmem->fromMem = TRUE;
 				pfmem->rangeno = mem_tmp->rangeno;
 				ibmphp_add_pfmem_from_mem (pfmem);
-				flag_pfmem = 1;
+				flag_pfmem = TRUE;
 			}
 		}
 	}
@@ -920,19 +931,20 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 		 */
 		bus = ibmphp_find_res_bus (sec_number);
 		if (!bus) {
-			bus = kzalloc(sizeof(*bus), GFP_KERNEL);
+			bus = kmalloc (sizeof (struct bus_node), GFP_KERNEL);
 			if (!bus) {
-				err ("out of system memory\n");
+				err ("out of system memory \n");
 				retval = -ENOMEM;
 				goto error;
 			}
+			memset (bus, 0, sizeof (struct bus_node));
 			bus->busno = sec_number;
 			debug ("b4 adding new bus\n");
 			rc = add_new_bus (bus, io, mem, pfmem, func->busno);
 		} else if (!(bus->rangeIO) && !(bus->rangeMem) && !(bus->rangePFMem))
 			rc = add_new_bus (bus, io, mem, pfmem, 0xFF);
 		else {
-			err ("expected bus structure not empty?\n");
+			err ("expected bus structure not empty? \n");
 			retval = -EIO;
 			goto error;
 		}
@@ -950,11 +962,11 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 
 		if ((io_base & PCI_IO_RANGE_TYPE_MASK) == PCI_IO_RANGE_TYPE_32) {
 			debug ("io 32\n");
-			need_io_upper = 1;
+			need_io_upper = TRUE;
 		}
-		if ((pfmem_base & PCI_PREF_RANGE_TYPE_MASK) == PCI_PREF_RANGE_TYPE_64) {
+		if ((io_base & PCI_PREF_RANGE_TYPE_MASK) == PCI_PREF_RANGE_TYPE_64) {
 			debug ("pfmem 64\n");
-			need_pfmem_upper = 1;
+			need_pfmem_upper = TRUE;
 		}
 
 		if (bus->noIORanges) {
@@ -1038,14 +1050,15 @@ static int configure_bridge (struct pci_func **func_passed, u8 slotno)
 		kfree (amount_needed);
 		return 0;
 	} else {
-		err ("Configuring bridge was unsuccessful...\n");
+		err ("Configuring bridge was unsuccessful... \n");
 		mem_tmp = NULL;
 		retval = -EIO;
 		goto error;
 	}
 
 error:
-	kfree(amount_needed);
+	if (amount_needed)
+		kfree (amount_needed);
 	if (pfmem)
 		ibmphp_remove_resource (pfmem);
 	if (io)
@@ -1094,9 +1107,10 @@ static struct res_needed *scan_behind_bridge (struct pci_func * func, u8 busno)
 	};
 	struct res_needed *amount;
 
-	amount = kzalloc(sizeof(*amount), GFP_KERNEL);
+	amount = kmalloc (sizeof (struct res_needed), GFP_KERNEL);
 	if (amount == NULL)
 		return NULL;
+	memset (amount, 0, sizeof (struct res_needed));
 
 	ibmphp_pci_bus->number = busno;
 
@@ -1119,7 +1133,7 @@ static struct res_needed *scan_behind_bridge (struct pci_func * func, u8 busno)
 				debug ("hdr_type behind the bridge is %x\n", hdr_type);
 				if (hdr_type & PCI_HEADER_TYPE_BRIDGE) {
 					err ("embedded bridges not supported for hot-plugging.\n");
-					amount->not_correct = 1;
+					amount->not_correct = TRUE;
 					return amount;
 				}
 
@@ -1127,12 +1141,12 @@ static struct res_needed *scan_behind_bridge (struct pci_func * func, u8 busno)
 				if (class == PCI_CLASS_NOT_DEFINED_VGA) {
 					err ("The device %x is VGA compatible and as is not supported for hot plugging. "
 					     "Please choose another device.\n", device);
-					amount->not_correct = 1;
+					amount->not_correct = TRUE;
 					return amount;
 				} else if (class == PCI_CLASS_DISPLAY_VGA) {
 					err ("The device %x is not supported for hot plugging. "
 					     "Please choose another device.\n", device);
-					amount->not_correct = 1;
+					amount->not_correct = TRUE;
 					return amount;
 				}
 
@@ -1157,7 +1171,7 @@ static struct res_needed *scan_behind_bridge (struct pci_func * func, u8 busno)
 
 					//tmp_bar = bar[count];
 
-					debug ("count %d device %x function %x wants %x resources\n", count, device, function, bar[count]);
+					debug ("count %d device %x function %x wants %x resources \n", count, device, function, bar[count]);
 
 					if (bar[count] & PCI_BASE_ADDRESS_SPACE_IO) {
 						/* This is IO */
@@ -1192,9 +1206,9 @@ static struct res_needed *scan_behind_bridge (struct pci_func * func, u8 busno)
 	}	/* end for */
 
 	if (!howmany)
-		amount->not_correct = 1;
+		amount->not_correct = TRUE;
 	else
-		amount->not_correct = 0;
+		amount->not_correct = FALSE;
 	if ((amount->io) && (amount->io < IOBRIDGE))
 		amount->io = IOBRIDGE;
 	if ((amount->mem) && (amount->mem < MEMBRIDGE))
@@ -1234,7 +1248,7 @@ static int unconfigure_boot_device (u8 busno, u8 device, u8 function)
 	u32 tmp_address;
 	unsigned int devfn;
 
-	debug ("%s - enter\n", __func__);
+	debug ("%s - enter\n", __FUNCTION__);
 
 	bus = ibmphp_find_res_bus (busno);
 	if (!bus) {
@@ -1292,36 +1306,40 @@ static int unconfigure_boot_device (u8 busno, u8 device, u8 function)
 			/* This is Memory */
 			if (start_address & PCI_BASE_ADDRESS_MEM_PREFETCH) {
 				/* pfmem */
-				debug ("start address of pfmem is %x\n", start_address);
 				start_address &= PCI_BASE_ADDRESS_MEM_MASK;
+				debug ("start address of pfmem is %x\n", start_address);
 
 				if (ibmphp_find_resource (bus, start_address, &pfmem, PFMEM) < 0) {
 					err ("cannot find corresponding PFMEM resource to remove\n");
 					return -EIO;
 				}
-				if (pfmem) {
+				if (pfmem)
 					debug ("pfmem->start = %x\n", pfmem->start);
 
-					ibmphp_remove_resource(pfmem);
+				ibmphp_remove_resource (pfmem);
+
+				if (tmp_address & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+					/* takes up another dword */
+					count += 1;
 				}
+
 			} else {
 				/* regular memory */
-				debug ("start address of mem is %x\n", start_address);
 				start_address &= PCI_BASE_ADDRESS_MEM_MASK;
-
+				debug ("start address of mem is %x\n", start_address);
 				if (ibmphp_find_resource (bus, start_address, &mem, MEM) < 0) {
 					err ("cannot find corresponding MEM resource to remove\n");
 					return -EIO;
 				}
-				if (mem) {
+				if (mem)
 					debug ("mem->start = %x\n", mem->start);
 
-					ibmphp_remove_resource(mem);
+				ibmphp_remove_resource (mem);
+
+				if (tmp_address & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+					/* takes up another dword */
+					count += 1;
 				}
-			}
-			if (tmp_address & PCI_BASE_ADDRESS_MEM_TYPE_64) {
-				/* takes up another dword */
-				count += 1;
 			}
 		}	/* end of mem */
 	}	/* end of for */
@@ -1351,7 +1369,7 @@ static int unconfigure_boot_bridge (u8 busno, u8 device, u8 function)
 	bus_no = (int) busno;
 	debug ("busno is %x\n", busno);
 	pci_bus_read_config_byte (ibmphp_pci_bus, devfn, PCI_PRIMARY_BUS, &pri_number);
-	debug ("%s - busno = %x, primary_number = %x\n", __func__, busno, pri_number);
+	debug ("%s - busno = %x, primary_number = %x\n", __FUNCTION__, busno, pri_number);
 
 	pci_bus_read_config_byte (ibmphp_pci_bus, devfn, PCI_SECONDARY_BUS, &sec_number);
 	debug ("sec_number is %x\n", sec_number);
@@ -1362,6 +1380,9 @@ static int unconfigure_boot_bridge (u8 busno, u8 device, u8 function)
 		return -EINVAL;
 	}
 
+	pci_bus_read_config_byte (ibmphp_pci_bus, devfn, PCI_SECONDARY_BUS, &sec_number);
+	sec_no = (int) sec_no;
+
 	pci_bus_read_config_byte (ibmphp_pci_bus, devfn, PCI_SUBORDINATE_BUS, &sub_number);
 	sub_no = (int) sub_number;
 	debug ("sub_no is %d, sec_no is %d\n", sub_no, sec_no);
@@ -1371,12 +1392,12 @@ static int unconfigure_boot_bridge (u8 busno, u8 device, u8 function)
 	}
 
 	bus = ibmphp_find_res_bus (sec_number);
+	debug ("bus->busno is %x\n", bus->busno);
+	debug ("sec_number is %x\n", sec_number);
 	if (!bus) {
 		err ("cannot find Bus structure for the bridged device\n");
 		return -EINVAL;
 	}
-	debug("bus->busno is %x\n", bus->busno);
-	debug("sec_number is %x\n", sec_number);
 
 	ibmphp_remove_bus (bus, busno);
 
@@ -1413,11 +1434,16 @@ static int unconfigure_boot_bridge (u8 busno, u8 device, u8 function)
 					err ("cannot find corresponding PFMEM resource to remove\n");
 					return -EINVAL;
 				}
-				if (pfmem) {
+				if (pfmem)
 					debug ("pfmem->start = %x\n", pfmem->start);
 
-					ibmphp_remove_resource(pfmem);
+				ibmphp_remove_resource (pfmem);
+
+				if (tmp_address & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+					/* takes up another dword */
+					count += 1;
 				}
+
 			} else {
 				/* regular memory */
 				start_address &= PCI_BASE_ADDRESS_MEM_MASK;
@@ -1425,19 +1451,19 @@ static int unconfigure_boot_bridge (u8 busno, u8 device, u8 function)
 					err ("cannot find corresponding MEM resource to remove\n");
 					return -EINVAL;
 				}
-				if (mem) {
+				if (mem)
 					debug ("mem->start = %x\n", mem->start);
 
-					ibmphp_remove_resource(mem);
+				ibmphp_remove_resource (mem);
+
+				if (tmp_address & PCI_BASE_ADDRESS_MEM_TYPE_64) {
+					/* takes up another dword */
+					count += 1;
 				}
-			}
-			if (tmp_address & PCI_BASE_ADDRESS_MEM_TYPE_64) {
-				/* takes up another dword */
-				count += 1;
 			}
 		}	/* end of mem */
 	}	/* end of for */
-	debug ("%s - exiting, returning success\n", __func__);
+	debug ("%s - exiting, returning success\n", __FUNCTION__);
 	return 0;
 }
 
@@ -1453,7 +1479,7 @@ static int unconfigure_boot_card (struct slot *slot_cur)
 	unsigned int devfn;
 	u8 valid_device = 0x00; /* To see if we are ever able to find valid device and read it */
 
-	debug ("%s - enter\n", __func__);
+	debug ("%s - enter\n", __FUNCTION__);
 
 	device = slot_cur->device;
 	busno = slot_cur->bus;
@@ -1470,7 +1496,7 @@ static int unconfigure_boot_card (struct slot *slot_cur)
 			/* found correct device!!! */
 			++valid_device;
 
-			debug ("%s - found correct device\n", __func__);
+			debug ("%s - found correct device\n", __FUNCTION__);
 
 			/* header: x x x x x x x x
 			 *         | |___________|=> 1=PPB bridge, 0=normal device, 2=CardBus Bridge
@@ -1496,7 +1522,7 @@ static int unconfigure_boot_card (struct slot *slot_cur)
 				case PCI_HEADER_TYPE_NORMAL:
 					rc = unconfigure_boot_device (busno, device, function);
 					if (rc) {
-						err ("was not able to unconfigure device %x func %x on bus %x. bailing out...\n",
+						err ("was not able to unconfigure device %x func %x on bus %x. bailing out... \n",
 						     device, function, busno);
 						return rc;
 					}
@@ -1505,7 +1531,7 @@ static int unconfigure_boot_card (struct slot *slot_cur)
 				case PCI_HEADER_TYPE_MULTIDEVICE:
 					rc = unconfigure_boot_device (busno, device, function);
 					if (rc) {
-						err ("was not able to unconfigure device %x func %x on bus %x. bailing out...\n",
+						err ("was not able to unconfigure device %x func %x on bus %x. bailing out... \n",
 						     device, function, busno);
 						return rc;
 					}
@@ -1541,7 +1567,7 @@ static int unconfigure_boot_card (struct slot *slot_cur)
 					}
 					break;
 				default:
-					err ("MAJOR PROBLEM!!!! Cannot read device's header\n");
+					err ("MAJOR PROBLEM!!!! Cannot read device's header \n");
 					return -1;
 					break;
 			}	/* end of switch */
@@ -1549,7 +1575,7 @@ static int unconfigure_boot_card (struct slot *slot_cur)
 	}	/* end of for */
 
 	if (!valid_device) {
-		err ("Could not find device to unconfigure.  Or could not read the card.\n");
+		err ("Could not find device to unconfigure.  Or could not read the card. \n");
 		return -1;
 	}
 	return 0;
@@ -1573,7 +1599,7 @@ int ibmphp_unconfigure_card (struct slot **slot_cur, int the_end)
 	struct pci_func *cur_func = NULL;
 	struct pci_func *temp_func;
 
-	debug ("%s - enter\n", __func__);
+	debug ("%s - enter\n", __FUNCTION__);
 
 	if (!the_end) {
 		/* Need to unconfigure the card */
@@ -1597,19 +1623,19 @@ int ibmphp_unconfigure_card (struct slot **slot_cur, int the_end)
 
 			for (i = 0; i < count; i++) {
 				if (cur_func->io[i]) {
-					debug ("io[%d] exists\n", i);
+					debug ("io[%d] exists \n", i);
 					if (the_end > 0)
 						ibmphp_remove_resource (cur_func->io[i]);
 					cur_func->io[i] = NULL;
 				}
 				if (cur_func->mem[i]) {
-					debug ("mem[%d] exists\n", i);
+					debug ("mem[%d] exists \n", i);
 					if (the_end > 0)
 						ibmphp_remove_resource (cur_func->mem[i]);
 					cur_func->mem[i] = NULL;
 				}
 				if (cur_func->pfmem[i]) {
-					debug ("pfmem[%d] exists\n", i);
+					debug ("pfmem[%d] exists \n", i);
 					if (the_end > 0)
 						ibmphp_remove_resource (cur_func->pfmem[i]);
 					cur_func->pfmem[i] = NULL;
@@ -1624,7 +1650,7 @@ int ibmphp_unconfigure_card (struct slot **slot_cur, int the_end)
 
 	sl->func = NULL;
 	*slot_cur = sl;
-	debug ("%s - exit\n", __func__);
+	debug ("%s - exit\n", __FUNCTION__);
 	return 0;
 }
 
@@ -1654,11 +1680,12 @@ static int add_new_bus (struct bus_node *bus, struct resource_node *io, struct r
 		list_add (&bus->bus_list, &cur_bus->bus_list);
 	}
 	if (io) {
-		io_range = kzalloc(sizeof(*io_range), GFP_KERNEL);
+		io_range = kmalloc (sizeof (struct range_node), GFP_KERNEL);
 		if (!io_range) {
-			err ("out of system memory\n");
+			err ("out of system memory \n");
 			return -ENOMEM;
 		}
+		memset (io_range, 0, sizeof (struct range_node));
 		io_range->start = io->start;
 		io_range->end = io->end;
 		io_range->rangeno = 1;
@@ -1666,11 +1693,12 @@ static int add_new_bus (struct bus_node *bus, struct resource_node *io, struct r
 		bus->rangeIO = io_range;
 	}
 	if (mem) {
-		mem_range = kzalloc(sizeof(*mem_range), GFP_KERNEL);
+		mem_range = kmalloc (sizeof (struct range_node), GFP_KERNEL);
 		if (!mem_range) {
-			err ("out of system memory\n");
+			err ("out of system memory \n");
 			return -ENOMEM;
 		}
+		memset (mem_range, 0, sizeof (struct range_node));
 		mem_range->start = mem->start;
 		mem_range->end = mem->end;
 		mem_range->rangeno = 1;
@@ -1678,11 +1706,12 @@ static int add_new_bus (struct bus_node *bus, struct resource_node *io, struct r
 		bus->rangeMem = mem_range;
 	}
 	if (pfmem) {
-		pfmem_range = kzalloc(sizeof(*pfmem_range), GFP_KERNEL);
+		pfmem_range = kmalloc (sizeof (struct range_node), GFP_KERNEL);
 		if (!pfmem_range) {	
-			err ("out of system memory\n");
+			err ("out of system memory \n");
 			return -ENOMEM;
 		}
+		memset (pfmem_range, 0, sizeof (struct range_node));
 		pfmem_range->start = pfmem->start;
 		pfmem_range->end = pfmem->end;
 		pfmem_range->rangeno = 1;

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -18,6 +18,7 @@
  *
  */
 
+#include <sound/driver.h>
 #include <linux/time.h>
 #include <sound/core.h>
 #include <sound/gus.h>
@@ -54,8 +55,6 @@ unsigned short snd_gf1_lvol_to_gvol_raw(unsigned int vol)
 	return (e << 8) | m;
 }
 
-#if 0
-
 unsigned int snd_gf1_gvol_to_lvol_raw(unsigned short gf1_vol)
 {
 	unsigned int rvol;
@@ -71,7 +70,7 @@ unsigned int snd_gf1_gvol_to_lvol_raw(unsigned short gf1_vol)
 	return rvol | (m >> (8 - e));
 }
 
-unsigned int snd_gf1_calc_ramp_rate(struct snd_gus_card * gus,
+unsigned int snd_gf1_calc_ramp_rate(snd_gus_card_t * gus,
 				    unsigned short start,
 				    unsigned short end,
 				    unsigned int us)
@@ -109,21 +108,17 @@ unsigned int snd_gf1_calc_ramp_rate(struct snd_gus_card * gus,
 	return (range << 6) | (increment & 0x3f);
 }
 
-#endif  /*  0  */
-
-unsigned short snd_gf1_translate_freq(struct snd_gus_card * gus, unsigned int freq16)
+unsigned short snd_gf1_translate_freq(snd_gus_card_t * gus, unsigned int freq16)
 {
 	freq16 >>= 3;
 	if (freq16 < 50)
 		freq16 = 50;
 	if (freq16 & 0xf8000000) {
 		freq16 = ~0xf8000000;
-		snd_printk(KERN_ERR "snd_gf1_translate_freq: overflow - freq = 0x%x\n", freq16);
+		snd_printk("snd_gf1_translate_freq: overflow - freq = 0x%x\n", freq16);
 	}
 	return ((freq16 << 9) + (gus->gf1.playback_freq >> 1)) / gus->gf1.playback_freq;
 }
-
-#if 0
 
 short snd_gf1_compute_vibrato(short cents, unsigned short fc_register)
 {
@@ -202,16 +197,14 @@ unsigned short snd_gf1_compute_freq(unsigned int freq,
 	fc = (freq << 10) / rate;
 	if (fc > 97391L) {
 		fc = 97391;
-		snd_printk(KERN_ERR "patch: (1) fc frequency overflow - %u\n", fc);
+		snd_printk("patch: (1) fc frequency overflow - %u\n", fc);
 	}
 	fc = (fc * 44100UL) / mix_rate;
 	while (scale--)
 		fc <<= 1;
 	if (fc > 65535L) {
 		fc = 65535;
-		snd_printk(KERN_ERR "patch: (2) fc frequency overflow - %u\n", fc);
+		snd_printk("patch: (2) fc frequency overflow - %u\n", fc);
 	}
 	return (unsigned short) fc;
 }
-
-#endif  /*  0  */

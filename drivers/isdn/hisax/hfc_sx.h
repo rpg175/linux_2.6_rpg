@@ -193,4 +193,5 @@ struct hfcsx_extra {
 };
 
 extern void main_irq_hfcsx(struct BCState *bcs);
+extern void inithfcsx(struct IsdnCardState *cs);
 extern void releasehfcsx(struct IsdnCardState *cs);

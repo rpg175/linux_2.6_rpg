@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
  *  GUS's memory access via proc filesystem
  *
  *
@@ -19,53 +19,86 @@
  *
  */
 
+#include <sound/driver.h>
 #include <linux/slab.h>
 #include <sound/core.h>
 #include <sound/gus.h>
 #include <sound/info.h>
 
-struct gus_proc_private {
+typedef struct gus_proc_private {
 	int rom;		/* data are in ROM */
 	unsigned int address;
 	unsigned int size;
-	struct snd_gus_card * gus;
-};
+	snd_gus_card_t * gus;
+} gus_proc_private_t;
 
-static ssize_t snd_gf1_mem_proc_dump(struct snd_info_entry *entry,
-				     void *file_private_data,
-				     struct file *file, char __user *buf,
-				     size_t count, loff_t pos)
+static long snd_gf1_mem_proc_dump(snd_info_entry_t *entry, void *file_private_data,
+			          struct file *file, char *buf, long count)
 {
-	struct gus_proc_private *priv = entry->private_data;
-	struct snd_gus_card *gus = priv->gus;
+	long size;
+	gus_proc_private_t *priv = snd_magic_cast(gus_proc_private_t, entry->private_data, return -ENXIO);
+	snd_gus_card_t *gus = priv->gus;
 	int err;
 
-	err = snd_gus_dram_read(gus, buf, pos, count, priv->rom);
-	if (err < 0)
-		return err;
-	return count;
+	size = count;
+	if (file->f_pos + size > priv->size)
+		size = (long)priv->size - file->f_pos;
+	if (size > 0) {
+		if ((err = snd_gus_dram_read(gus, buf, file->f_pos, size, priv->rom)) < 0)
+			return err;
+		file->f_pos += size;
+		return size;
+	}
+	return 0;
 }			
 
-static void snd_gf1_mem_proc_free(struct snd_info_entry *entry)
+static long long snd_gf1_mem_proc_llseek(snd_info_entry_t *entry,
+					void *private_file_data,
+					struct file *file,
+					long long offset,
+					int orig)
 {
-	struct gus_proc_private *priv = entry->private_data;
-	kfree(priv);
+	gus_proc_private_t *priv = snd_magic_cast(gus_proc_private_t, entry->private_data, return -ENXIO);
+
+	switch (orig) {
+	case 0:	/* SEEK_SET */
+		file->f_pos = offset;
+		break;
+	case 1:	/* SEEK_CUR */
+		file->f_pos += offset;
+		break;
+	case 2: /* SEEK_END, offset is negative */
+		file->f_pos = priv->size + offset;
+		break;
+	default:
+		return -EINVAL;
+	}
+	if (file->f_pos > priv->size)
+		file->f_pos = priv->size;
+	return file->f_pos;
+}
+
+static void snd_gf1_mem_proc_free(snd_info_entry_t *entry)
+{
+	gus_proc_private_t *priv = snd_magic_cast(gus_proc_private_t, entry->private_data, return);
+	snd_magic_kfree(priv);
 }
 
 static struct snd_info_entry_ops snd_gf1_mem_proc_ops = {
 	.read = snd_gf1_mem_proc_dump,
+	.llseek = snd_gf1_mem_proc_llseek,
 };
 
-int snd_gf1_mem_proc_init(struct snd_gus_card * gus)
+int snd_gf1_mem_proc_init(snd_gus_card_t * gus)
 {
 	int idx;
 	char name[16];
-	struct gus_proc_private *priv;
-	struct snd_info_entry *entry;
+	gus_proc_private_t *priv;
+	snd_info_entry_t *entry;
 
 	for (idx = 0; idx < 4; idx++) {
 		if (gus->gf1.mem_alloc.banks_8[idx].size > 0) {
-			priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+			priv = snd_magic_kcalloc(gus_proc_private_t, 0, GFP_KERNEL);
 			if (priv == NULL)
 				return -ENOMEM;
 			priv->gus = gus;
@@ -82,7 +115,7 @@ int snd_gf1_mem_proc_init(struct snd_gus_card * gus)
 	}
 	for (idx = 0; idx < 4; idx++) {
 		if (gus->gf1.rom_present & (1 << idx)) {
-			priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+			priv = snd_magic_kcalloc(gus_proc_private_t, 0, GFP_KERNEL);
 			if (priv == NULL)
 				return -ENOMEM;
 			priv->rom = 1;

@@ -22,7 +22,6 @@
 
 #include <linux/errno.h>
 
-EXPORT_SYMBOL(posix_acl_init);
 EXPORT_SYMBOL(posix_acl_alloc);
 EXPORT_SYMBOL(posix_acl_clone);
 EXPORT_SYMBOL(posix_acl_valid);
@@ -30,29 +29,22 @@ EXPORT_SYMBOL(posix_acl_equiv_mode);
 EXPORT_SYMBOL(posix_acl_from_mode);
 EXPORT_SYMBOL(posix_acl_create_masq);
 EXPORT_SYMBOL(posix_acl_chmod_masq);
+EXPORT_SYMBOL(posix_acl_masq_nfs_mode);
 EXPORT_SYMBOL(posix_acl_permission);
-
-/*
- * Init a fresh posix_acl
- */
-void
-posix_acl_init(struct posix_acl *acl, int count)
-{
-	atomic_set(&acl->a_refcount, 1);
-	acl->a_count = count;
-}
 
 /*
  * Allocate a new ACL with the specified number of entries.
  */
 struct posix_acl *
-posix_acl_alloc(int count, gfp_t flags)
+posix_acl_alloc(int count, int flags)
 {
 	const size_t size = sizeof(struct posix_acl) +
 	                    count * sizeof(struct posix_acl_entry);
 	struct posix_acl *acl = kmalloc(size, flags);
-	if (acl)
-		posix_acl_init(acl, count);
+	if (acl) {
+		atomic_set(&acl->a_refcount, 1);
+		acl->a_count = count;
+	}
 	return acl;
 }
 
@@ -60,16 +52,18 @@ posix_acl_alloc(int count, gfp_t flags)
  * Clone an ACL.
  */
 struct posix_acl *
-posix_acl_clone(const struct posix_acl *acl, gfp_t flags)
+posix_acl_clone(const struct posix_acl *acl, int flags)
 {
 	struct posix_acl *clone = NULL;
 
 	if (acl) {
 		int size = sizeof(struct posix_acl) + acl->a_count *
 		           sizeof(struct posix_acl_entry);
-		clone = kmemdup(acl, size, flags);
-		if (clone)
+		clone = kmalloc(size, flags);
+		if (clone) {
+			memcpy(clone, acl, size);
 			atomic_set(&clone->a_refcount, 1);
+		}
 	}
 	return clone;
 }
@@ -192,7 +186,7 @@ posix_acl_equiv_mode(const struct posix_acl *acl, mode_t *mode_p)
  * Create an ACL representing the file mode permission bits of an inode.
  */
 struct posix_acl *
-posix_acl_from_mode(mode_t mode, gfp_t flags)
+posix_acl_from_mode(mode_t mode, int flags)
 {
 	struct posix_acl *acl = posix_acl_alloc(3, flags);
 	if (!acl)
@@ -226,11 +220,11 @@ posix_acl_permission(struct inode *inode, const struct posix_acl *acl, int want)
                 switch(pa->e_tag) {
                         case ACL_USER_OBJ:
 				/* (May have been checked already) */
-				if (inode->i_uid == current_fsuid())
+                                if (inode->i_uid == current->fsuid)
                                         goto check_perm;
                                 break;
                         case ACL_USER:
-				if (pa->e_id == current_fsuid())
+                                if (pa->e_id == current->fsuid)
                                         goto mask;
 				break;
                         case ACL_GROUP_OBJ:
@@ -383,6 +377,47 @@ posix_acl_chmod_masq(struct posix_acl *acl, mode_t mode)
 			return -EIO;
 		group_obj->e_perm = (mode & S_IRWXG) >> 3;
 	}
+
+	return 0;
+}
+
+/*
+ * Adjust the mode parameter so that NFSv2 grants nobody permissions
+ * that may not be granted by the ACL. This is necessary because NFSv2
+ * may compute access permissions on the client side, and may serve cached
+ * data whenever it assumes access would be granted.  Since ACLs may also
+ * be used to deny access to specific users, the minimal permissions
+ * for secure operation over NFSv2 are very restrictive. Permissions
+ * granted to users via Access Control Lists will not be effective over
+ * NFSv2.
+ *
+ * Privilege escalation can only happen for read operations, as writes are
+ * always carried out on the NFS server, where the proper access checks are
+ * implemented.
+ */
+int
+posix_acl_masq_nfs_mode(struct posix_acl *acl, mode_t *mode_p)
+{
+	struct posix_acl_entry *pa, *pe; int min_perm = S_IRWXO;
+
+	FOREACH_ACL_ENTRY(pa, acl, pe) {
+                switch(pa->e_tag) {
+			case ACL_USER_OBJ:
+				break;
+
+			case ACL_USER:
+			case ACL_GROUP_OBJ:
+			case ACL_GROUP:
+			case ACL_MASK:
+			case ACL_OTHER:
+				min_perm &= pa->e_perm;
+				break;
+
+			default:
+				return -EIO;
+		}
+	}
+	*mode_p = (*mode_p & ~(S_IRWXG|S_IRWXO)) | (min_perm << 3) | min_perm;
 
 	return 0;
 }

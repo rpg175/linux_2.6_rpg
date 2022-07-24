@@ -65,7 +65,6 @@
 static symbol_t *macro_symbol;
 
 static void add_macro_arg(const char *argtext, int position);
-void mmerror(const char *string);
 
 %}
 
@@ -115,7 +114,7 @@ macro_arglist:
 |	macro_arglist ',' T_ARG
 	{
 		if ($1 == 0) {
-			stop("Comma without preceding argument in arg list",
+			stop("Comma without preceeding argument in arg list",
 			     EX_DATAERR);
 			/* NOTREACHED */
 		}

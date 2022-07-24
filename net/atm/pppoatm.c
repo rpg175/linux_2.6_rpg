@@ -33,21 +33,25 @@
  * These hooks are not yet available in ppp_generic
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ":%s: " fmt, __func__
-
 #include <linux/module.h>
+#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/skbuff.h>
-#include <linux/slab.h>
 #include <linux/atm.h>
 #include <linux/atmdev.h>
-#include <linux/capability.h>
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
 #include <linux/ppp_channel.h>
 #include <linux/atmppp.h>
 
 #include "common.h"
+
+#if 0
+#define DPRINTK(format, args...) \
+	printk(KERN_DEBUG "pppoatm: " format, ##args)
+#else
+#define DPRINTK(format, args...)
+#endif
 
 enum pppoatm_encaps {
 	e_autodetect = PPPOATM_ENCAPS_AUTODETECT,
@@ -135,9 +139,9 @@ static void pppoatm_unassign_vcc(struct atm_vcc *atmvcc)
 static void pppoatm_push(struct atm_vcc *atmvcc, struct sk_buff *skb)
 {
 	struct pppoatm_vcc *pvcc = atmvcc_to_pvcc(atmvcc);
-	pr_debug("\n");
+	DPRINTK("pppoatm push\n");
 	if (skb == NULL) {			/* VCC was closed */
-		pr_debug("removing ATMPPP VCC %p\n", pvcc);
+		DPRINTK("removing ATMPPP VCC %p\n", pvcc);
 		pppoatm_unassign_vcc(atmvcc);
 		atmvcc->push(atmvcc, NULL);	/* Pass along bad news */
 		return;
@@ -168,17 +172,18 @@ static void pppoatm_push(struct atm_vcc *atmvcc, struct sk_buff *skb)
 			pvcc->chan.mtu += LLC_LEN;
 			break;
 		}
-		pr_debug("Couldn't autodetect yet (skb: %02X %02X %02X %02X %02X %02X)\n",
-			 skb->data[0], skb->data[1], skb->data[2],
-			 skb->data[3], skb->data[4], skb->data[5]);
+		DPRINTK("(unit %d): Couldn't autodetect yet "
+		    "(skb: %02X %02X %02X %02X %02X %02X)\n",
+		    pvcc->chan.unit,
+		    skb->data[0], skb->data[1], skb->data[2],
+		    skb->data[3], skb->data[4], skb->data[5]);
 		goto error;
 	case e_vc:
 		break;
 	}
 	ppp_input(&pvcc->chan, skb);
 	return;
-
-error:
+    error:
 	kfree_skb(skb);
 	ppp_input_error(&pvcc->chan, 0);
 }
@@ -197,7 +202,8 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 {
 	struct pppoatm_vcc *pvcc = chan_to_pvcc(chan);
 	ATM_SKB(skb)->vcc = pvcc->atmvcc;
-	pr_debug("(skb=0x%p, vcc=0x%p)\n", skb, pvcc->atmvcc);
+	DPRINTK("(unit %d): pppoatm_send (skb=0x%p, vcc=0x%p)\n",
+	    pvcc->chan.unit, skb, pvcc->atmvcc);
 	if (skb->data[0] == '\0' && (pvcc->flags & SC_COMP_PROT))
 		(void) skb_pull(skb, 1);
 	switch (pvcc->encaps) {		/* LLC encapsulation needed */
@@ -211,8 +217,7 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 				goto nospace;
 			}
 			kfree_skb(skb);
-			skb = n;
-			if (skb == NULL)
+			if ((skb = n) == NULL)
 				return DROP_PACKET;
 		} else if (!atm_may_send(pvcc->atmvcc, skb->truesize))
 			goto nospace;
@@ -223,18 +228,19 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 			goto nospace;
 		break;
 	case e_autodetect:
-		pr_debug("Trying to send without setting encaps!\n");
+		DPRINTK("(unit %d): Trying to send without setting encaps!\n",
+		    pvcc->chan.unit);
 		kfree_skb(skb);
 		return 1;
 	}
-
-	atomic_add(skb->truesize, &sk_atm(ATM_SKB(skb)->vcc)->sk_wmem_alloc);
+	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->sk->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = ATM_SKB(skb)->vcc->atm_options;
-	pr_debug("atm_skb(%p)->vcc(%p)->dev(%p)\n",
-		 skb, ATM_SKB(skb)->vcc, ATM_SKB(skb)->vcc->dev);
+	DPRINTK("(unit %d): atm_skb(%p)->vcc(%p)->dev(%p)\n",
+	    pvcc->chan.unit, skb, ATM_SKB(skb)->vcc,
+	    ATM_SKB(skb)->vcc->dev);
 	return ATM_SKB(skb)->vcc->send(ATM_SKB(skb)->vcc, skb)
 	    ? DROP_PACKET : 1;
-nospace:
+    nospace:
 	/*
 	 * We don't have space to send this SKB now, but we might have
 	 * already applied SC_COMP_PROT compression, so may need to undo
@@ -251,21 +257,21 @@ static int pppoatm_devppp_ioctl(struct ppp_channel *chan, unsigned int cmd,
 {
 	switch (cmd) {
 	case PPPIOCGFLAGS:
-		return put_user(chan_to_pvcc(chan)->flags, (int __user *) arg)
+		return put_user(chan_to_pvcc(chan)->flags, (int *) arg)
 		    ? -EFAULT : 0;
 	case PPPIOCSFLAGS:
-		return get_user(chan_to_pvcc(chan)->flags, (int __user *) arg)
+		return get_user(chan_to_pvcc(chan)->flags, (int *) arg)
 		    ? -EFAULT : 0;
 	}
 	return -ENOTTY;
 }
 
-static const struct ppp_channel_ops pppoatm_ops = {
+static /*const*/ struct ppp_channel_ops pppoatm_ops = {
 	.start_xmit = pppoatm_send,
 	.ioctl = pppoatm_devppp_ioctl,
 };
 
-static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, void __user *arg)
+static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, unsigned long arg)
 {
 	struct atm_backend_ppp be;
 	struct pppoatm_vcc *pvcc;
@@ -275,14 +281,15 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, void __user *arg)
 	 * prototypical one used to initialize them
 	 */
 	static const DECLARE_TASKLET(tasklet_proto, pppoatm_wakeup_sender, 0);
-	if (copy_from_user(&be, arg, sizeof be))
+	if (copy_from_user(&be, (void *) arg, sizeof be))
 		return -EFAULT;
 	if (be.encaps != PPPOATM_ENCAPS_AUTODETECT &&
 	    be.encaps != PPPOATM_ENCAPS_VC && be.encaps != PPPOATM_ENCAPS_LLC)
 		return -EINVAL;
-	pvcc = kzalloc(sizeof(*pvcc), GFP_KERNEL);
+	pvcc = kmalloc(sizeof(*pvcc), GFP_KERNEL);
 	if (pvcc == NULL)
 		return -ENOMEM;
+	memset(pvcc, 0, sizeof(*pvcc));
 	pvcc->atmvcc = atmvcc;
 	pvcc->old_push = atmvcc->push;
 	pvcc->old_pop = atmvcc->pop;
@@ -293,15 +300,14 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, void __user *arg)
 	    (be.encaps == e_vc ? 0 : LLC_LEN);
 	pvcc->wakeup_tasklet = tasklet_proto;
 	pvcc->wakeup_tasklet.data = (unsigned long) &pvcc->chan;
-	err = ppp_register_channel(&pvcc->chan);
-	if (err != 0) {
+	if ((err = ppp_register_channel(&pvcc->chan)) != 0) {
 		kfree(pvcc);
 		return err;
 	}
 	atmvcc->user_back = pvcc;
 	atmvcc->push = pppoatm_push;
 	atmvcc->pop = pppoatm_pop;
-	__module_get(THIS_MODULE);
+	(void) try_module_get(THIS_MODULE);
 	return 0;
 }
 
@@ -313,32 +319,31 @@ static int pppoatm_ioctl(struct socket *sock, unsigned int cmd,
 	unsigned long arg)
 {
 	struct atm_vcc *atmvcc = ATM_SD(sock);
-	void __user *argp = (void __user *)arg;
 
 	if (cmd != ATM_SETBACKEND && atmvcc->push != pppoatm_push)
 		return -ENOIOCTLCMD;
 	switch (cmd) {
 	case ATM_SETBACKEND: {
 		atm_backend_t b;
-		if (get_user(b, (atm_backend_t __user *) argp))
+		if (get_user(b, (atm_backend_t *) arg))
 			return -EFAULT;
 		if (b != ATM_BACKEND_PPP)
 			return -ENOIOCTLCMD;
 		if (!capable(CAP_NET_ADMIN))
 			return -EPERM;
-		return pppoatm_assign_vcc(atmvcc, argp);
+		return pppoatm_assign_vcc(atmvcc, arg);
 		}
 	case PPPIOCGCHAN:
 		return put_user(ppp_channel_index(&atmvcc_to_pvcc(atmvcc)->
-		    chan), (int __user *) argp) ? -EFAULT : 0;
+		    chan), (int *) arg) ? -EFAULT : 0;
 	case PPPIOCGUNIT:
 		return put_user(ppp_unit_number(&atmvcc_to_pvcc(atmvcc)->
-		    chan), (int __user *) argp) ? -EFAULT : 0;
+		    chan), (int *) arg) ? -EFAULT : 0;
 	}
 	return -ENOIOCTLCMD;
 }
 
-static struct atm_ioctl pppoatm_ioctl_ops = {
+struct atm_ioctl pppoatm_ioctl_ops = {
 	.owner	= THIS_MODULE,
 	.ioctl	= pppoatm_ioctl,
 };

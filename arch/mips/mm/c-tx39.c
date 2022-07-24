@@ -11,7 +11,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/smp.h>
 #include <linux/mm.h>
 
 #include <asm/cacheops.h>
@@ -29,6 +28,9 @@ static unsigned long icache_size, dcache_size;		/* Size in bytes */
 
 #include <asm/r4kcache.h>
 
+extern void r3k_clear_page(void * page);
+extern void r3k_copy_page(void * to, void * from);
+
 extern int r3k_have_wired_reg;	/* in r3k-tlb.c */
 
 /* This sequence is required to ensure icache is disabled immediately */
@@ -45,6 +47,8 @@ __asm__ __volatile__( \
 /* TX39H-style cache flush routines. */
 static void tx39h_flush_icache_all(void)
 {
+	unsigned long start = KSEG0;
+	unsigned long end = (start + icache_size);
 	unsigned long flags, config;
 
 	/* disable icache (set ICE#) */
@@ -52,25 +56,37 @@ static void tx39h_flush_icache_all(void)
 	config = read_c0_conf();
 	write_c0_conf(config & ~TX39_CONF_ICE);
 	TX39_STOP_STREAMING();
-	blast_icache16();
+
+	/* invalidate icache */
+	while (start < end) {
+		cache16_unroll32(start, Index_Invalidate_I);
+		start += 0x200;
+	}
+
 	write_c0_conf(config);
 	local_irq_restore(flags);
 }
 
 static void tx39h_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 {
-	/* Catch bad driver code */
-	BUG_ON(size == 0);
+	unsigned long end, a;
+	unsigned long dc_lsize = current_cpu_data.dcache.linesz;
 
 	iob();
-	blast_inv_dcache_range(addr, addr + size);
+	a = addr & ~(dc_lsize - 1);
+	end = (addr + size - 1) & ~(dc_lsize - 1);
+	while (1) {
+		invalidate_dcache_line(a); /* Hit_Invalidate_D */
+		if (a == end) break;
+		a += dc_lsize;
+	}
 }
 
 
 /* TX39H2,TX39H3 */
 static inline void tx39_blast_dcache_page(unsigned long addr)
 {
-	if (current_cpu_type() != CPU_TX3912)
+	if (current_cpu_data.cputype != CPU_TX3912)
 		blast_dcache16_page(addr);
 }
 
@@ -123,22 +139,13 @@ static inline void tx39_blast_icache(void)
 	local_irq_restore(flags);
 }
 
-static void tx39__flush_cache_vmap(void)
-{
-	tx39_blast_dcache();
-}
-
-static void tx39__flush_cache_vunmap(void)
-{
-	tx39_blast_dcache();
-}
-
 static inline void tx39_flush_cache_all(void)
 {
 	if (!cpu_has_dc_aliases)
 		return;
 
 	tx39_blast_dcache();
+	tx39_blast_icache();
 }
 
 static inline void tx39___flush_cache_all(void)
@@ -152,27 +159,31 @@ static void tx39_flush_cache_mm(struct mm_struct *mm)
 	if (!cpu_has_dc_aliases)
 		return;
 
-	if (cpu_context(smp_processor_id(), mm) != 0)
-		tx39_blast_dcache();
+	if (cpu_context(smp_processor_id(), mm) != 0) {
+		tx39_flush_cache_all();
+	}
 }
 
 static void tx39_flush_cache_range(struct vm_area_struct *vma,
 	unsigned long start, unsigned long end)
 {
+	struct mm_struct *mm = vma->vm_mm;
+
 	if (!cpu_has_dc_aliases)
 		return;
-	if (!(cpu_context(smp_processor_id(), vma->vm_mm)))
-		return;
 
-	tx39_blast_dcache();
+	if (cpu_context(smp_processor_id(), mm) != 0) {
+		tx39_blast_dcache();
+		tx39_blast_icache();
+	}
 }
 
-static void tx39_flush_cache_page(struct vm_area_struct *vma, unsigned long page, unsigned long pfn)
+static void tx39_flush_cache_page(struct vm_area_struct *vma,
+				   unsigned long page)
 {
 	int exec = vma->vm_flags & VM_EXEC;
 	struct mm_struct *mm = vma->vm_mm;
 	pgd_t *pgdp;
-	pud_t *pudp;
 	pmd_t *pmdp;
 	pte_t *ptep;
 
@@ -185,8 +196,7 @@ static void tx39_flush_cache_page(struct vm_area_struct *vma, unsigned long page
 
 	page &= PAGE_MASK;
 	pgdp = pgd_offset(mm, page);
-	pudp = pud_offset(pgdp, page);
-	pmdp = pmd_offset(pudp, page);
+	pmdp = pmd_offset(pgdp, page);
 	ptep = pte_offset(pmdp, page);
 
 	/*
@@ -215,15 +225,11 @@ static void tx39_flush_cache_page(struct vm_area_struct *vma, unsigned long page
 	 * Do indexed flush, too much work to get the (possible) TLB refills
 	 * to work correctly.
 	 */
+	page = (KSEG0 + (page & (dcache_size - 1)));
 	if (cpu_has_dc_aliases || exec)
 		tx39_blast_dcache_page_indexed(page);
 	if (exec)
 		tx39_blast_icache_page_indexed(page);
-}
-
-static void local_tx39_flush_data_cache_page(void * addr)
-{
-	tx39_blast_dcache_page((unsigned long)addr);
 }
 
 static void tx39_flush_data_cache_page(unsigned long addr)
@@ -233,29 +239,77 @@ static void tx39_flush_data_cache_page(unsigned long addr)
 
 static void tx39_flush_icache_range(unsigned long start, unsigned long end)
 {
+	unsigned long dc_lsize = current_cpu_data.dcache.linesz;
+	unsigned long addr, aend;
+
 	if (end - start > dcache_size)
 		tx39_blast_dcache();
-	else
-		protected_blast_dcache_range(start, end);
+	else {
+		addr = start & ~(dc_lsize - 1);
+		aend = (end - 1) & ~(dc_lsize - 1);
+
+		while (1) {
+			/* Hit_Writeback_Inv_D */
+			protected_writeback_dcache_line(addr);
+			if (addr == aend)
+				break;
+			addr += dc_lsize;
+		}
+	}
 
 	if (end - start > icache_size)
 		tx39_blast_icache();
 	else {
 		unsigned long flags, config;
+		addr = start & ~(dc_lsize - 1);
+		aend = (end - 1) & ~(dc_lsize - 1);
 		/* disable icache (set ICE#) */
 		local_irq_save(flags);
 		config = read_c0_conf();
 		write_c0_conf(config & ~TX39_CONF_ICE);
 		TX39_STOP_STREAMING();
-		protected_blast_icache_range(start, end);
+		while (1) {
+			/* Hit_Invalidate_I */
+			protected_flush_icache_line(addr);
+			if (addr == aend)
+				break;
+			addr += dc_lsize;
+		}
 		write_c0_conf(config);
 		local_irq_restore(flags);
 	}
 }
 
+/*
+ * Ok, this seriously sucks.  We use them to flush a user page but don't
+ * know the virtual address, so we have to blast away the whole icache
+ * which is significantly more expensive than the real thing.  Otoh we at
+ * least know the kernel address of the page so we can flush it
+ * selectivly.
+ */
+static void tx39_flush_icache_page(struct vm_area_struct *vma, struct page *page)
+{
+	unsigned long addr;
+	/*
+	 * If there's no context yet, or the page isn't executable, no icache
+	 * flush is needed.
+	 */
+	if (!(vma->vm_flags & VM_EXEC))
+		return;
+
+	addr = (unsigned long) page_address(page);
+	tx39_blast_dcache_page(addr);
+
+	/*
+	 * We're not sure of the virtual address(es) involved here, so
+	 * we have to flush the entire I-cache.
+	 */
+	tx39_blast_icache();
+}
+
 static void tx39_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 {
-	unsigned long end;
+	unsigned long end, a;
 
 	if (((size | addr) & (PAGE_SIZE - 1)) == 0) {
 		end = addr + size;
@@ -266,13 +320,20 @@ static void tx39_dma_cache_wback_inv(unsigned long addr, unsigned long size)
 	} else if (size > dcache_size) {
 		tx39_blast_dcache();
 	} else {
-		blast_dcache_range(addr, addr + size);
+		unsigned long dc_lsize = current_cpu_data.dcache.linesz;
+		a = addr & ~(dc_lsize - 1);
+		end = (addr + size - 1) & ~(dc_lsize - 1);
+		while (1) {
+			flush_dcache_line(a); /* Hit_Writeback_Inv_D */
+			if (a == end) break;
+			a += dc_lsize;
+		}
 	}
 }
 
 static void tx39_dma_cache_inv(unsigned long addr, unsigned long size)
 {
-	unsigned long end;
+	unsigned long end, a;
 
 	if (((size | addr) & (PAGE_SIZE - 1)) == 0) {
 		end = addr + size;
@@ -283,7 +344,14 @@ static void tx39_dma_cache_inv(unsigned long addr, unsigned long size)
 	} else if (size > dcache_size) {
 		tx39_blast_dcache();
 	} else {
-		blast_inv_dcache_range(addr, addr + size);
+		unsigned long dc_lsize = current_cpu_data.dcache.linesz;
+		a = addr & ~(dc_lsize - 1);
+		end = (addr + size - 1) & ~(dc_lsize - 1);
+		while (1) {
+			invalidate_dcache_line(a); /* Hit_Invalidate_D */
+			if (a == end) break;
+			a += dc_lsize;
+		}
 	}
 }
 
@@ -318,7 +386,7 @@ static __init void tx39_probe_cache(void)
 				  TX39_CONF_DCS_SHIFT));
 
 	current_cpu_data.icache.linesz = 16;
-	switch (current_cpu_type()) {
+	switch (current_cpu_data.cputype) {
 	case CPU_TX3912:
 		current_cpu_data.icache.ways = 1;
 		current_cpu_data.dcache.ways = 1;
@@ -340,11 +408,12 @@ static __init void tx39_probe_cache(void)
 	}
 }
 
-void __cpuinit tx39_cache_init(void)
+void __init ld_mmu_tx39(void)
 {
-	extern void build_clear_page(void);
-	extern void build_copy_page(void);
 	unsigned long config;
+
+	_clear_page = r3k_clear_page;
+	_copy_page = r3k_copy_page;
 
 	config = read_c0_conf();
 	config &= ~TX39_CONF_WBON;
@@ -352,21 +421,18 @@ void __cpuinit tx39_cache_init(void)
 
 	tx39_probe_cache();
 
-	switch (current_cpu_type()) {
+	switch (current_cpu_data.cputype) {
 	case CPU_TX3912:
 		/* TX39/H core (writethru direct-map cache) */
-		__flush_cache_vmap	= tx39__flush_cache_vmap;
-		__flush_cache_vunmap	= tx39__flush_cache_vunmap;
 		flush_cache_all	= tx39h_flush_icache_all;
 		__flush_cache_all	= tx39h_flush_icache_all;
 		flush_cache_mm		= (void *) tx39h_flush_icache_all;
 		flush_cache_range	= (void *) tx39h_flush_icache_all;
 		flush_cache_page	= (void *) tx39h_flush_icache_all;
+		flush_icache_page	= (void *) tx39h_flush_icache_all;
 		flush_icache_range	= (void *) tx39h_flush_icache_all;
-		local_flush_icache_range = (void *) tx39h_flush_icache_all;
 
 		flush_cache_sigtramp	= (void *) tx39h_flush_icache_all;
-		local_flush_data_cache_page	= (void *) tx39h_flush_icache_all;
 		flush_data_cache_page	= (void *) tx39h_flush_icache_all;
 
 		_dma_cache_wback_inv	= tx39h_dma_cache_wback_inv;
@@ -383,19 +449,15 @@ void __cpuinit tx39_cache_init(void)
 		write_c0_wired(0);	/* set 8 on reset... */
 		/* board-dependent init code may set WBON */
 
-		__flush_cache_vmap	= tx39__flush_cache_vmap;
-		__flush_cache_vunmap	= tx39__flush_cache_vunmap;
-
 		flush_cache_all = tx39_flush_cache_all;
 		__flush_cache_all = tx39___flush_cache_all;
 		flush_cache_mm = tx39_flush_cache_mm;
 		flush_cache_range = tx39_flush_cache_range;
 		flush_cache_page = tx39_flush_cache_page;
+		flush_icache_page = tx39_flush_icache_page;
 		flush_icache_range = tx39_flush_icache_range;
-		local_flush_icache_range = tx39_flush_icache_range;
 
 		flush_cache_sigtramp = tx39_flush_cache_sigtramp;
-		local_flush_data_cache_page = local_tx39_flush_data_cache_page;
 		flush_data_cache_page = tx39_flush_data_cache_page;
 
 		_dma_cache_wback_inv = tx39_dma_cache_wback_inv;
@@ -423,12 +485,8 @@ void __cpuinit tx39_cache_init(void)
 	current_cpu_data.icache.waybit = 0;
 	current_cpu_data.dcache.waybit = 0;
 
-	printk("Primary instruction cache %ldkB, linesize %d bytes\n",
+	printk("Primary instruction cache %ldkb, linesize %d bytes\n",
 		icache_size >> 10, current_cpu_data.icache.linesz);
-	printk("Primary data cache %ldkB, linesize %d bytes\n",
+	printk("Primary data cache %ldkb, linesize %d bytes\n",
 		dcache_size >> 10, current_cpu_data.dcache.linesz);
-
-	build_clear_page();
-	build_copy_page();
-	tx39h_flush_icache_all();
 }

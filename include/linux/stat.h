@@ -53,17 +53,14 @@
 #define S_IWUGO		(S_IWUSR|S_IWGRP|S_IWOTH)
 #define S_IXUGO		(S_IXUSR|S_IXGRP|S_IXOTH)
 
-#define UTIME_NOW	((1l << 30) - 1l)
-#define UTIME_OMIT	((1l << 30) - 2l)
-
 #include <linux/types.h>
 #include <linux/time.h>
 
 struct kstat {
-	u64		ino;
+	unsigned long	ino;
 	dev_t		dev;
 	umode_t		mode;
-	unsigned int	nlink;
+	nlink_t		nlink;
 	uid_t		uid;
 	gid_t		gid;
 	dev_t		rdev;
@@ -72,7 +69,7 @@ struct kstat {
 	struct timespec	mtime;
 	struct timespec	ctime;
 	unsigned long	blksize;
-	unsigned long long	blocks;
+	unsigned long	blocks;
 };
 
 #endif

@@ -1,11 +1,9 @@
 /************************************************************
  * EFI GUID Partition Table handling
- *
- * http://www.uefi.org/specs/
- * http://www.intel.com/technology/efi/
- *
+ * Per Intel EFI Specification v1.02
+ * http://developer.intel.com/technology/efi/efi.htm
  * efi.[ch] by Matt Domsch <Matt_Domsch@dell.com>
- *   Copyright 2000,2001,2002,2004 Dell Inc.
+ *   Copyright 2000,2001,2002 Dell Inc.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -25,11 +23,6 @@
  * TODO:
  *
  * Changelog:
- * Mon Nov 09 2004 Matt Domsch <Matt_Domsch@dell.com>
- * - test for valid PMBR and valid PGPT before ever reading
- *   AGPT, allow override with 'gpt' kernel command line option.
- * - check for first/last_usable_lba outside of size of disk
- *
  * Tue  Mar 26 2002 Matt Domsch <Matt_Domsch@dell.com>
  * - Ported to 2.5.7-pre1 and 2.5.7-dj2
  * - Applied patch to avoid fault in alternate header handling
@@ -93,12 +86,27 @@
  * - Code works, detects all the partitions.
  *
  ************************************************************/
+#include <linux/config.h>
 #include <linux/crc32.h>
-#include <linux/ctype.h>
-#include <linux/math64.h>
-#include <linux/slab.h>
 #include "check.h"
 #include "efi.h"
+
+/* Handle printing of 64-bit values */
+/* Borrowed from /usr/include/inttypes.h */
+# if BITS_PER_LONG == 64 
+#  define __PRI64_PREFIX	"l"
+# else
+#  define __PRI64_PREFIX	"ll"
+# endif
+# define PRIx64		__PRI64_PREFIX "x"
+
+
+#undef EFI_DEBUG
+#ifdef EFI_DEBUG
+#define Dprintk(x...) printk(KERN_DEBUG x)
+#else
+#define Dprintk(x...)
+#endif
 
 /* This allows a kernel command line option 'gpt' to override
  * the test for invalid PMBR.  Not __initdata because reloading
@@ -133,32 +141,6 @@ efi_crc32(const void *buf, unsigned long len)
 }
 
 /**
- * last_lba(): return number of last logical block of device
- * @bdev: block device
- * 
- * Description: Returns last LBA value on success, 0 on error.
- * This is stored (by sd and ide-geometry) in
- *  the part[0] entry for this disk, and is the number of
- *  physical sectors available on the disk.
- */
-static u64 last_lba(struct block_device *bdev)
-{
-	if (!bdev || !bdev->bd_inode)
-		return 0;
-	return div_u64(bdev->bd_inode->i_size,
-		       bdev_logical_block_size(bdev)) - 1ULL;
-}
-
-static inline int
-pmbr_part_valid(struct partition *part)
-{
-        if (part->sys_ind == EFI_PMBR_OSTYPE_EFI_GPT &&
-            le32_to_cpu(part->start_sect) == 1UL)
-                return 1;
-        return 0;
-}
-
-/**
  * is_pmbr_valid(): test Protective MBR for validity
  * @mbr: pointer to a legacy mbr structure
  *
@@ -170,39 +152,57 @@ pmbr_part_valid(struct partition *part)
 static int
 is_pmbr_valid(legacy_mbr *mbr)
 {
-	int i;
-	if (!mbr || le16_to_cpu(mbr->signature) != MSDOS_MBR_SIGNATURE)
-                return 0;
-	for (i = 0; i < 4; i++)
-		if (pmbr_part_valid(&mbr->partition_record[i]))
-                        return 1;
-	return 0;
+	int i, found = 0, signature = 0;
+	if (!mbr)
+		return 0;
+	signature = (le16_to_cpu(mbr->signature) == MSDOS_MBR_SIGNATURE);
+	for (i = 0; signature && i < 4; i++) {
+		if (mbr->partition_record[i].sys_ind ==
+                    EFI_PMBR_OSTYPE_EFI_GPT) {
+			found = 1;
+			break;
+		}
+	}
+	return (signature && found);
+}
+
+/**
+ * last_lba(): return number of last logical block of device
+ * @bdev: block device
+ * 
+ * Description: Returns last LBA value on success, 0 on error.
+ * This is stored (by sd and ide-geometry) in
+ *  the part[0] entry for this disk, and is the number of
+ *  physical sectors available on the disk.
+ */
+static u64
+last_lba(struct block_device *bdev)
+{
+	return (bdev->bd_inode->i_size >> 9) - 1;
 }
 
 /**
  * read_lba(): Read bytes from disk, starting at given LBA
- * @state
+ * @bdev
  * @lba
  * @buffer
  * @size_t
  *
- * Description: Reads @count bytes from @state->bdev into @buffer.
+ * Description:  Reads @count bytes from @bdev into @buffer.
  * Returns number of bytes read on success, 0 on error.
  */
-static size_t read_lba(struct parsed_partitions *state,
-		       u64 lba, u8 *buffer, size_t count)
+static size_t
+read_lba(struct block_device *bdev, u64 lba, u8 * buffer, size_t count)
 {
 	size_t totalreadcount = 0;
-	struct block_device *bdev = state->bdev;
-	sector_t n = lba * (bdev_logical_block_size(bdev) / 512);
 
-	if (!buffer || lba > last_lba(bdev))
-                return 0;
+	if (!bdev || !buffer)
+		return 0;
 
 	while (count) {
 		int copied = 512;
 		Sector sect;
-		unsigned char *data = read_part_sector(state, n++, &sect);
+		unsigned char *data = read_dev_sector(bdev, lba++, &sect);
 		if (!data)
 			break;
 		if (copied > count)
@@ -216,33 +216,34 @@ static size_t read_lba(struct parsed_partitions *state,
 	return totalreadcount;
 }
 
+
 /**
  * alloc_read_gpt_entries(): reads partition entries from disk
- * @state
+ * @bdev
  * @gpt - GPT header
  * 
  * Description: Returns ptes on success,  NULL on error.
  * Allocates space for PTEs based on information found in @gpt.
  * Notes: remember to free pte when you're done!
  */
-static gpt_entry *alloc_read_gpt_entries(struct parsed_partitions *state,
-					 gpt_header *gpt)
+static gpt_entry *
+alloc_read_gpt_entries(struct block_device *bdev, gpt_header *gpt)
 {
 	size_t count;
 	gpt_entry *pte;
-
-	if (!gpt)
+	if (!bdev || !gpt)
 		return NULL;
 
 	count = le32_to_cpu(gpt->num_partition_entries) *
                 le32_to_cpu(gpt->sizeof_partition_entry);
 	if (!count)
 		return NULL;
-	pte = kzalloc(count, GFP_KERNEL);
+	pte = kmalloc(count, GFP_KERNEL);
 	if (!pte)
 		return NULL;
+	memset(pte, 0, count);
 
-	if (read_lba(state, le64_to_cpu(gpt->partition_entry_lba),
+	if (read_lba(bdev, le64_to_cpu(gpt->partition_entry_lba),
                      (u8 *) pte,
 		     count) < count) {
 		kfree(pte);
@@ -254,24 +255,27 @@ static gpt_entry *alloc_read_gpt_entries(struct parsed_partitions *state,
 
 /**
  * alloc_read_gpt_header(): Allocates GPT header, reads into it from disk
- * @state
+ * @bdev
  * @lba is the Logical Block Address of the partition table
  * 
  * Description: returns GPT header on success, NULL on error.   Allocates
- * and fills a GPT header starting at @ from @state->bdev.
+ * and fills a GPT header starting at @ from @bdev.
  * Note: remember to free gpt when finished with it.
  */
-static gpt_header *alloc_read_gpt_header(struct parsed_partitions *state,
-					 u64 lba)
+static gpt_header *
+alloc_read_gpt_header(struct block_device *bdev, u64 lba)
 {
 	gpt_header *gpt;
-	unsigned ssz = bdev_logical_block_size(state->bdev);
-
-	gpt = kzalloc(ssz, GFP_KERNEL);
-	if (!gpt)
+	if (!bdev)
 		return NULL;
 
-	if (read_lba(state, lba, (u8 *) gpt, ssz) < ssz) {
+	gpt = kmalloc(sizeof (gpt_header), GFP_KERNEL);
+	if (!gpt)
+		return NULL;
+	memset(gpt, 0, sizeof (gpt_header));
+
+	if (read_lba(bdev, lba, (u8 *) gpt,
+		     sizeof (gpt_header)) < sizeof (gpt_header)) {
 		kfree(gpt);
                 gpt=NULL;
 		return NULL;
@@ -282,7 +286,7 @@ static gpt_header *alloc_read_gpt_header(struct parsed_partitions *state,
 
 /**
  * is_gpt_valid() - tests one GPT header and PTEs for validity
- * @state
+ * @bdev
  * @lba is the logical block address of the GPT header to test
  * @gpt is a GPT header ptr, filled on return.
  * @ptes is a PTEs ptr, filled on return.
@@ -290,24 +294,25 @@ static gpt_header *alloc_read_gpt_header(struct parsed_partitions *state,
  * Description: returns 1 if valid,  0 on error.
  * If valid, returns pointers to newly allocated GPT header and PTEs.
  */
-static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
-			gpt_header **gpt, gpt_entry **ptes)
+static int
+is_gpt_valid(struct block_device *bdev, u64 lba,
+	     gpt_header **gpt, gpt_entry **ptes)
 {
 	u32 crc, origcrc;
-	u64 lastlba;
 
-	if (!ptes)
+	if (!bdev || !gpt || !ptes)
 		return 0;
-	if (!(*gpt = alloc_read_gpt_header(state, lba)))
+	if (!(*gpt = alloc_read_gpt_header(bdev, lba)))
 		return 0;
 
 	/* Check the GUID Partition Table signature */
 	if (le64_to_cpu((*gpt)->signature) != GPT_HEADER_SIGNATURE) {
-		pr_debug("GUID Partition Table Header signature is wrong:"
-			 "%lld != %lld\n",
-			 (unsigned long long)le64_to_cpu((*gpt)->signature),
-			 (unsigned long long)GPT_HEADER_SIGNATURE);
-		goto fail;
+		Dprintk("GUID Partition Table Header signature is wrong: %"
+			PRIx64 " != %" PRIx64 "\n", le64_to_cpu((*gpt)->signature),
+			GPT_HEADER_SIGNATURE);
+		kfree(*gpt);
+		*gpt = NULL;
+		return 0;
 	}
 
 	/* Check the GUID Partition Table CRC */
@@ -316,46 +321,30 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 	crc = efi_crc32((const unsigned char *) (*gpt), le32_to_cpu((*gpt)->header_size));
 
 	if (crc != origcrc) {
-		pr_debug("GUID Partition Table Header CRC is wrong: %x != %x\n",
-			 crc, origcrc);
-		goto fail;
+		Dprintk
+		    ("GUID Partition Table Header CRC is wrong: %x != %x\n",
+		     crc, origcrc);
+		kfree(*gpt);
+		*gpt = NULL;
+		return 0;
 	}
 	(*gpt)->header_crc32 = cpu_to_le32(origcrc);
 
 	/* Check that the my_lba entry points to the LBA that contains
 	 * the GUID Partition Table */
 	if (le64_to_cpu((*gpt)->my_lba) != lba) {
-		pr_debug("GPT my_lba incorrect: %lld != %lld\n",
-			 (unsigned long long)le64_to_cpu((*gpt)->my_lba),
-			 (unsigned long long)lba);
-		goto fail;
+		Dprintk("GPT my_lba incorrect: %" PRIx64 " != %" PRIx64 "\n",
+			le64_to_cpu((*gpt)->my_lba), lba);
+		kfree(*gpt);
+		*gpt = NULL;
+		return 0;
 	}
 
-	/* Check the first_usable_lba and last_usable_lba are
-	 * within the disk.
-	 */
-	lastlba = last_lba(state->bdev);
-	if (le64_to_cpu((*gpt)->first_usable_lba) > lastlba) {
-		pr_debug("GPT: first_usable_lba incorrect: %lld > %lld\n",
-			 (unsigned long long)le64_to_cpu((*gpt)->first_usable_lba),
-			 (unsigned long long)lastlba);
-		goto fail;
+	if (!(*ptes = alloc_read_gpt_entries(bdev, *gpt))) {
+		kfree(*gpt);
+		*gpt = NULL;
+		return 0;
 	}
-	if (le64_to_cpu((*gpt)->last_usable_lba) > lastlba) {
-		pr_debug("GPT: last_usable_lba incorrect: %lld > %lld\n",
-			 (unsigned long long)le64_to_cpu((*gpt)->last_usable_lba),
-			 (unsigned long long)lastlba);
-		goto fail;
-	}
-
-	/* Check that sizeof_partition_entry has the correct value */
-	if (le32_to_cpu((*gpt)->sizeof_partition_entry) != sizeof(gpt_entry)) {
-		pr_debug("GUID Partitition Entry Size check failed.\n");
-		goto fail;
-	}
-
-	if (!(*ptes = alloc_read_gpt_entries(state, *gpt)))
-		goto fail;
 
 	/* Check the GUID Partition Entry Array CRC */
 	crc = efi_crc32((const unsigned char *) (*ptes),
@@ -363,36 +352,15 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 			le32_to_cpu((*gpt)->sizeof_partition_entry));
 
 	if (crc != le32_to_cpu((*gpt)->partition_entry_array_crc32)) {
-		pr_debug("GUID Partitition Entry Array CRC check failed.\n");
-		goto fail_ptes;
+		Dprintk("GUID Partitition Entry Array CRC check failed.\n");
+		kfree(*gpt);
+		*gpt = NULL;
+		kfree(*ptes);
+		*ptes = NULL;
+		return 0;
 	}
 
 	/* We're done, all's well */
-	return 1;
-
- fail_ptes:
-	kfree(*ptes);
-	*ptes = NULL;
- fail:
-	kfree(*gpt);
-	*gpt = NULL;
-	return 0;
-}
-
-/**
- * is_pte_valid() - tests one PTE for validity
- * @pte is the pte to check
- * @lastlba is last lba of the disk
- *
- * Description: returns 1 if valid,  0 on error.
- */
-static inline int
-is_pte_valid(const gpt_entry *pte, const u64 lastlba)
-{
-	if ((!efi_guidcmp(pte->partition_type_guid, NULL_GUID)) ||
-	    le64_to_cpu(pte->starting_lba) > lastlba         ||
-	    le64_to_cpu(pte->ending_lba)   > lastlba)
-		return 0;
 	return 1;
 }
 
@@ -414,33 +382,33 @@ compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
 	if (le64_to_cpu(pgpt->my_lba) != le64_to_cpu(agpt->alternate_lba)) {
 		printk(KERN_WARNING
 		       "GPT:Primary header LBA != Alt. header alternate_lba\n");
-		printk(KERN_WARNING "GPT:%lld != %lld\n",
-		       (unsigned long long)le64_to_cpu(pgpt->my_lba),
-                       (unsigned long long)le64_to_cpu(agpt->alternate_lba));
+		printk(KERN_WARNING "GPT:%" PRIx64 " != %" PRIx64 "\n",
+		       le64_to_cpu(pgpt->my_lba),
+                       le64_to_cpu(agpt->alternate_lba));
 		error_found++;
 	}
 	if (le64_to_cpu(pgpt->alternate_lba) != le64_to_cpu(agpt->my_lba)) {
 		printk(KERN_WARNING
 		       "GPT:Primary header alternate_lba != Alt. header my_lba\n");
-		printk(KERN_WARNING "GPT:%lld != %lld\n",
-		       (unsigned long long)le64_to_cpu(pgpt->alternate_lba),
-                       (unsigned long long)le64_to_cpu(agpt->my_lba));
+		printk(KERN_WARNING "GPT:%" PRIx64 " != %" PRIx64 "\n",
+		       le64_to_cpu(pgpt->alternate_lba),
+                       le64_to_cpu(agpt->my_lba));
 		error_found++;
 	}
 	if (le64_to_cpu(pgpt->first_usable_lba) !=
             le64_to_cpu(agpt->first_usable_lba)) {
 		printk(KERN_WARNING "GPT:first_usable_lbas don't match.\n");
-		printk(KERN_WARNING "GPT:%lld != %lld\n",
-		       (unsigned long long)le64_to_cpu(pgpt->first_usable_lba),
-                       (unsigned long long)le64_to_cpu(agpt->first_usable_lba));
+		printk(KERN_WARNING "GPT:%" PRIx64 " != %" PRIx64 "\n",
+		       le64_to_cpu(pgpt->first_usable_lba),
+                       le64_to_cpu(agpt->first_usable_lba));
 		error_found++;
 	}
 	if (le64_to_cpu(pgpt->last_usable_lba) !=
             le64_to_cpu(agpt->last_usable_lba)) {
 		printk(KERN_WARNING "GPT:last_usable_lbas don't match.\n");
-		printk(KERN_WARNING "GPT:%lld != %lld\n",
-		       (unsigned long long)le64_to_cpu(pgpt->last_usable_lba),
-                       (unsigned long long)le64_to_cpu(agpt->last_usable_lba));
+		printk(KERN_WARNING "GPT:%" PRIx64 " != %" PRIx64 "\n",
+		       le64_to_cpu(pgpt->last_usable_lba),
+                       le64_to_cpu(agpt->last_usable_lba));
 		error_found++;
 	}
 	if (efi_guidcmp(pgpt->disk_guid, agpt->disk_guid)) {
@@ -476,18 +444,16 @@ compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
 	if (le64_to_cpu(pgpt->alternate_lba) != lastlba) {
 		printk(KERN_WARNING
 		       "GPT:Primary header thinks Alt. header is not at the end of the disk.\n");
-		printk(KERN_WARNING "GPT:%lld != %lld\n",
-			(unsigned long long)le64_to_cpu(pgpt->alternate_lba),
-			(unsigned long long)lastlba);
+		printk(KERN_WARNING "GPT:%" PRIx64 " != %" PRIx64 "\n",
+		       le64_to_cpu(pgpt->alternate_lba), lastlba);
 		error_found++;
 	}
 
 	if (le64_to_cpu(agpt->my_lba) != lastlba) {
 		printk(KERN_WARNING
 		       "GPT:Alternate GPT header not at the end of the disk.\n");
-		printk(KERN_WARNING "GPT:%lld != %lld\n",
-			(unsigned long long)le64_to_cpu(agpt->my_lba),
-			(unsigned long long)lastlba);
+		printk(KERN_WARNING "GPT:%" PRIx64 " != %" PRIx64 "\n",
+		       le64_to_cpu(agpt->my_lba), lastlba);
 		error_found++;
 	}
 
@@ -499,66 +465,90 @@ compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
 
 /**
  * find_valid_gpt() - Search disk for valid GPT headers and PTEs
- * @state
+ * @bdev
  * @gpt is a GPT header ptr, filled on return.
  * @ptes is a PTEs ptr, filled on return.
  * Description: Returns 1 if valid, 0 on error.
  * If valid, returns pointers to newly allocated GPT header and PTEs.
- * Validity depends on PMBR being valid (or being overridden by the
- * 'gpt' kernel command line option) and finding either the Primary
- * GPT header and PTEs valid, or the Alternate GPT header and PTEs
- * valid.  If the Primary GPT header is not valid, the Alternate GPT header
- * is not checked unless the 'gpt' kernel command line option is passed.
- * This protects against devices which misreport their size, and forces
- * the user to decide to use the Alternate GPT.
+ * Validity depends on finding either the Primary GPT header and PTEs valid,
+ * or the Alternate GPT header and PTEs valid, and the PMBR valid.
  */
-static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
-			  gpt_entry **ptes)
+static int
+find_valid_gpt(struct block_device *bdev, gpt_header **gpt, gpt_entry **ptes)
 {
 	int good_pgpt = 0, good_agpt = 0, good_pmbr = 0;
 	gpt_header *pgpt = NULL, *agpt = NULL;
 	gpt_entry *pptes = NULL, *aptes = NULL;
-	legacy_mbr *legacymbr;
+	legacy_mbr *legacymbr = NULL;
 	u64 lastlba;
-
-	if (!ptes)
+	if (!bdev || !gpt || !ptes)
 		return 0;
 
-	lastlba = last_lba(state->bdev);
-        if (!force_gpt) {
-                /* This will be added to the EFI Spec. per Intel after v1.02. */
-                legacymbr = kzalloc(sizeof (*legacymbr), GFP_KERNEL);
-                if (legacymbr) {
-                        read_lba(state, 0, (u8 *) legacymbr,
-				 sizeof (*legacymbr));
-                        good_pmbr = is_pmbr_valid(legacymbr);
-                        kfree(legacymbr);
+	lastlba = last_lba(bdev);
+	good_pgpt = is_gpt_valid(bdev, GPT_PRIMARY_PARTITION_TABLE_LBA,
+				 &pgpt, &pptes);
+        if (good_pgpt) {
+		good_agpt = is_gpt_valid(bdev,
+                                         le64_to_cpu(pgpt->alternate_lba),
+					 &agpt, &aptes);
+                if (!good_agpt) {
+                        good_agpt = is_gpt_valid(bdev, lastlba,
+                                                 &agpt, &aptes);
                 }
-                if (!good_pmbr)
-                        goto fail;
+        }
+        else {
+                good_agpt = is_gpt_valid(bdev, lastlba,
+                                         &agpt, &aptes);
         }
 
-	good_pgpt = is_gpt_valid(state, GPT_PRIMARY_PARTITION_TABLE_LBA,
-				 &pgpt, &pptes);
-        if (good_pgpt)
-		good_agpt = is_gpt_valid(state,
-					 le64_to_cpu(pgpt->alternate_lba),
-					 &agpt, &aptes);
-        if (!good_agpt && force_gpt)
-                good_agpt = is_gpt_valid(state, lastlba, &agpt, &aptes);
-
         /* The obviously unsuccessful case */
-        if (!good_pgpt && !good_agpt)
+        if (!good_pgpt && !good_agpt) {
                 goto fail;
+        }
+
+	/* This will be added to the EFI Spec. per Intel after v1.02. */
+        legacymbr = kmalloc(sizeof (*legacymbr), GFP_KERNEL);
+        if (legacymbr) {
+                memset(legacymbr, 0, sizeof (*legacymbr));
+                read_lba(bdev, 0, (u8 *) legacymbr,
+                         sizeof (*legacymbr));
+                good_pmbr = is_pmbr_valid(legacymbr);
+                kfree(legacymbr);
+                legacymbr=NULL;
+        }
+
+        /* Failure due to bad PMBR */
+        if ((good_pgpt || good_agpt) && !good_pmbr && !force_gpt) {
+                printk(KERN_WARNING 
+                       "  Warning: Disk has a valid GPT signature "
+                       "but invalid PMBR.\n");
+                printk(KERN_WARNING
+                       "  Assuming this disk is *not* a GPT disk anymore.\n");
+                printk(KERN_WARNING
+                       "  Use gpt kernel option to override.  "
+                       "Use GNU Parted to correct disk.\n");
+                goto fail;
+        }
+
+        /* Would fail due to bad PMBR, but force GPT anyhow */
+        if ((good_pgpt || good_agpt) && !good_pmbr && force_gpt) {
+                printk(KERN_WARNING
+                       "  Warning: Disk has a valid GPT signature but "
+                       "invalid PMBR.\n");
+                printk(KERN_WARNING
+                       "  Use GNU Parted to correct disk.\n");
+                printk(KERN_WARNING
+                       "  gpt option taken, disk treated as GPT.\n");
+        }
 
         compare_gpts(pgpt, agpt, lastlba);
 
         /* The good cases */
-        if (good_pgpt) {
+        if (good_pgpt && (good_pmbr || force_gpt)) {
                 *gpt  = pgpt;
                 *ptes = pptes;
-                kfree(agpt);
-                kfree(aptes);
+                if (agpt)  { kfree(agpt);   agpt = NULL; }
+                if (aptes) { kfree(aptes); aptes = NULL; }
                 if (!good_agpt) {
                         printk(KERN_WARNING 
 			       "Alternate GPT is invalid, "
@@ -566,29 +556,30 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
                 }
                 return 1;
         }
-        else if (good_agpt) {
+        else if (good_agpt && (good_pmbr || force_gpt)) {
                 *gpt  = agpt;
                 *ptes = aptes;
-                kfree(pgpt);
-                kfree(pptes);
+                if (pgpt)  { kfree(pgpt);   pgpt = NULL; }
+                if (pptes) { kfree(pptes); pptes = NULL; }
                 printk(KERN_WARNING 
                        "Primary GPT is invalid, using alternate GPT.\n");
                 return 1;
         }
 
  fail:
-        kfree(pgpt);
-        kfree(agpt);
-        kfree(pptes);
-        kfree(aptes);
+        if (pgpt)  { kfree(pgpt);   pgpt=NULL; }
+        if (agpt)  { kfree(agpt);   agpt=NULL; }
+        if (pptes) { kfree(pptes); pptes=NULL; }
+        if (aptes) { kfree(aptes); aptes=NULL; }
         *gpt = NULL;
         *ptes = NULL;
         return 0;
 }
 
 /**
- * efi_partition(struct parsed_partitions *state)
+ * efi_partition(struct parsed_partitions *state, struct block_device *bdev)
  * @state
+ * @bdev
  *
  * Description: called from check.c, if the disk contains GPT
  * partitions, sets up partition entries in the kernel.
@@ -605,62 +596,56 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
  *  1 if successful
  *
  */
-int efi_partition(struct parsed_partitions *state)
+int
+efi_partition(struct parsed_partitions *state, struct block_device *bdev)
 {
 	gpt_header *gpt = NULL;
 	gpt_entry *ptes = NULL;
 	u32 i;
-	unsigned ssz = bdev_logical_block_size(state->bdev) / 512;
-	u8 unparsed_guid[37];
 
-	if (!find_valid_gpt(state, &gpt, &ptes) || !gpt || !ptes) {
+	if (!find_valid_gpt(bdev, &gpt, &ptes) || !gpt || !ptes) {
 		kfree(gpt);
 		kfree(ptes);
 		return 0;
 	}
 
-	pr_debug("GUID Partition Table is valid!  Yea!\n");
+	Dprintk("GUID Partition Table is valid!  Yea!\n");
 
 	for (i = 0; i < le32_to_cpu(gpt->num_partition_entries) && i < state->limit-1; i++) {
-		struct partition_meta_info *info;
-		unsigned label_count = 0;
-		unsigned label_max;
-		u64 start = le64_to_cpu(ptes[i].starting_lba);
-		u64 size = le64_to_cpu(ptes[i].ending_lba) -
-			   le64_to_cpu(ptes[i].starting_lba) + 1ULL;
-
-		if (!is_pte_valid(&ptes[i], last_lba(state->bdev)))
+		if (!efi_guidcmp(ptes[i].partition_type_guid, NULL_GUID))
 			continue;
 
-		put_partition(state, i+1, start * ssz, size * ssz);
+		put_partition(state, i+1, le64_to_cpu(ptes[i].starting_lba),
+				 (le64_to_cpu(ptes[i].ending_lba) -
+                                  le64_to_cpu(ptes[i].starting_lba) +
+				  1));
 
-		/* If this is a RAID volume, tell md */
+		/* If there's this is a RAID volume, tell md */
 		if (!efi_guidcmp(ptes[i].partition_type_guid,
 				 PARTITION_LINUX_RAID_GUID))
-			state->parts[i + 1].flags = ADDPART_FLAG_RAID;
-
-		info = &state->parts[i + 1].info;
-		/* Instead of doing a manual swap to big endian, reuse the
-		 * common ASCII hex format as the interim.
-		 */
-		efi_guid_unparse(&ptes[i].unique_partition_guid, unparsed_guid);
-		part_pack_uuid(unparsed_guid, info->uuid);
-
-		/* Naively convert UTF16-LE to 7 bits. */
-		label_max = min(sizeof(info->volname) - 1,
-				sizeof(ptes[i].partition_name));
-		info->volname[label_max] = 0;
-		while (label_count < label_max) {
-			u8 c = ptes[i].partition_name[label_count] & 0xff;
-			if (c && !isprint(c))
-				c = '!';
-			info->volname[label_count] = c;
-			label_count++;
-		}
-		state->parts[i + 1].has_info = true;
+			state->parts[i+1].flags = 1;
 	}
 	kfree(ptes);
 	kfree(gpt);
-	strlcat(state->pp_buf, "\n", PAGE_SIZE);
+	printk("\n");
 	return 1;
 }
+
+/*
+ * Overrides for Emacs so that we follow Linus's tabbing style.
+ * Emacs will notice this stuff at the end of the file and automatically
+ * adjust the settings for this buffer only.  This must remain at the end
+ * of the file.
+ * ---------------------------------------------------------------------------
+ * Local variables:
+ * c-indent-level: 4
+ * c-brace-imaginary-offset: 0
+ * c-brace-offset: -4
+ * c-argdecl-indent: 4
+ * c-label-offset: -4
+ * c-continued-statement-offset: 4
+ * c-continued-brace-offset: 0
+ * indent-tabs-mode: nil
+ * tab-width: 8
+ * End:
+ */

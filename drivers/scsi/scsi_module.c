@@ -11,7 +11,8 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 
-#include <scsi/scsi_host.h>
+#include "scsi.h"
+#include "hosts.h"
 
 
 static int __init init_this_scsi_driver(void)

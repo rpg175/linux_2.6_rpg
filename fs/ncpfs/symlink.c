@@ -20,22 +20,24 @@
  *
  */
 
+#include <linux/config.h>
 
 #include <asm/uaccess.h>
 
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/ncp_fs.h>
 #include <linux/time.h>
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
-#include "ncp_fs.h"
+#include "ncplib_kernel.h"
+
 
 /* these magic numbers must appear in the symlink file -- this makes it a bit
    more resilient against the magic attributes being set on random files. */
 
-#define NCP_SYMLINK_MAGIC0	cpu_to_le32(0x6c6d7973)     /* "symlnk->" */
-#define NCP_SYMLINK_MAGIC1	cpu_to_le32(0x3e2d6b6e)
+#define NCP_SYMLINK_MAGIC0	le32_to_cpu(0x6c6d7973)     /* "symlnk->" */
+#define NCP_SYMLINK_MAGIC1	le32_to_cpu(0x3e2d6b6e)
 
 /* ----- read a symbolic link ------------------------------------------ */
 
@@ -47,7 +49,7 @@ static int ncp_symlink_readpage(struct file *file, struct page *page)
 	char *buf = kmap(page);
 
 	error = -ENOMEM;
-	rawlink = kmalloc(NCP_MAX_SYMLINK_SIZE, GFP_KERNEL);
+	rawlink=(char *)kmalloc(NCP_MAX_SYMLINK_SIZE, GFP_KERNEL);
 	if (!rawlink)
 		goto fail;
 
@@ -65,8 +67,8 @@ static int ncp_symlink_readpage(struct file *file, struct page *page)
 
 	if (NCP_FINFO(inode)->flags & NCPI_KLUDGE_SYMLINK) {
 		if (length<NCP_MIN_SYMLINK_SIZE || 
-		    ((__le32 *)rawlink)[0]!=NCP_SYMLINK_MAGIC0 ||
-		    ((__le32 *)rawlink)[1]!=NCP_SYMLINK_MAGIC1)
+		    ((__u32 *)rawlink)[0]!=NCP_SYMLINK_MAGIC0 ||
+		    ((__u32 *)rawlink)[1]!=NCP_SYMLINK_MAGIC1)
 		    	goto failEIO;
 		link = rawlink + 8;
 		length -= 8;
@@ -97,7 +99,7 @@ fail:
 /*
  * symlinks can't do much...
  */
-const struct address_space_operations ncp_symlink_aops = {
+struct address_space_operations ncp_symlink_aops = {
 	.readpage	= ncp_symlink_readpage,
 };
 	
@@ -108,8 +110,7 @@ int ncp_symlink(struct inode *dir, struct dentry *dentry, const char *symname) {
 	char *rawlink;
 	int length, err, i, outlen;
 	int kludge;
-	int mode;
-	__le32 attr;
+	int mode, attr;
 	unsigned int hdr;
 
 	DPRINTK("ncp_symlink(dir=%p,dentry=%p,symname=%s)\n",dir,dentry,symname);
@@ -125,15 +126,15 @@ int ncp_symlink(struct inode *dir, struct dentry *dentry, const char *symname) {
 	/* EPERM is returned by VFS if symlink procedure does not exist */
 		return -EPERM;
   
-	rawlink = kmalloc(NCP_MAX_SYMLINK_SIZE, GFP_KERNEL);
+	rawlink=(char *)kmalloc(NCP_MAX_SYMLINK_SIZE, GFP_KERNEL);
 	if (!rawlink)
 		return -ENOMEM;
 
 	if (kludge) {
 		mode = 0;
 		attr = aSHARED | aHIDDEN;
-		((__le32 *)rawlink)[0]=NCP_SYMLINK_MAGIC0;
-		((__le32 *)rawlink)[1]=NCP_SYMLINK_MAGIC1;
+		((__u32 *)rawlink)[0]=NCP_SYMLINK_MAGIC0;
+		((__u32 *)rawlink)[1]=NCP_SYMLINK_MAGIC1;
 		hdr = 8;
 	} else {
 		mode = S_IFLNK | S_IRWXUGO;

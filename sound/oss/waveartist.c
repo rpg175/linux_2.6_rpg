@@ -1,5 +1,5 @@
 /*
- * linux/sound/oss/waveartist.c
+ * linux/drivers/sound/waveartist.c
  *
  * The low level driver for the RWA010 Rockwell Wave Artist
  * codec chip used in the Rebel.com NetWinder.
@@ -35,7 +35,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/slab.h>
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
@@ -48,7 +48,7 @@
 #include "waveartist.h"
 
 #ifdef CONFIG_ARM
-#include <mach/hardware.h>
+#include <asm/hardware.h>
 #include <asm/mach-types.h>
 #endif
 
@@ -146,14 +146,14 @@ typedef struct wavnc_port_info {
 
 static int		nr_waveartist_devs;
 static wavnc_info	adev_info[MAX_AUDIO_DEV];
-static DEFINE_SPINLOCK(waveartist_lock);
+static spinlock_t	waveartist_lock = SPIN_LOCK_UNLOCKED;
 
 #ifndef CONFIG_ARCH_NETWINDER
 #define machine_is_netwinder() 0
 #else
 static struct timer_list vnc_timer;
 static void vnc_configure_mixer(wavnc_info *devc, unsigned int input_mask);
-static int vnc_private_ioctl(int dev, unsigned int cmd, int __user *arg);
+static int vnc_private_ioctl(int dev, unsigned int cmd, caddr_t arg);
 static void vnc_slider_tick(unsigned long data);
 #endif
 
@@ -184,8 +184,14 @@ waveartist_iack(wavnc_info *devc)
 static inline int
 waveartist_sleep(int timeout_ms)
 {
-	unsigned int timeout = msecs_to_jiffies(timeout_ms*100);
-	return schedule_timeout_interruptible(timeout);
+	unsigned int timeout = timeout_ms * 10 * HZ / 100;
+
+	do {
+		set_current_state(TASK_INTERRUPTIBLE);
+		timeout = schedule_timeout(timeout);
+	} while (timeout);
+
+	return 0;
 }
 
 static int
@@ -509,7 +515,7 @@ waveartist_start_input(int dev, unsigned long buf, int __count, int intrflag)
 }
 
 static int
-waveartist_ioctl(int dev, unsigned int cmd, void __user * arg)
+waveartist_ioctl(int dev, unsigned int cmd, caddr_t arg)
 {
 	return -EINVAL;
 }
@@ -828,9 +834,9 @@ static struct audio_driver waveartist_audio_driver = {
 
 
 static irqreturn_t
-waveartist_intr(int irq, void *dev_id)
+waveartist_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
-	wavnc_info *devc = dev_id;
+	wavnc_info *devc = (wavnc_info *)dev_id;
 	int	   irqstatus, status;
 
 	spin_lock(&waveartist_lock);
@@ -1119,7 +1125,7 @@ waveartist_set_mixer(wavnc_info *devc, int dev, unsigned int level)
 }
 
 static int
-waveartist_mixer_ioctl(int dev, unsigned int cmd, void __user * arg)
+waveartist_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 {
 	wavnc_info *devc = (wavnc_info *)audio_devs[dev]->devc;
 	int ret = 0, val, nr;
@@ -1143,7 +1149,7 @@ waveartist_mixer_ioctl(int dev, unsigned int cmd, void __user * arg)
 	nr = cmd & 0xff;
 
 	if (_SIOC_DIR(cmd) & _SIOC_WRITE) {
-		if (get_user(val, (int __user *)arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 
 		switch (nr) {
@@ -1190,7 +1196,7 @@ waveartist_mixer_ioctl(int dev, unsigned int cmd, void __user * arg)
 		}
 
 		if (ret >= 0)
-			ret = put_user(ret, (int __user *)arg) ? -EFAULT : 0;
+			ret = put_user(ret, (int *)arg) ? -EFAULT : 0;
 	}
 
 	return ret;
@@ -1262,9 +1268,11 @@ static int __init waveartist_init(wavnc_info *devc)
 	conf_printf2(dev_name, devc->hw.io_base, devc->hw.irq,
 		     devc->hw.dma, devc->hw.dma2);
 
-	portc = kzalloc(sizeof(wavnc_port_info), GFP_KERNEL);
+	portc = (wavnc_port_info *)kmalloc(sizeof(wavnc_port_info), GFP_KERNEL);
 	if (portc == NULL)
 		goto nomem;
+
+	memset(portc, 0, sizeof(wavnc_port_info));
 
 	my_dev = sound_install_audiodrv(AUDIO_DRIVER_VERSION, dev_name,
 			&waveartist_audio_driver, sizeof(struct audio_driver),
@@ -1338,20 +1346,18 @@ static int __init probe_waveartist(struct address_info *hw_config)
 		return 0;
 	}
 
-	if (!request_region(hw_config->io_base, 15, hw_config->name))  {
+	if (check_region(hw_config->io_base, 15))  {
 		printk(KERN_WARNING "WaveArtist: I/O port conflict\n");
 		return 0;
 	}
 
 	if (hw_config->irq > 15 || hw_config->irq < 0) {
-		release_region(hw_config->io_base, 15);
 		printk(KERN_WARNING "WaveArtist: Bad IRQ %d\n",
 		       hw_config->irq);
 		return 0;
 	}
 
 	if (hw_config->dma != 3) {
-		release_region(hw_config->io_base, 15);
 		printk(KERN_WARNING "WaveArtist: Bad DMA %d\n",
 		       hw_config->dma);
 		return 0;
@@ -1385,6 +1391,8 @@ attach_waveartist(struct address_info *hw, const struct waveartist_mixer_info *m
 
 	if (hw->dma != hw->dma2 && hw->dma2 != NO_DMA)
 		devc->audio_flags |= DMA_DUPLEX;
+
+	request_region(hw->io_base, 15, devc->hw.name);
 
 	devc->mix = mix;
 	devc->dev_no = waveartist_init(devc);
@@ -1478,14 +1486,16 @@ static void __exit unload_waveartist(struct address_info *hw)
 #define VNC_HANDSET_DETECT	0x40
 #define VNC_DISABLE_AUTOSWITCH	0x80
 
+extern spinlock_t gpio_lock;
+
 static inline void
 vnc_mute_spkr(wavnc_info *devc)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&nw_gpio_lock, flags);
-	nw_cpld_modify(CPLD_UNMUTE, devc->spkr_mute_state ? 0 : CPLD_UNMUTE);
-	spin_unlock_irqrestore(&nw_gpio_lock, flags);
+	spin_lock_irqsave(&gpio_lock, flags);
+	cpld_modify(CPLD_UNMUTE, devc->spkr_mute_state ? 0 : CPLD_UNMUTE);
+	spin_unlock_irqrestore(&gpio_lock, flags);
 }
 
 static void
@@ -1794,7 +1804,7 @@ vnc_slider_tick(unsigned long data)
 }
 
 static int
-vnc_private_ioctl(int dev, unsigned int cmd, int __user * arg)
+vnc_private_ioctl(int dev, unsigned int cmd, caddr_t arg)
 {
 	wavnc_info *devc = (wavnc_info *)audio_devs[dev]->devc;
 	int val;
@@ -1805,7 +1815,7 @@ vnc_private_ioctl(int dev, unsigned int cmd, int __user * arg)
 		u_int prev_spkr_mute, prev_line_mute, prev_auto_state;
 		int val;
 
-		if (get_user(val, arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 
 		/* check if parameter is logical */
@@ -1835,7 +1845,7 @@ vnc_private_ioctl(int dev, unsigned int cmd, int __user * arg)
 	}
 
 	case SOUND_MIXER_PRIVATE2:
-		if (get_user(val, arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 
 		switch (val) {
@@ -1860,7 +1870,7 @@ vnc_private_ioctl(int dev, unsigned int cmd, int __user * arg)
 		unsigned long	flags;
 		int		mixer_reg[15], i, val;
 
-		if (get_user(val, arg))
+		if (get_user(val, (int *)arg))
 			return -EFAULT;
 		if (copy_from_user(mixer_reg, (void *)val, sizeof(mixer_reg)))
 			return -EFAULT;
@@ -1907,7 +1917,7 @@ vnc_private_ioctl(int dev, unsigned int cmd, int __user * arg)
 		      (devc->telephone_detect ? VNC_PHONE_DETECT       : 0) |
 		      (devc->no_autoselect    ? VNC_DISABLE_AUTOSWITCH : 0);
 
-		return put_user(val, arg) ? -EFAULT : 0;
+		return put_user(val, (int *)arg) ? -EFAULT : 0;
 	}
 
 	if (_SIOC_DIR(cmd) & _SIOC_WRITE) {
@@ -1926,7 +1936,7 @@ vnc_private_ioctl(int dev, unsigned int cmd, int __user * arg)
 		if ((cmd & 0xff) == SOUND_MIXER_SPEAKER) {
 			unsigned int val, l, r;
 
-			if (get_user(val, arg))
+			if (get_user(val, (int *)arg))
 				return -EFAULT;
 
 			l = val & 0x7f;
@@ -2018,8 +2028,8 @@ __setup("waveartist=", setup_waveartist);
 #endif
 
 MODULE_DESCRIPTION("Rockwell WaveArtist RWA-010 sound driver");
-module_param(io, int, 0);		/* IO base */
-module_param(irq, int, 0);		/* IRQ */
-module_param(dma, int, 0);		/* DMA */
-module_param(dma2, int, 0);		/* DMA2 */
+MODULE_PARM(io, "i");		/* IO base */
+MODULE_PARM(irq, "i");		/* IRQ */
+MODULE_PARM(dma, "i");		/* DMA */
+MODULE_PARM(dma2, "i");		/* DMA2 */
 MODULE_LICENSE("GPL");

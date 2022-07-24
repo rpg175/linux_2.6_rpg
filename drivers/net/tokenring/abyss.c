@@ -10,7 +10,7 @@
  *      - Madge Smart 16/4 PCI Mk2
  *
  *  Maintainer(s):
- *    AF	Adam Fritzler
+ *    AF	Adam Fritzler		mid@auk.cx
  *
  *  Modification History:
  *	30-Dec-99	AF	Split off from the tms380tr driver.
@@ -45,7 +45,7 @@ static char version[] __devinitdata =
 
 #define ABYSS_IO_EXTENT 64
 
-static DEFINE_PCI_DEVICE_TABLE(abyss_pci_tbl) = {
+static struct pci_device_id abyss_pci_tbl[] = {
 	{ PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_MK2,
 	  PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_NETWORK_TOKEN_RING << 8, 0x00ffffff, },
 	{ }			/* Terminating entry */
@@ -92,14 +92,12 @@ static void abyss_sifwritew(struct net_device *dev, unsigned short val, unsigned
 	outw(val, dev->base_addr + reg);
 }
 
-static struct net_device_ops abyss_netdev_ops;
-
 static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
 {	
 	static int versionprinted;
 	struct net_device *dev;
 	struct net_local *tp;
-	int ret, pci_irq_line;
+	int i, ret, pci_irq_line;
 	unsigned long pci_ioaddr;
 	
 	if (versionprinted++ == 0)
@@ -114,16 +112,18 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 		
 	/* At this point we have found a valid card. */
 		
-	dev = alloc_trdev(sizeof(struct net_local));
+	dev = alloc_trdev(0);
 	if (!dev)
 		return -ENOMEM;
+
+	SET_MODULE_OWNER(dev);
 
 	if (!request_region(pci_ioaddr, ABYSS_IO_EXTENT, dev->name)) {
 		ret = -EBUSY;
 		goto err_out_trdev;
 	}
 		
-	ret = request_irq(pdev->irq, tms380tr_interrupt, IRQF_SHARED,
+	ret = request_irq(pdev->irq, tms380tr_interrupt, SA_SHIRQ,
 			  dev->name, dev);
 	if (ret)
 		goto err_out_region;
@@ -139,7 +139,7 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 	 */
 	dev->base_addr += 0x10;
 		
-	ret = tmsdev_init(dev, &pdev->dev);
+	ret = tmsdev_init(dev, PCI_MAX_ADDRESS, pdev);
 	if (ret) {
 		printk("%s: unable to get memory for dev->priv.\n", 
 		       dev->name);
@@ -147,10 +147,14 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 	}
 
 	abyss_read_eeprom(dev);
+		
+	printk("%s:    Ring Station Address: ", dev->name);
+	printk("%2.2x", dev->dev_addr[0]);
+	for (i = 1; i < 6; i++)
+		printk(":%2.2x", dev->dev_addr[i]);
+	printk("\n");
 
-	printk("%s:    Ring Station Address: %pM\n", dev->name, dev->dev_addr);
-
-	tp = netdev_priv(dev);
+	tp = dev->priv;
 	tp->setnselout = abyss_setnselout_pins;
 	tp->sifreadb = abyss_sifreadb;
 	tp->sifreadw = abyss_sifreadw;
@@ -159,10 +163,10 @@ static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_
 
 	memcpy(tp->ProductID, "Madge PCI 16/4 Mk2", PROD_ID_SIZE + 1);
 		
-	dev->netdev_ops = &abyss_netdev_ops;
+	dev->open = abyss_open;
+	dev->stop = abyss_close;
 
 	pci_set_drvdata(pdev, dev);
-	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	ret = register_netdev(dev);
 	if (ret)
@@ -177,14 +181,14 @@ err_out_irq:
 err_out_region:
 	release_region(pci_ioaddr, ABYSS_IO_EXTENT);
 err_out_trdev:
-	free_netdev(dev);
+	kfree(dev);
 	return ret;
 }
 
 static unsigned short abyss_setnselout_pins(struct net_device *dev)
 {
 	unsigned short val = 0;
-	struct net_local *tp = netdev_priv(dev);
+	struct net_local *tp = (struct net_local *)dev->priv;
 	
 	if(tp->DataRate == SPEED_4)
 		val |= 0x01;  /* Set 4Mbps */
@@ -394,7 +398,7 @@ static void abyss_read_eeprom(struct net_device *dev)
 	unsigned short val;
 	int i;
 	
-	tp = netdev_priv(dev);
+	tp = (struct net_local *)dev->priv;
 	ioaddr = dev->base_addr;
 	
 	/* Must enable glue chip first */
@@ -433,7 +437,8 @@ static void __devexit abyss_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	
-	BUG_ON(!dev);
+	if (!dev)
+		BUG();
 	unregister_netdev(dev);
 	release_region(dev->base_addr-0x10, ABYSS_IO_EXTENT);
 	free_irq(dev->irq, dev);
@@ -451,12 +456,14 @@ static struct pci_driver abyss_driver = {
 
 static int __init abyss_init (void)
 {
-	abyss_netdev_ops = tms380tr_netdev_ops;
-
-	abyss_netdev_ops.ndo_open = abyss_open;
-	abyss_netdev_ops.ndo_stop = abyss_close;
-
-	return pci_register_driver(&abyss_driver);
+	int rc = pci_register_driver (&abyss_driver);
+	if (rc < 0)
+		return rc;
+	if (rc == 0) {
+		pci_unregister_driver (&abyss_driver);
+		return -ENODEV;
+	}
+	return 0;
 }
 
 static void __exit abyss_rmmod (void)
@@ -467,3 +474,14 @@ static void __exit abyss_rmmod (void)
 module_init(abyss_init);
 module_exit(abyss_rmmod);
 
+
+/*
+ * Local variables:
+ *  compile-command: "gcc -DMODVERSIONS  -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c abyss.c"
+ *  alt-compile-command: "gcc -DMODULE -D__KERNEL__ -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer -I/usr/src/linux/drivers/net/tokenring/ -c abyss.c"
+ *  c-set-style "K&R"
+ *  c-indent-level: 8
+ *  c-basic-offset: 8
+ *  tab-width: 8
+ * End:
+ */

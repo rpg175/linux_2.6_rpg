@@ -10,7 +10,7 @@
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 
-.Linsb_align:	rsb	ip, ip, #4
+.insb_align:	rsb	ip, ip, #4
 		cmp	ip, r2
 		movgt	ip, r2
 		cmp	ip, #2
@@ -21,95 +21,95 @@
 		ldrgtb	r3, [r0]
 		strgtb	r3, [r1], #1
 		subs	r2, r2, ip
-		bne	.Linsb_aligned
+		bne	.insb_aligned
 
 ENTRY(__raw_readsb)
 		teq	r2, #0		@ do we have to check for the zero len?
 		moveq	pc, lr
 		ands	ip, r1, #3
-		bne	.Linsb_align
+		bne	.insb_align
 
-.Linsb_aligned:	stmfd	sp!, {r4 - r6, lr}
+.insb_aligned:	stmfd	sp!, {r4 - r6, lr}
 
 		subs	r2, r2, #16
-		bmi	.Linsb_no_16
+		bmi	.insb_no_16
 
-.Linsb_16_lp:	ldrb	r3, [r0]
+.insb_16_lp:	ldrb	r3, [r0]
 		ldrb	r4, [r0]
 		ldrb	r5, [r0]
-		mov	r3, r3,     put_byte_0
+		mov	r3, r3,     lsl #byte(0)
 		ldrb	r6, [r0]
-		orr	r3, r3, r4, put_byte_1
+		orr	r3, r3, r4, lsl #byte(1)
 		ldrb	r4, [r0]
-		orr	r3, r3, r5, put_byte_2
+		orr	r3, r3, r5, lsl #byte(2)
 		ldrb	r5, [r0]
-		orr	r3, r3, r6, put_byte_3
+		orr	r3, r3, r6, lsl #byte(3)
 		ldrb	r6, [r0]
-		mov	r4, r4,     put_byte_0
+		mov	r4, r4,     lsl #byte(0)
 		ldrb	ip, [r0]
-		orr	r4, r4, r5, put_byte_1
+		orr	r4, r4, r5, lsl #byte(1)
 		ldrb	r5, [r0]
-		orr	r4, r4, r6, put_byte_2
+		orr	r4, r4, r6, lsl #byte(2)
 		ldrb	r6, [r0]
-		orr	r4, r4, ip, put_byte_3
+		orr	r4, r4, ip, lsl #byte(3)
 		ldrb	ip, [r0]
-		mov	r5, r5,     put_byte_0
+		mov	r5, r5,     lsl #byte(0)
 		ldrb	lr, [r0]
-		orr	r5, r5, r6, put_byte_1
+		orr	r5, r5, r6, lsl #byte(1)
 		ldrb	r6, [r0]
-		orr	r5, r5, ip, put_byte_2
+		orr	r5, r5, ip, lsl #byte(2)
 		ldrb	ip, [r0]
-		orr	r5, r5, lr, put_byte_3
+		orr	r5, r5, lr, lsl #byte(3)
 		ldrb	lr, [r0]
-		mov	r6, r6,     put_byte_0
-		orr	r6, r6, ip, put_byte_1
+		mov	r6, r6,     lsl #byte(0)
+		orr	r6, r6, ip, lsl #byte(1)
 		ldrb	ip, [r0]
-		orr	r6, r6, lr, put_byte_2
-		orr	r6, r6, ip, put_byte_3
+		orr	r6, r6, lr, lsl #byte(2)
+		orr	r6, r6, ip, lsl #byte(3)
 		stmia	r1!, {r3 - r6}
 
 		subs	r2, r2, #16
-		bpl	.Linsb_16_lp
+		bpl	.insb_16_lp
 
 		tst	r2, #15
-		ldmeqfd	sp!, {r4 - r6, pc}
+		LOADREGS(eqfd, sp!, {r4 - r6, pc})
 
-.Linsb_no_16:	tst	r2, #8
-		beq	.Linsb_no_8
+.insb_no_16:	tst	r2, #8
+		beq	.insb_no_8
 
 		ldrb	r3, [r0]
 		ldrb	r4, [r0]
 		ldrb	r5, [r0]
-		mov	r3, r3,     put_byte_0
+		mov	r3, r3,     lsl #byte(0)
 		ldrb	r6, [r0]
-		orr	r3, r3, r4, put_byte_1
+		orr	r3, r3, r4, lsl #byte(1)
 		ldrb	r4, [r0]
-		orr	r3, r3, r5, put_byte_2
+		orr	r3, r3, r5, lsl #byte(2)
 		ldrb	r5, [r0]
-		orr	r3, r3, r6, put_byte_3
+		orr	r3, r3, r6, lsl #byte(3)
 		ldrb	r6, [r0]
-		mov	r4, r4,     put_byte_0
+		mov	r4, r4,     lsl #byte(0)
 		ldrb	ip, [r0]
-		orr	r4, r4, r5, put_byte_1
-		orr	r4, r4, r6, put_byte_2
-		orr	r4, r4, ip, put_byte_3
+		orr	r4, r4, r5, lsl #byte(1)
+		orr	r4, r4, r6, lsl #byte(2)
+		orr	r4, r4, ip, lsl #byte(3)
 		stmia	r1!, {r3, r4}
 
-.Linsb_no_8:	tst	r2, #4
-		beq	.Linsb_no_4
+.insb_no_8:	tst	r2, #4
+		beq	.insb_no_4
 
 		ldrb	r3, [r0]
 		ldrb	r4, [r0]
 		ldrb	r5, [r0]
 		ldrb	r6, [r0]
-		mov	r3, r3,     put_byte_0
-		orr	r3, r3, r4, put_byte_1
-		orr	r3, r3, r5, put_byte_2
-		orr	r3, r3, r6, put_byte_3
+		mov	r3, r3,     lsl #byte(0)
+		orr	r3, r3, r4, lsl #byte(1)
+		orr	r3, r3, r5, lsl #byte(2)
+		orr	r3, r3, r6, lsl #byte(3)
 		str	r3, [r1], #4
 
-.Linsb_no_4:	ands	r2, r2, #3
-		ldmeqfd	sp!, {r4 - r6, pc}
+.insb_no_4:	ands	r2, r2, #3
+		LOADREGS(eqfd, sp!, {r4 - r6, pc})
 
 		cmp	r2, #2
 		ldrb	r3, [r0]
@@ -119,5 +119,4 @@ ENTRY(__raw_readsb)
 		ldrgtb	r3, [r0]
 		strgtb	r3, [r1]
 
-		ldmfd	sp!, {r4 - r6, pc}
-ENDPROC(__raw_readsb)
+		LOADREGS(fd, sp!, {r4 - r6, pc})

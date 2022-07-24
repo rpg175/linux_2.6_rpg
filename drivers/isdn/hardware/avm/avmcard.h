@@ -89,7 +89,7 @@ typedef struct avmcard {
 	char msgbuf[128];	/* capimsg msg part */
 	char databuf[2048];	/* capimsg data part */
 
-	void __iomem *mbase;
+	void *mbase;
 	volatile u32 csr;
 	avmcard_dmainfo *dma;
 
@@ -437,7 +437,9 @@ static inline unsigned int t1_get_slice(unsigned int base,
 #endif
 					dp += i;
 					i = 0;
-					break;
+					if (i == 0)
+						break;
+					/* fall through */
 				default:
 					*dp++ = b1_get_byte(base);
 					i--;
@@ -554,9 +556,10 @@ void b1_register_appl(struct capi_ctr *ctrl, u16 appl,
 void b1_release_appl(struct capi_ctr *ctrl, u16 appl);
 u16  b1_send_message(struct capi_ctr *ctrl, struct sk_buff *skb);
 void b1_parse_version(avmctrl_info *card);
-irqreturn_t b1_interrupt(int interrupt, void *devptr);
+irqreturn_t b1_interrupt(int interrupt, void *devptr, struct pt_regs *regs);
 
-extern const struct file_operations b1ctl_proc_fops;
+int b1ctl_read_proc(char *page, char **start, off_t off,
+        		int count, int *eof, struct capi_ctr *ctrl);
 
 avmcard_dmainfo *avmcard_dma_alloc(char *name, struct pci_dev *,
 				   long rsize, long ssize);
@@ -566,7 +569,7 @@ void avmcard_dma_free(avmcard_dmainfo *);
 int b1pciv4_detect(avmcard *card);
 int t1pci_detect(avmcard *card);
 void b1dma_reset(avmcard *card);
-irqreturn_t b1dma_interrupt(int interrupt, void *devptr);
+irqreturn_t b1dma_interrupt(int interrupt, void *devptr, struct pt_regs *regs);
 
 int b1dma_load_firmware(struct capi_ctr *ctrl, capiloaddata *data);
 void b1dma_reset_ctr(struct capi_ctr *ctrl);
@@ -576,6 +579,7 @@ void b1dma_register_appl(struct capi_ctr *ctrl,
 				capi_register_params *rp);
 void b1dma_release_appl(struct capi_ctr *ctrl, u16 appl);
 u16  b1dma_send_message(struct capi_ctr *ctrl, struct sk_buff *skb);
-extern const struct file_operations b1dmactl_proc_fops;
+int b1dmactl_read_proc(char *page, char **start, off_t off,
+        		int count, int *eof, struct capi_ctr *ctrl);
 
 #endif /* _AVMCARD_H_ */

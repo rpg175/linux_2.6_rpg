@@ -66,18 +66,19 @@ static int
 			struct file *);
 static ssize_t
 	dev_irnet_write(struct file *,
-			const char __user *,
+			const char *,
 			size_t,
 			loff_t *),
 	dev_irnet_read(struct file *,
-		       char __user *,
+		       char *,
 		       size_t,
 		       loff_t *);
 static unsigned int
 	dev_irnet_poll(struct file *,
 		       poll_table *);
-static long
-	dev_irnet_ioctl(struct file *,
+static int
+	dev_irnet_ioctl(struct inode *,
+			struct file *,
 			unsigned int,
 			unsigned long);
 /* ------------------------ PPP INTERFACE ------------------------ */
@@ -95,16 +96,15 @@ static int
 /**************************** VARIABLES ****************************/
 
 /* Filesystem callbacks (to call us) */
-static const struct file_operations irnet_device_fops =
+static struct file_operations irnet_device_fops =
 {
 	.owner		= THIS_MODULE,
 	.read		= dev_irnet_read,
 	.write		= dev_irnet_write,
 	.poll		= dev_irnet_poll,
-	.unlocked_ioctl	= dev_irnet_ioctl,
+	.ioctl		= dev_irnet_ioctl,
 	.open		= dev_irnet_open,
-	.release	= dev_irnet_close,
-	.llseek		= noop_llseek,
+	.release	= dev_irnet_close
   /* Also : llseek, readdir, mmap, flush, fsync, fasync, lock, readv, writev */
 };
 
@@ -114,6 +114,13 @@ static struct miscdevice irnet_misc_device =
 	IRNET_MINOR,
 	"irnet",
 	&irnet_device_fops
+};
+
+/* Generic PPP callbacks (to call us) */
+struct ppp_channel_ops irnet_ppp_ops =
+{
+  ppp_irnet_send,
+  ppp_irnet_ioctl
 };
 
 #endif /* IRNET_PPP_H */

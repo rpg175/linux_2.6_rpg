@@ -1,47 +1,57 @@
-#include <asm-generic/vmlinux.lds.h>
-#include <asm/page.h>
+#include <linux/config.h>
 
-/* target memory map */
 #ifdef CONFIG_H8300H_GENERIC
-#define ROMTOP  0x000000
-#define ROMSIZE 0x400000
-#define RAMTOP  0x400000
-#define RAMSIZE 0x400000
+#ifdef CONFIG_ROMKERNEL
+#include "../platform/h8300h/generic/rom.ld"
+#endif
+#ifdef CONFIG_RAMKERNEL
+#include "../platform/h8300h/generic/ram.ld"
+#endif
 #endif
 
 #ifdef CONFIG_H8300H_AKI3068NET
-#define ROMTOP  0x000000
-#define ROMSIZE 0x080000
-#define RAMTOP  0x400000
-#define RAMSIZE 0x200000
+#ifdef CONFIG_ROMKERNEL
+#include "../platform/h8300h/aki3068net/rom.ld"
+#endif
+#ifdef CONFIG_RAMKERNEL
+#include "../platform/h8300h/aki3068net/ram.ld"
+#endif
 #endif
 
 #ifdef CONFIG_H8300H_H8MAX
-#define ROMTOP  0x000000
-#define ROMSIZE 0x080000
-#define RAMTOP  0x400000
-#define RAMSIZE 0x200000
+#ifdef CONFIG_ROMKERNEL
+#include "../platform/h8300h/h8max/rom.ld"
+#endif
+#ifdef CONFIG_RAMKERNEL
+#include "../platform/h8300h/h8max/ram.ld"
+#endif
 #endif
 
 #ifdef CONFIG_H8300H_SIM
-#define ROMTOP  0x000000
-#define ROMSIZE 0x400000
-#define RAMTOP  0x400000
-#define RAMSIZE 0x400000
+#ifdef CONFIG_ROMKERNEL
+#include "../platform/h8300h/generic/rom.ld"
+#endif
+#ifdef CONFIG_RAMKERNEL
+#include "../platform/h8300h/generic/ram.ld"
+#endif
 #endif
 
 #ifdef CONFIG_H8S_SIM
-#define ROMTOP  0x000000
-#define ROMSIZE 0x400000
-#define RAMTOP  0x400000
-#define RAMSIZE 0x800000
+#ifdef CONFIG_ROMKERNEL
+#include "../platform/h8s/generic/rom.ld"
+#endif
+#ifdef CONFIG_RAMKERNEL
+#include "../platform/h8s/generic/ram.ld"
+#endif
 #endif
 
 #ifdef CONFIG_H8S_EDOSK2674
-#define ROMTOP  0x000000
-#define ROMSIZE 0x400000
-#define RAMTOP  0x400000
-#define RAMSIZE 0x800000
+#ifdef CONFIG_ROMKERNEL
+#include "../platform/h8s/edosk2674/rom.ld"
+#endif
+#ifdef CONFIG_RAMKERNEL
+#include "../platform/h8s/edosk2674/ram.ld"
+#endif
 #endif
 
 #if defined(CONFIG_H8300H_SIM) || defined(CONFIG_H8S_SIM)
@@ -50,84 +60,107 @@ INPUT(romfs.o)
 
 _jiffies = _jiffies_64 + 4;
 
-ENTRY(__start)
-
 SECTIONS
 {
 #if defined(CONFIG_ROMKERNEL)
-	. = ROMTOP; 
 	.vectors :
 	{
 	__vector = . ;
 		*(.vectors*)
-	}
-#else
-	. = RAMTOP; 
-	.bootvec :	
+	} > vector
+#endif
+#if defined(CONFIG_RAMKERNEL)
+	.bootvec :
 	{
 		*(.bootvec)
-	}
+	} > ram
 #endif
         .text :
 	{
-	_text = .;
 #if defined(CONFIG_ROMKERNEL)
-	*(.int_redirect)
+		*(.int_redirect)
 #endif
 	__stext = . ;
-	TEXT_TEXT
-	SCHED_TEXT
-	LOCK_TEXT
-	__etext = . ;
-	}
-	EXCEPTION_TABLE(16)
+        	*(.text)
+	. = ALIGN(0x4) ;
+		*(.exit.text)
+		*(.text.*)
+	. = ALIGN(0x4) ;
+		*(.exitcall.exit)
+	. = ALIGN(0x4) ;
+		*(.kstrtab)
+	. = ALIGN(0x4) ;
+		*(.rodata*)
+	. = ALIGN(16);          /* Exception table              */
+	___start___ex_table = .;
+		*(__ex_table)
+	___stop___ex_table = .;
 
-	RODATA
+        ___start___ksymtab = .;  /* Kernel symbol table          */
+		 *(__ksymtab)
+	___stop___ksymtab = .;
+
+	. = ALIGN(0x4) ;
+	__etext = . ;
 #if defined(CONFIG_ROMKERNEL)
-	SECURITY_INIT
+	} > rom
 #endif
-	ROEND = .; 
-#if defined(CONFIG_ROMKERNEL)
-	. = RAMTOP;
-	.data :	AT(ROEND)
-#else
-	.data :	
+#if defined(CONFIG_RAMKERNEL)
+	} > ram
 #endif
+	.data : AT( ADDR(.text)+SIZEOF(.text))
 	{
 	__sdata = . ;
 	___data_start = . ;
 
-	INIT_TASK_DATA(0x2000)
+	. = ALIGN(0x2000) ;
+		*(.data.init_task)
 	. = ALIGN(0x4) ;
-		DATA_DATA
+		*(.data)
 	. = ALIGN(0x4) ;
 		*(.data.*)	
 
 	. = ALIGN(0x4) ;
 	___init_begin = .;
 	__sinittext = .; 
-		INIT_TEXT
+		*(.init.text)
 	__einittext = .; 
-		INIT_DATA
+		*(.init.data)
 	. = ALIGN(0x4) ;
-	INIT_SETUP(0x4)
 	___setup_start = .;
 		*(.init.setup)
 	. = ALIGN(0x4) ;
 	___setup_end = .;
-	INIT_CALLS
-	CON_INITCALL
-		EXIT_TEXT
-		EXIT_DATA
-	INIT_RAM_FS
+	___start___param = .;
+		*(__param)
+	___stop___param = .;
+	___initcall_start = .;
+		*(.initcall1.init)
+		*(.initcall2.init)
+		*(.initcall3.init)
+		*(.initcall4.init)
+		*(.initcall5.init)
+		*(.initcall6.init)
+		*(.initcall7.init)
+	___initcall_end = .;
+	___con_initcall_start = .;
+		*(.con_initcall.init)
+	___con_initcall_end = .;
+		. = ALIGN(4);
+	___initramfs_start = .;
+  		*(.init.ramfs)
+  	___initramfs_end = .;
 	. = ALIGN(0x4) ;
 	___init_end = .;
 	__edata = . ;
-	}
-#if defined(CONFIG_RAMKERNEL)
-	SECURITY_INIT
+	} > ram
+	__begin_data = LOADADDR(.data) ;
+#if defined(CONFIG_ROMKERNEL)
+	.erom :
+	{
+	__erom = . ;
+	} > erom
 #endif
-	__begin_data = LOADADDR(.data);
         .bss : 
         {
 	. = ALIGN(0x4) ;
@@ -139,17 +172,15 @@ SECTIONS
 	__ebss = . ;
 	__end = . ;
 	__ramstart = .;
-	}
+	} > ram
         .romfs :	
 	{
 		*(.romfs*)
-	}
-	. = RAMTOP+RAMSIZE;
+	} > ram
         .dummy :
         {
 	COMMAND_START = . - 0x200 ;
 	__ramend = . ;
-	}
-
-	DISCARDS
+	} > eram
 }
+

@@ -20,12 +20,14 @@
  *
  */
 
+#include <sound/driver.h>
 #include <linux/init.h>
+#include <linux/time.h>
+#include <linux/threads.h>
 #include <linux/interrupt.h>
-#include <linux/moduleparam.h>
-#include <linux/log2.h>
 #include <sound/core.h>
 #include <sound/timer.h>
+#include <sound/info.h>
 
 #if defined(CONFIG_RTC) || defined(CONFIG_RTC_MODULE)
 
@@ -37,19 +39,17 @@
 /*
  * prototypes
  */
-static int rtctimer_open(struct snd_timer *t);
-static int rtctimer_close(struct snd_timer *t);
-static int rtctimer_start(struct snd_timer *t);
-static int rtctimer_stop(struct snd_timer *t);
+static int rtctimer_open(snd_timer_t *t);
+static int rtctimer_close(snd_timer_t *t);
+static int rtctimer_start(snd_timer_t *t);
+static int rtctimer_stop(snd_timer_t *t);
 
 
 /*
  * The hardware dependent description for this timer.
  */
-static struct snd_timer_hardware rtc_hw = {
-	.flags =	SNDRV_TIMER_HW_AUTO |
-			SNDRV_TIMER_HW_FIRST |
-			SNDRV_TIMER_HW_TASKLET,
+static struct _snd_timer_hardware rtc_hw = {
+	.flags =	SNDRV_TIMER_HW_FIRST|SNDRV_TIMER_HW_AUTO,
 	.ticks =	100000000L,		/* FIXME: XXX */
 	.open =		rtctimer_open,
 	.close =	rtctimer_close,
@@ -58,13 +58,13 @@ static struct snd_timer_hardware rtc_hw = {
 };
 
 static int rtctimer_freq = RTC_FREQ;		/* frequency */
-static struct snd_timer *rtctimer;
-static struct tasklet_struct rtc_tasklet;
+static snd_timer_t *rtctimer;
+static atomic_t rtc_inc = ATOMIC_INIT(0);
 static rtc_task_t rtc_task;
 
 
 static int
-rtctimer_open(struct snd_timer *t)
+rtctimer_open(snd_timer_t *t)
 {
 	int err;
 
@@ -76,41 +76,34 @@ rtctimer_open(struct snd_timer *t)
 }
 
 static int
-rtctimer_close(struct snd_timer *t)
+rtctimer_close(snd_timer_t *t)
 {
 	rtc_task_t *rtc = t->private_data;
 	if (rtc) {
 		rtc_unregister(rtc);
-		tasklet_kill(&rtc_tasklet);
 		t->private_data = NULL;
 	}
 	return 0;
 }
 
 static int
-rtctimer_start(struct snd_timer *timer)
+rtctimer_start(snd_timer_t *timer)
 {
 	rtc_task_t *rtc = timer->private_data;
-	if (snd_BUG_ON(!rtc))
-		return -EINVAL;
+	snd_assert(rtc != NULL, return -EINVAL);
 	rtc_control(rtc, RTC_IRQP_SET, rtctimer_freq);
 	rtc_control(rtc, RTC_PIE_ON, 0);
+	atomic_set(&rtc_inc, 0);
 	return 0;
 }
 
 static int
-rtctimer_stop(struct snd_timer *timer)
+rtctimer_stop(snd_timer_t *timer)
 {
 	rtc_task_t *rtc = timer->private_data;
-	if (snd_BUG_ON(!rtc))
-		return -EINVAL;
+	snd_assert(rtc != NULL, return -EINVAL);
 	rtc_control(rtc, RTC_PIE_OFF, 0);
 	return 0;
-}
-
-static void rtctimer_tasklet(unsigned long data)
-{
-	snd_timer_interrupt((struct snd_timer *)data, 1);
 }
 
 /*
@@ -118,7 +111,12 @@ static void rtctimer_tasklet(unsigned long data)
  */
 static void rtctimer_interrupt(void *private_data)
 {
-	tasklet_schedule(private_data);
+	int ticks;
+
+	atomic_inc(&rtc_inc);
+	ticks = atomic_read(&rtc_inc);
+	snd_timer_interrupt((snd_timer_t*)private_data, ticks);
+	atomic_sub(ticks, &rtc_inc);
 }
 
 
@@ -127,13 +125,17 @@ static void rtctimer_interrupt(void *private_data)
  */
 static int __init rtctimer_init(void)
 {
-	int err;
-	struct snd_timer *timer;
+	int order, err;
+	snd_timer_t *timer;
 
-	if (rtctimer_freq < 2 || rtctimer_freq > 8192 ||
-	    !is_power_of_2(rtctimer_freq)) {
-		snd_printk(KERN_ERR "rtctimer: invalid frequency %d\n",
-			   rtctimer_freq);
+	if (rtctimer_freq < 2 || rtctimer_freq > 8192) {
+		snd_printk(KERN_ERR "rtctimer: invalid frequency %d\n", rtctimer_freq);
+		return -EINVAL;
+	}
+	for (order = 1; rtctimer_freq > order; order <<= 1)
+		;
+	if (rtctimer_freq != order) {
+		snd_printk(KERN_ERR "rtctimer: invalid frequency %d\n", rtctimer_freq);
 		return -EINVAL;
 	}
 
@@ -142,16 +144,13 @@ static int __init rtctimer_init(void)
 	if (err < 0)
 		return err;
 
-	timer->module = THIS_MODULE;
 	strcpy(timer->name, "RTC timer");
 	timer->hw = rtc_hw;
 	timer->hw.resolution = NANO_SEC / rtctimer_freq;
 
-	tasklet_init(&rtc_tasklet, rtctimer_tasklet, (unsigned long)timer);
-
 	/* set up RTC callback */
 	rtc_task.func = rtctimer_interrupt;
-	rtc_task.private_data = &rtc_tasklet;
+	rtc_task.private_data = timer;
 
 	err = snd_timer_global_register(timer);
 	if (err < 0) {
@@ -166,7 +165,7 @@ static int __init rtctimer_init(void)
 static void __exit rtctimer_exit(void)
 {
 	if (rtctimer) {
-		snd_timer_global_free(rtctimer);
+		snd_timer_global_unregister(rtctimer);
 		rtctimer = NULL;
 	}
 }
@@ -178,11 +177,21 @@ static void __exit rtctimer_exit(void)
 module_init(rtctimer_init)
 module_exit(rtctimer_exit)
 
-module_param(rtctimer_freq, int, 0444);
+MODULE_PARM(rtctimer_freq, "i");
 MODULE_PARM_DESC(rtctimer_freq, "timer frequency in Hz");
 
 MODULE_LICENSE("GPL");
 
-MODULE_ALIAS("snd-timer-" __stringify(SNDRV_TIMER_GLOBAL_RTC));
+#ifndef MODULE
+/* format is: snd-rtctimer=freq */
+
+static int __init rtctimer_setup(char *str)
+{
+	(void)(get_option(&str,&rtctimer_freq) == 2);
+	return 1;
+}
+
+__setup("snd-rtctimer=", rtctimer_setup);
+#endif /* ifndef MODULE */
 
 #endif /* CONFIG_RTC || CONFIG_RTC_MODULE */

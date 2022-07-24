@@ -12,7 +12,7 @@
 
 /* these are the available audio sources, which can switched
    to the line- and cd-output individually */
-static struct v4l2_audio mxb_audios[MXB_AUDIOS] = {
+struct v4l2_audio mxb_audios[MXB_AUDIOS] = {
 	    {
 		.index	= 0,
 		.name	= "Tuner",
@@ -38,5 +38,5 @@ static struct v4l2_audio mxb_audios[MXB_AUDIOS] = {
 		.name	= "CD-ROM (X10)",
 		.capability = V4L2_AUDCAP_STEREO,
 	}
-};
+};	
 #endif

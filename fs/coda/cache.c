@@ -16,13 +16,12 @@
 #include <asm/uaccess.h>
 #include <linux/string.h>
 #include <linux/list.h>
-#include <linux/sched.h>
-#include <linux/spinlock.h>
 
 #include <linux/coda.h>
+#include <linux/coda_linux.h>
 #include <linux/coda_psdev.h>
-#include "coda_linux.h"
-#include "coda_cache.h"
+#include <linux/coda_fs_i.h>
+#include <linux/coda_cache.h>
 
 static atomic_t permission_epoch = ATOMIC_INIT(0);
 
@@ -31,28 +30,29 @@ void coda_cache_enter(struct inode *inode, int mask)
 {
 	struct coda_inode_info *cii = ITOC(inode);
 
-	spin_lock(&cii->c_lock);
 	cii->c_cached_epoch = atomic_read(&permission_epoch);
-	if (cii->c_uid != current_fsuid()) {
-		cii->c_uid = current_fsuid();
+	if (cii->c_uid != current->fsuid) {
+                cii->c_uid = current->fsuid;
                 cii->c_cached_perm = mask;
         } else
                 cii->c_cached_perm |= mask;
-	spin_unlock(&cii->c_lock);
 }
 
 /* remove cached acl from an inode */
 void coda_cache_clear_inode(struct inode *inode)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-	spin_lock(&cii->c_lock);
-	cii->c_cached_epoch = atomic_read(&permission_epoch) - 1;
-	spin_unlock(&cii->c_lock);
+        cii->c_cached_perm = 0;
 }
 
 /* remove all acl caches */
 void coda_cache_clear_all(struct super_block *sb)
 {
+        struct coda_sb_info *sbi;
+
+        sbi = coda_sbp(sb);
+        if (!sbi) BUG();
+
 	atomic_inc(&permission_epoch);
 }
 
@@ -61,15 +61,13 @@ void coda_cache_clear_all(struct super_block *sb)
 int coda_cache_check(struct inode *inode, int mask)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-	int hit;
+        int hit;
 	
-	spin_lock(&cii->c_lock);
-	hit = (mask & cii->c_cached_perm) == mask &&
-	    cii->c_uid == current_fsuid() &&
-	    cii->c_cached_epoch == atomic_read(&permission_epoch);
-	spin_unlock(&cii->c_lock);
+        hit = (mask & cii->c_cached_perm) == mask &&
+		cii->c_uid == current->fsuid &&
+		cii->c_cached_epoch == atomic_read(&permission_epoch);
 
-	return hit;
+        return hit;
 }
 
 
@@ -92,16 +90,16 @@ static void coda_flag_children(struct dentry *parent, int flag)
 	struct list_head *child;
 	struct dentry *de;
 
-	spin_lock(&parent->d_lock);
+	spin_lock(&dcache_lock);
 	list_for_each(child, &parent->d_subdirs)
 	{
-		de = list_entry(child, struct dentry, d_u.d_child);
+		de = list_entry(child, struct dentry, d_child);
 		/* don't know what to do with negative dentries */
 		if ( ! de->d_inode ) 
 			continue;
 		coda_flag_inode(de->d_inode, flag);
 	}
-	spin_unlock(&parent->d_lock);
+	spin_unlock(&dcache_lock);
 	return; 
 }
 

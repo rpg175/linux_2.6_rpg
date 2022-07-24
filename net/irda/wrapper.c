@@ -20,7 +20,7 @@
  *     published by the Free Software Foundation; either version 2 of
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
+ *     Neither Dag Brattli nor University of Tromsø admit liability nor
  *     provide warranty for any of this software. This material is
  *     provided "AS-IS" and at no charge.
  *
@@ -28,7 +28,6 @@
 
 #include <linux/skbuff.h>
 #include <linux/string.h>
-#include <linux/module.h>
 #include <asm/byteorder.h>
 
 #include <net/irda/irda.h>
@@ -106,16 +105,16 @@ int async_wrap_skb(struct sk_buff *skb, __u8 *tx_buff, int buffsize)
 		 * Nothing to worry about, but we set the default number of
 		 * BOF's
 		 */
-		IRDA_DEBUG(1, "%s(), wrong magic in skb!\n", __func__);
+		IRDA_DEBUG(1, "%s(), wrong magic in skb!\n", __FUNCTION__);
 		xbofs = 10;
 	} else
 		xbofs = cb->xbofs + cb->xbofs_delay;
 
-	IRDA_DEBUG(4, "%s(), xbofs=%d\n", __func__, xbofs);
+	IRDA_DEBUG(4, "%s(), xbofs=%d\n", __FUNCTION__, xbofs);
 
 	/* Check that we never use more than 115 + 48 xbofs */
 	if (xbofs > 163) {
-		IRDA_DEBUG(0, "%s(), too many xbofs (%d)\n", __func__,
+		IRDA_DEBUG(0, "%s(), too many xbofs (%d)\n", __FUNCTION__,
 			   xbofs);
 		xbofs = 163;
 	}
@@ -133,11 +132,7 @@ int async_wrap_skb(struct sk_buff *skb, __u8 *tx_buff, int buffsize)
 		 *  bufsize-5 since the maximum number of bytes that can be
 		 *  transmitted after this point is 5.
 		 */
-		if(n >= (buffsize-5)) {
-			IRDA_ERROR("%s(), tx buffer overflow (n=%d)\n",
-				   __func__, n);
-			return n;
-		}
+		ASSERT(n < (buffsize-5), return n;);
 
 		n += stuff_byte(skb->data[i], tx_buff+n);
 		fcs.value = irda_fcs(fcs.value, skb->data[i]);
@@ -156,7 +151,6 @@ int async_wrap_skb(struct sk_buff *skb, __u8 *tx_buff, int buffsize)
 
 	return n;
 }
-EXPORT_SYMBOL(async_wrap_skb);
 
 /************************* FRAME UNWRAPPING *************************/
 /*
@@ -238,9 +232,8 @@ async_bump(struct net_device *dev,
 	skb_reserve(newskb, 1);
 
 	if(docopy) {
-		/* Copy data without CRC (length already checked) */
-		skb_copy_to_linear_data(newskb, rx_buff->data,
-					rx_buff->len - 2);
+		/* Copy data without CRC (lenght already checked) */
+		memcpy(newskb->data, rx_buff->data, rx_buff->len - 2);
 		/* Deliver this skb */
 		dataskb = newskb;
 	} else {
@@ -257,7 +250,7 @@ async_bump(struct net_device *dev,
 
 	/* Feed it to IrLAP layer */
 	dataskb->dev = dev;
-	skb_reset_mac_header(dataskb);
+	dataskb->mac.raw  = dataskb->data;
 	dataskb->protocol = htons(ETH_P_IRDA);
 
 	netif_rx(dataskb);
@@ -287,7 +280,7 @@ async_unwrap_bof(struct net_device *dev,
 		/* Not supposed to happen, the previous frame is not
 		 * finished - Jean II */
 		IRDA_DEBUG(1, "%s(), Discarding incomplete frame\n",
-			   __func__);
+			   __FUNCTION__);
 		stats->rx_errors++;
 		stats->rx_missed_errors++;
 		irda_device_set_media_busy(dev, TRUE);
@@ -296,7 +289,7 @@ async_unwrap_bof(struct net_device *dev,
 	case OUTSIDE_FRAME:
 	case BEGIN_FRAME:
 	default:
-		/* We may receive multiple BOF at the start of frame */
+		/* We may receive multiple BOF at the start of frame */ 
 		break;
 	}
 
@@ -360,7 +353,7 @@ async_unwrap_eof(struct net_device *dev,
 			/* Wrong CRC, discard frame!  */
 			irda_device_set_media_busy(dev, TRUE);
 
-			IRDA_DEBUG(1, "%s(), crc error\n", __func__);
+			IRDA_DEBUG(1, "%s(), crc error\n", __FUNCTION__);
 			stats->rx_errors++;
 			stats->rx_crc_errors++;
 		}
@@ -386,7 +379,7 @@ async_unwrap_ce(struct net_device *dev,
 		break;
 
 	case LINK_ESCAPE:
-		IRDA_WARNING("%s: state not defined\n", __func__);
+		WARNING("%s: state not defined\n", __FUNCTION__);
 		break;
 
 	case BEGIN_FRAME:
@@ -421,7 +414,7 @@ async_unwrap_other(struct net_device *dev,
 #endif
 		} else {
 			IRDA_DEBUG(1, "%s(), Rx buffer overflow, aborting\n",
-				   __func__);
+				   __FUNCTION__);
 			rx_buff->state = OUTSIDE_FRAME;
 		}
 		break;
@@ -440,7 +433,7 @@ async_unwrap_other(struct net_device *dev,
 			rx_buff->state = INSIDE_FRAME;
 		} else {
 			IRDA_DEBUG(1, "%s(), Rx buffer overflow, aborting\n",
-				   __func__);
+				   __FUNCTION__);
 			rx_buff->state = OUTSIDE_FRAME;
 		}
 		break;
@@ -488,5 +481,4 @@ void async_unwrap_char(struct net_device *dev,
 		break;
 	}
 }
-EXPORT_SYMBOL(async_unwrap_char);
 

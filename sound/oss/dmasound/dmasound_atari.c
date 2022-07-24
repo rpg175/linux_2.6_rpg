@@ -1,9 +1,9 @@
 /*
- *  linux/sound/oss/dmasound/dmasound_atari.c
+ *  linux/drivers/sound/dmasound/dmasound_atari.c
  *
  *  Atari TT and Falcon DMA Sound Driver
  *
- *  See linux/sound/oss/dmasound/dmasound_core.c for copyright and credits
+ *  See linux/drivers/sound/dmasound/dmasound_core.c for copyright and credits
  *  prior to 28/01/2001
  *
  *  28/01/2001 [0.1] Iain Sandoe
@@ -22,6 +22,7 @@
 #include <linux/spinlock.h>
 #include <linux/interrupt.h>
 
+#include <asm/pgalloc.h>
 #include <asm/uaccess.h>
 #include <asm/atariints.h>
 #include <asm/atari_stram.h>
@@ -67,46 +68,46 @@ static int expand_data;	/* Data for expanding */
  * ++geert: split in even more functions (one per format)
  */
 
-static ssize_t ata_ct_law(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_law(const u_char *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft);
-static ssize_t ata_ct_s8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_s8(const u_char *userPtr, size_t userCount,
 			 u_char frame[], ssize_t *frameUsed,
 			 ssize_t frameLeft);
-static ssize_t ata_ct_u8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_u8(const u_char *userPtr, size_t userCount,
 			 u_char frame[], ssize_t *frameUsed,
 			 ssize_t frameLeft);
-static ssize_t ata_ct_s16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_s16be(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft);
-static ssize_t ata_ct_u16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_u16be(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft);
-static ssize_t ata_ct_s16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_s16le(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft);
-static ssize_t ata_ct_u16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_u16le(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft);
-static ssize_t ata_ctx_law(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_law(const u_char *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft);
-static ssize_t ata_ctx_s8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_s8(const u_char *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft);
-static ssize_t ata_ctx_u8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_u8(const u_char *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft);
-static ssize_t ata_ctx_s16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_s16be(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft);
-static ssize_t ata_ctx_u16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_u16be(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft);
-static ssize_t ata_ctx_s16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_s16le(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft);
-static ssize_t ata_ctx_u16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_u16le(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft);
 
@@ -114,7 +115,7 @@ static ssize_t ata_ctx_u16le(const u_char __user *userPtr, size_t userCount,
 /*** Low level stuff *********************************************************/
 
 
-static void *AtaAlloc(unsigned int size, gfp_t flags);
+static void *AtaAlloc(unsigned int size, int flags);
 static void AtaFree(void *, unsigned int size);
 static int AtaIrqInit(void);
 #ifdef MODULE
@@ -133,7 +134,7 @@ static int FalconSetFormat(int format);
 static int FalconSetVolume(int volume);
 static void AtaPlayNextFrame(int index);
 static void AtaPlay(void);
-static irqreturn_t AtaInterrupt(int irq, void *dummy);
+static irqreturn_t AtaInterrupt(int irq, void *dummy, struct pt_regs *fp);
 
 /*** Mid level stuff *********************************************************/
 
@@ -143,7 +144,7 @@ static int AtaMixerIoctl(u_int cmd, u_long arg);
 static int TTMixerIoctl(u_int cmd, u_long arg);
 static int FalconMixerIoctl(u_int cmd, u_long arg);
 static int AtaWriteSqSetup(void);
-static int AtaSqOpen(fmode_t mode);
+static int AtaSqOpen(mode_t mode);
 static int TTStateInfo(char *buffer, size_t space);
 static int FalconStateInfo(char *buffer, size_t space);
 
@@ -151,7 +152,7 @@ static int FalconStateInfo(char *buffer, size_t space);
 /*** Translations ************************************************************/
 
 
-static ssize_t ata_ct_law(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_law(const u_char *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft)
 {
@@ -176,7 +177,7 @@ static ssize_t ata_ct_law(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ct_s8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_s8(const u_char *userPtr, size_t userCount,
 			 u_char frame[], ssize_t *frameUsed,
 			 ssize_t frameLeft)
 {
@@ -194,7 +195,7 @@ static ssize_t ata_ct_s8(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ct_u8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_u8(const u_char *userPtr, size_t userCount,
 			 u_char frame[], ssize_t *frameUsed,
 			 ssize_t frameLeft)
 {
@@ -217,9 +218,8 @@ static ssize_t ata_ct_u8(const u_char __user *userPtr, size_t userCount,
 		used = count*2;
 		while (count > 0) {
 			u_short data;
-			if (get_user(data, (u_short __user *)userPtr))
+			if (get_user(data, ((u_short *)userPtr)++))
 				return -EFAULT;
-			userPtr += 2;
 			*p++ = data ^ 0x8080;
 			count--;
 		}
@@ -229,7 +229,7 @@ static ssize_t ata_ct_u8(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ct_s16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_s16be(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft)
 {
@@ -241,9 +241,8 @@ static ssize_t ata_ct_s16be(const u_char __user *userPtr, size_t userCount,
 		used = count*2;
 		while (count > 0) {
 			u_short data;
-			if (get_user(data, (u_short __user *)userPtr))
+			if (get_user(data, ((u_short *)userPtr)++))
 				return -EFAULT;
-			userPtr += 2;
 			*p++ = data;
 			*p++ = data;
 			count--;
@@ -261,7 +260,7 @@ static ssize_t ata_ct_s16be(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ct_u16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_u16be(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft)
 {
@@ -273,9 +272,8 @@ static ssize_t ata_ct_u16be(const u_char __user *userPtr, size_t userCount,
 		used = count*2;
 		while (count > 0) {
 			u_short data;
-			if (get_user(data, (u_short __user *)userPtr))
+			if (get_user(data, ((u_short *)userPtr)++))
 				return -EFAULT;
-			userPtr += 2;
 			data ^= 0x8000;
 			*p++ = data;
 			*p++ = data;
@@ -287,10 +285,9 @@ static ssize_t ata_ct_u16be(const u_char __user *userPtr, size_t userCount,
 		count = min_t(unsigned long, userCount, frameLeft)>>2;
 		used = count*4;
 		while (count > 0) {
-			u_int data;
-			if (get_user(data, (u_int __user *)userPtr))
+			u_long data;
+			if (get_user(data, ((u_int *)userPtr)++))
 				return -EFAULT;
-			userPtr += 4;
 			*p++ = data ^ 0x80008000;
 			count--;
 		}
@@ -300,7 +297,7 @@ static ssize_t ata_ct_u16be(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ct_s16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_s16le(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft)
 {
@@ -313,9 +310,8 @@ static ssize_t ata_ct_s16le(const u_char __user *userPtr, size_t userCount,
 		used = count*2;
 		while (count > 0) {
 			u_short data;
-			if (get_user(data, (u_short __user *)userPtr))
+			if (get_user(data, ((u_short *)userPtr)++))
 				return -EFAULT;
-			userPtr += 2;
 			data = le2be16(data);
 			*p++ = data;
 			*p++ = data;
@@ -328,9 +324,8 @@ static ssize_t ata_ct_s16le(const u_char __user *userPtr, size_t userCount,
 		used = count*4;
 		while (count > 0) {
 			u_long data;
-			if (get_user(data, (u_int __user *)userPtr))
+			if (get_user(data, ((u_int *)userPtr)++))
 				return -EFAULT;
-			userPtr += 4;
 			data = le2be16dbl(data);
 			*p++ = data;
 			count--;
@@ -341,7 +336,7 @@ static ssize_t ata_ct_s16le(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ct_u16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ct_u16le(const u_char *userPtr, size_t userCount,
 			    u_char frame[], ssize_t *frameUsed,
 			    ssize_t frameLeft)
 {
@@ -354,9 +349,8 @@ static ssize_t ata_ct_u16le(const u_char __user *userPtr, size_t userCount,
 		used = count*2;
 		while (count > 0) {
 			u_short data;
-			if (get_user(data, (u_short __user *)userPtr))
+			if (get_user(data, ((u_short *)userPtr)++))
 				return -EFAULT;
-			userPtr += 2;
 			data = le2be16(data) ^ 0x8000;
 			*p++ = data;
 			*p++ = data;
@@ -368,9 +362,8 @@ static ssize_t ata_ct_u16le(const u_char __user *userPtr, size_t userCount,
 		used = count;
 		while (count > 0) {
 			u_long data;
-			if (get_user(data, (u_int __user *)userPtr))
+			if (get_user(data, ((u_int *)userPtr)++))
 				return -EFAULT;
-			userPtr += 4;
 			data = le2be16dbl(data) ^ 0x80008000;
 			*p++ = data;
 			count--;
@@ -381,7 +374,7 @@ static ssize_t ata_ct_u16le(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_law(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_law(const u_char *userPtr, size_t userCount,
 			   u_char frame[], ssize_t *frameUsed,
 			   ssize_t frameLeft)
 {
@@ -443,7 +436,7 @@ static ssize_t ata_ctx_law(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_s8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_s8(const u_char *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft)
 {
@@ -478,9 +471,8 @@ static ssize_t ata_ctx_s8(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 2)
 					break;
-				if (get_user(data, (u_short __user *)userPtr))
+				if (get_user(data, ((u_short *)userPtr)++))
 					return -EFAULT;
-				userPtr += 2;
 				userCount -= 2;
 				bal += hSpeed;
 			}
@@ -497,7 +489,7 @@ static ssize_t ata_ctx_s8(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_u8(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_u8(const u_char *userPtr, size_t userCount,
 			  u_char frame[], ssize_t *frameUsed,
 			  ssize_t frameLeft)
 {
@@ -533,9 +525,8 @@ static ssize_t ata_ctx_u8(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 2)
 					break;
-				if (get_user(data, (u_short __user *)userPtr))
+				if (get_user(data, ((u_short *)userPtr)++))
 					return -EFAULT;
-				userPtr += 2;
 				data ^= 0x8080;
 				userCount -= 2;
 				bal += hSpeed;
@@ -553,7 +544,7 @@ static ssize_t ata_ctx_u8(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_s16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_s16be(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft)
 {
@@ -571,9 +562,8 @@ static ssize_t ata_ctx_s16be(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 2)
 					break;
-				if (get_user(data, (u_short __user *)userPtr))
+				if (get_user(data, ((u_short *)userPtr)++))
 					return -EFAULT;
-				userPtr += 2;
 				userCount -= 2;
 				bal += hSpeed;
 			}
@@ -590,9 +580,8 @@ static ssize_t ata_ctx_s16be(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 4)
 					break;
-				if (get_user(data, (u_int __user *)userPtr))
+				if (get_user(data, ((u_int *)userPtr)++))
 					return -EFAULT;
-				userPtr += 4;
 				userCount -= 4;
 				bal += hSpeed;
 			}
@@ -609,7 +598,7 @@ static ssize_t ata_ctx_s16be(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_u16be(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_u16be(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft)
 {
@@ -627,9 +616,8 @@ static ssize_t ata_ctx_u16be(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 2)
 					break;
-				if (get_user(data, (u_short __user *)userPtr))
+				if (get_user(data, ((u_short *)userPtr)++))
 					return -EFAULT;
-				userPtr += 2;
 				data ^= 0x8000;
 				userCount -= 2;
 				bal += hSpeed;
@@ -647,9 +635,8 @@ static ssize_t ata_ctx_u16be(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 4)
 					break;
-				if (get_user(data, (u_int __user *)userPtr))
+				if (get_user(data, ((u_int *)userPtr)++))
 					return -EFAULT;
-				userPtr += 4;
 				data ^= 0x80008000;
 				userCount -= 4;
 				bal += hSpeed;
@@ -667,7 +654,7 @@ static ssize_t ata_ctx_u16be(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_s16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_s16le(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft)
 {
@@ -685,9 +672,8 @@ static ssize_t ata_ctx_s16le(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 2)
 					break;
-				if (get_user(data, (u_short __user *)userPtr))
+				if (get_user(data, ((u_short *)userPtr)++))
 					return -EFAULT;
-				userPtr += 2;
 				data = le2be16(data);
 				userCount -= 2;
 				bal += hSpeed;
@@ -705,9 +691,8 @@ static ssize_t ata_ctx_s16le(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 4)
 					break;
-				if (get_user(data, (u_int __user *)userPtr))
+				if (get_user(data, ((u_int *)userPtr)++))
 					return -EFAULT;
-				userPtr += 4;
 				data = le2be16dbl(data);
 				userCount -= 4;
 				bal += hSpeed;
@@ -725,7 +710,7 @@ static ssize_t ata_ctx_s16le(const u_char __user *userPtr, size_t userCount,
 }
 
 
-static ssize_t ata_ctx_u16le(const u_char __user *userPtr, size_t userCount,
+static ssize_t ata_ctx_u16le(const u_char *userPtr, size_t userCount,
 			     u_char frame[], ssize_t *frameUsed,
 			     ssize_t frameLeft)
 {
@@ -743,9 +728,8 @@ static ssize_t ata_ctx_u16le(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 2)
 					break;
-				if (get_user(data, (u_short __user *)userPtr))
+				if (get_user(data, ((u_short *)userPtr)++))
 					return -EFAULT;
-				userPtr += 2;
 				data = le2be16(data) ^ 0x8000;
 				userCount -= 2;
 				bal += hSpeed;
@@ -763,9 +747,8 @@ static ssize_t ata_ctx_u16le(const u_char __user *userPtr, size_t userCount,
 			if (bal < 0) {
 				if (userCount < 4)
 					break;
-				if (get_user(data, (u_int __user *)userPtr))
+				if (get_user(data, ((u_int *)userPtr)++))
 					return -EFAULT;
-				userPtr += 4;
 				data = le2be16dbl(data) ^ 0x80008000;
 				userCount -= 4;
 				bal += hSpeed;
@@ -828,7 +811,7 @@ static TRANS transFalconExpanding = {
  * Atari (TT/Falcon)
  */
 
-static void *AtaAlloc(unsigned int size, gfp_t flags)
+static void *AtaAlloc(unsigned int size, int flags)
 {
 	return atari_stram_alloc(size, "dmasound");
 }
@@ -847,23 +830,22 @@ static int __init AtaIrqInit(void)
 	   of events. So all we need to keep the music playing is
 	   to provide the sound hardware with new data upon
 	   an interrupt from timer A. */
-	st_mfp.tim_ct_a = 0;	/* ++roman: Stop timer before programming! */
-	st_mfp.tim_dt_a = 1;	/* Cause interrupt after first event. */
-	st_mfp.tim_ct_a = 8;	/* Turn on event counting. */
+	mfp.tim_ct_a = 0;	/* ++roman: Stop timer before programming! */
+	mfp.tim_dt_a = 1;	/* Cause interrupt after first event. */
+	mfp.tim_ct_a = 8;	/* Turn on event counting. */
 	/* Register interrupt handler. */
-	if (request_irq(IRQ_MFP_TIMA, AtaInterrupt, IRQ_TYPE_SLOW, "DMA sound",
-			AtaInterrupt))
-		return 0;
-	st_mfp.int_en_a |= 0x20;	/* Turn interrupt on. */
-	st_mfp.int_mk_a |= 0x20;
+	request_irq(IRQ_MFP_TIMA, AtaInterrupt, IRQ_TYPE_SLOW, "DMA sound",
+		    AtaInterrupt);
+	mfp.int_en_a |= 0x20;	/* Turn interrupt on. */
+	mfp.int_mk_a |= 0x20;
 	return 1;
 }
 
 #ifdef MODULE
 static void AtaIrqCleanUp(void)
 {
-	st_mfp.tim_ct_a = 0;		/* stop timer */
-	st_mfp.int_en_a &= ~0x20;	/* turn interrupt off */
+	mfp.tim_ct_a = 0;	/* stop timer */
+	mfp.int_en_a &= ~0x20;	/* turn interrupt off */
 	free_irq(IRQ_MFP_TIMA, AtaInterrupt);
 }
 #endif /* MODULE */
@@ -1258,7 +1240,7 @@ static void AtaPlay(void)
 }
 
 
-static irqreturn_t AtaInterrupt(int irq, void *dummy)
+static irqreturn_t AtaInterrupt(int irq, void *dummy, struct pt_regs *fp)
 {
 #if 0
 	/* ++TeSche: if you should want to test this... */
@@ -1277,7 +1259,7 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy)
 		 * (almost) like on the TT.
 		 */
 		write_sq_ignore_int = 0;
-		goto out;
+		return IRQ_HANDLED;
 	}
 
 	if (!write_sq.active) {
@@ -1285,7 +1267,7 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy)
 		 * the sq variables, so better don't do anything here.
 		 */
 		WAKE_UP(write_sq.sync_queue);
-		goto out;
+		return IRQ_HANDLED;
 	}
 
 	/* Probably ;) one frame is finished. Well, in fact it may be that a
@@ -1322,7 +1304,6 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy)
 	/* We are not playing after AtaPlay(), so there
 	   is nothing to play any more. Wake up a process
 	   waiting for audio output to drain. */
-out:
 	spin_unlock(&dmasound.lock);
 	return IRQ_HANDLED;
 }
@@ -1463,7 +1444,7 @@ static int AtaWriteSqSetup(void)
 	return 0 ;
 }
 
-static int AtaSqOpen(fmode_t mode)
+static int AtaSqOpen(mode_t mode)
 {
 	write_sq_ignore_int = 1;
 	return 0 ;
@@ -1525,7 +1506,7 @@ static SETTINGS def_soft = {
 	.speed	= 8000
 } ;
 
-static __initdata MACHINE machTT = {
+static MACHINE machTT = {
 	.name		= "Atari",
 	.name2		= "TT",
 	.owner		= THIS_MODULE,
@@ -1554,7 +1535,7 @@ static __initdata MACHINE machTT = {
 	.capabilities	=  DSP_CAP_BATCH	/* As per SNDCTL_DSP_GETCAPS */
 };
 
-static __initdata MACHINE machFalcon = {
+static MACHINE machFalcon = {
 	.name		= "Atari",
 	.name2		= "FALCON",
 	.dma_alloc	= AtaAlloc,
@@ -1600,7 +1581,7 @@ static int __init dmasound_atari_init(void)
 		is_falcon = 0;
 	    } else
 		return -ENODEV;
-	    if ((st_mfp.int_en_a & st_mfp.int_mk_a & 0x20) == 0)
+	    if ((mfp.int_en_a & mfp.int_mk_a & 0x20) == 0)
 		return dmasound_init();
 	    else {
 		printk("DMA sound driver: Timer A interrupt already in use\n");

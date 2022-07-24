@@ -8,140 +8,118 @@
  *
  */
 
+#include <linux/config.h>
 
 #include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/socket.h>
 #include <linux/fcntl.h>
 #include <linux/stat.h>
-#include <linux/string.h>
 #include <asm/uaccess.h>
 #include <linux/in.h>
 #include <linux/net.h>
 #include <linux/mm.h>
 #include <linux/netdevice.h>
 #include <linux/signal.h>
-#include <linux/slab.h>
 #include <net/scm.h>
 #include <net/sock.h>
 #include <linux/ipx.h>
 #include <linux/poll.h>
 #include <linux/file.h>
 
-#include "ncp_fs.h"
+#include <linux/ncp_fs.h>
 
 #include "ncpsign_kernel.h"
 
-static int _recv(struct socket *sock, void *buf, int size, unsigned flags)
+static int _recv(struct socket *sock, unsigned char *ubuf, int size,
+		 unsigned flags)
 {
-	struct msghdr msg = {NULL, };
-	struct kvec iov = {buf, size};
-	return kernel_recvmsg(sock, &msg, &iov, 1, size, flags);
+	struct iovec iov;
+	struct msghdr msg;
+
+	iov.iov_base = ubuf;
+	iov.iov_len = size;
+
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_control = NULL;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+
+	return sock_recvmsg(sock, &msg, size, flags);
 }
 
-static inline int do_send(struct socket *sock, struct kvec *vec, int count,
-			  int len, unsigned flags)
+static inline int _send(struct socket *sock, const void *buff, int len)
 {
-	struct msghdr msg = { .msg_flags = flags };
-	return kernel_sendmsg(sock, &msg, vec, count, len);
-}
+	struct iovec iov;
+	struct msghdr msg;
 
-static int _send(struct socket *sock, const void *buff, int len)
-{
-	struct kvec vec;
-	vec.iov_base = (void *) buff;
-	vec.iov_len = len;
-	return do_send(sock, &vec, 1, len, 0);
+	iov.iov_base = (void *) buff;
+	iov.iov_len = len;
+
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_control = NULL;
+	msg.msg_iov = &iov;
+	msg.msg_iovlen = 1;
+	msg.msg_flags = 0;
+
+	return sock_sendmsg(sock, &msg, len);
 }
 
 struct ncp_request_reply {
 	struct list_head req;
 	wait_queue_head_t wq;
-	atomic_t refs;
-	unsigned char* reply_buf;
+	struct ncp_reply_header* reply_buf;
 	size_t datalen;
 	int result;
-	enum { RQ_DONE, RQ_INPROGRESS, RQ_QUEUED, RQ_IDLE, RQ_ABANDONED } status;
-	struct kvec* tx_ciov;
+	enum { RQ_DONE, RQ_INPROGRESS, RQ_QUEUED, RQ_IDLE } status;
+	struct iovec* tx_ciov;
 	size_t tx_totallen;
 	size_t tx_iovlen;
-	struct kvec tx_iov[3];
+	struct iovec tx_iov[3];
 	u_int16_t tx_type;
 	u_int32_t sign[6];
 };
 
-static inline struct ncp_request_reply* ncp_alloc_req(void)
-{
-	struct ncp_request_reply *req;
-
-	req = kmalloc(sizeof(struct ncp_request_reply), GFP_KERNEL);
-	if (!req)
-		return NULL;
-
-	init_waitqueue_head(&req->wq);
-	atomic_set(&req->refs, (1));
-	req->status = RQ_IDLE;
-
-	return req;
-}
-
-static void ncp_req_get(struct ncp_request_reply *req)
-{
-	atomic_inc(&req->refs);
-}
-
-static void ncp_req_put(struct ncp_request_reply *req)
-{
-	if (atomic_dec_and_test(&req->refs))
-		kfree(req);
-}
-
-void ncp_tcp_data_ready(struct sock *sk, int len)
-{
+void ncp_tcp_data_ready(struct sock *sk, int len) {
 	struct ncp_server *server = sk->sk_user_data;
 
 	server->data_ready(sk, len);
 	schedule_work(&server->rcv.tq);
 }
 
-void ncp_tcp_error_report(struct sock *sk)
-{
+void ncp_tcp_error_report(struct sock *sk) {
 	struct ncp_server *server = sk->sk_user_data;
 	
 	server->error_report(sk);
 	schedule_work(&server->rcv.tq);
 }
 
-void ncp_tcp_write_space(struct sock *sk)
-{
+void ncp_tcp_write_space(struct sock *sk) {
 	struct ncp_server *server = sk->sk_user_data;
 	
 	/* We do not need any locking: we first set tx.creq, and then we do sendmsg,
 	   not vice versa... */
 	server->write_space(sk);
-	if (server->tx.creq)
+	if (server->tx.creq) {
 		schedule_work(&server->tx.tq);
+	}
 }
 
-void ncpdgram_timeout_call(unsigned long v)
-{
+void ncpdgram_timeout_call(unsigned long v) {
 	struct ncp_server *server = (void*)v;
 	
 	schedule_work(&server->timeout_tq);
 }
 
-static inline void ncp_finish_request(struct ncp_server *server, struct ncp_request_reply *req, int result)
-{
+static inline void ncp_finish_request(struct ncp_request_reply *req, int result) {
 	req->result = result;
-	if (req->status != RQ_ABANDONED)
-		memcpy(req->reply_buf, server->rxbuf, req->datalen);
 	req->status = RQ_DONE;
 	wake_up_all(&req->wq);
-	ncp_req_put(req);
 }
 
-static void __abort_ncp_connection(struct ncp_server *server)
-{
+static void __abort_ncp_connection(struct ncp_server *server, struct ncp_request_reply *aborted, int err) {
 	struct ncp_request_reply *req;
 
 	ncp_invalidate_conn(server);
@@ -150,29 +128,39 @@ static void __abort_ncp_connection(struct ncp_server *server)
 		req = list_entry(server->tx.requests.next, struct ncp_request_reply, req);
 		
 		list_del_init(&req->req);
-		ncp_finish_request(server, req, -EIO);
+		if (req == aborted) {
+			ncp_finish_request(req, err);
+		} else {
+			ncp_finish_request(req, -EIO);
+		}
 	}
 	req = server->rcv.creq;
 	if (req) {
 		server->rcv.creq = NULL;
-		ncp_finish_request(server, req, -EIO);
+		if (req == aborted) {
+			ncp_finish_request(req, err);
+		} else {
+			ncp_finish_request(req, -EIO);
+		}
 		server->rcv.ptr = NULL;
 		server->rcv.state = 0;
 	}
 	req = server->tx.creq;
 	if (req) {
 		server->tx.creq = NULL;
-		ncp_finish_request(server, req, -EIO);
+		if (req == aborted) {
+			ncp_finish_request(req, err);
+		} else {
+			ncp_finish_request(req, -EIO);
+		}
 	}
 }
 
-static inline int get_conn_number(struct ncp_reply_header *rp)
-{
+static inline int get_conn_number(struct ncp_reply_header *rp) {
 	return rp->conn_low | (rp->conn_high << 8);
 }
 
-static inline void __ncp_abort_request(struct ncp_server *server, struct ncp_request_reply *req, int err)
-{
+static inline void __ncp_abort_request(struct ncp_server *server, struct ncp_request_reply *req, int err) {
 	/* If req is done, we got signal, but we also received answer... */
 	switch (req->status) {
 		case RQ_IDLE:
@@ -180,56 +168,57 @@ static inline void __ncp_abort_request(struct ncp_server *server, struct ncp_req
 			break;
 		case RQ_QUEUED:
 			list_del_init(&req->req);
-			ncp_finish_request(server, req, err);
+			ncp_finish_request(req, err);
 			break;
 		case RQ_INPROGRESS:
-			req->status = RQ_ABANDONED;
-			break;
-		case RQ_ABANDONED:
+			__abort_ncp_connection(server, req, err);
 			break;
 	}
 }
 
-static inline void ncp_abort_request(struct ncp_server *server, struct ncp_request_reply *req, int err)
-{
-	mutex_lock(&server->rcv.creq_mutex);
+static inline void ncp_abort_request(struct ncp_server *server, struct ncp_request_reply *req, int err) {
+	down(&server->rcv.creq_sem);
 	__ncp_abort_request(server, req, err);
-	mutex_unlock(&server->rcv.creq_mutex);
+	up(&server->rcv.creq_sem);
 }
 
-static inline void __ncptcp_abort(struct ncp_server *server)
-{
-	__abort_ncp_connection(server);
+static inline void __ncptcp_abort(struct ncp_server *server) {
+	__abort_ncp_connection(server, NULL, 0);
 }
 
-static int ncpdgram_send(struct socket *sock, struct ncp_request_reply *req)
-{
-	struct kvec vec[3];
-	/* sock_sendmsg updates iov pointers for us :-( */
-	memcpy(vec, req->tx_ciov, req->tx_iovlen * sizeof(vec[0]));
-	return do_send(sock, vec, req->tx_iovlen,
-		       req->tx_totallen, MSG_DONTWAIT);
+static int ncpdgram_send(struct socket *sock, struct ncp_request_reply *req) {
+	struct msghdr msg;
+	
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_control = NULL;
+	msg.msg_iov = req->tx_ciov;
+	msg.msg_iovlen = req->tx_iovlen;
+	msg.msg_flags = MSG_DONTWAIT;
+	return sock_sendmsg(sock, &msg, req->tx_totallen);
 }
 
-static void __ncptcp_try_send(struct ncp_server *server)
-{
+static void __ncptcp_try_send(struct ncp_server *server) {
 	struct ncp_request_reply *rq;
-	struct kvec *iov;
-	struct kvec iovc[3];
+	struct msghdr msg;
+	struct iovec* iov;
 	int result;
 
 	rq = server->tx.creq;
-	if (!rq)
+	if (!rq) {
 		return;
+	}
 
-	/* sock_sendmsg updates iov pointers for us :-( */
-	memcpy(iovc, rq->tx_ciov, rq->tx_iovlen * sizeof(iov[0]));
-	result = do_send(server->ncp_sock, iovc, rq->tx_iovlen,
-			 rq->tx_totallen, MSG_NOSIGNAL | MSG_DONTWAIT);
-
-	if (result == -EAGAIN)
+	msg.msg_name = NULL;
+	msg.msg_namelen = 0;
+	msg.msg_control = NULL;
+	msg.msg_iov = rq->tx_ciov;
+	msg.msg_iovlen = rq->tx_iovlen;
+	msg.msg_flags = MSG_NOSIGNAL | MSG_DONTWAIT;
+	result = sock_sendmsg(server->ncp_sock, &msg, rq->tx_totallen);
+	if (result == -EAGAIN) {
 		return;
-
+	}
 	if (result < 0) {
 		printk(KERN_ERR "ncpfs: tcp: Send failed: %d\n", result);
 		__ncp_abort_request(server, rq, result);
@@ -247,21 +236,18 @@ static void __ncptcp_try_send(struct ncp_server *server)
 		iov++;
 		rq->tx_iovlen--;
 	}
-	iov->iov_base += result;
 	iov->iov_len -= result;
 	rq->tx_ciov = iov;
 }
 
-static inline void ncp_init_header(struct ncp_server *server, struct ncp_request_reply *req, struct ncp_request_header *h)
-{
+static inline void ncp_init_header(struct ncp_server *server, struct ncp_request_reply *req, struct ncp_request_header *h) {
 	req->status = RQ_INPROGRESS;
 	h->conn_low = server->connection;
 	h->conn_high = server->connection >> 8;
 	h->sequence = ++server->sequence;
 }
 	
-static void ncpdgram_start_request(struct ncp_server *server, struct ncp_request_reply *req)
-{
+static void ncpdgram_start_request(struct ncp_server *server, struct ncp_request_reply *req) {
 	size_t signlen;
 	struct ncp_request_header* h;
 	
@@ -289,8 +275,7 @@ static void ncpdgram_start_request(struct ncp_server *server, struct ncp_request
 #define NCP_TCP_XMIT_VERSION	(1)
 #define NCP_TCP_RCVD_MAGIC	(0x744E6350)
 
-static void ncptcp_start_request(struct ncp_server *server, struct ncp_request_reply *req)
-{
+static void ncptcp_start_request(struct ncp_server *server, struct ncp_request_reply *req) {
 	size_t signlen;
 	struct ncp_request_header* h;
 
@@ -314,41 +299,32 @@ static void ncptcp_start_request(struct ncp_server *server, struct ncp_request_r
 	__ncptcp_try_send(server);
 }
 
-static inline void __ncp_start_request(struct ncp_server *server, struct ncp_request_reply *req)
-{
-	/* we copy the data so that we do not depend on the caller
-	   staying alive */
-	memcpy(server->txbuf, req->tx_iov[1].iov_base, req->tx_iov[1].iov_len);
-	req->tx_iov[1].iov_base = server->txbuf;
-
+static inline void __ncp_start_request(struct ncp_server *server, struct ncp_request_reply *req) {
 	if (server->ncp_sock->type == SOCK_STREAM)
 		ncptcp_start_request(server, req);
 	else
 		ncpdgram_start_request(server, req);
 }
 
-static int ncp_add_request(struct ncp_server *server, struct ncp_request_reply *req)
-{
-	mutex_lock(&server->rcv.creq_mutex);
+static int ncp_add_request(struct ncp_server *server, struct ncp_request_reply *req) {
+	down(&server->rcv.creq_sem);
 	if (!ncp_conn_valid(server)) {
-		mutex_unlock(&server->rcv.creq_mutex);
+		up(&server->rcv.creq_sem);
 		printk(KERN_ERR "ncpfs: tcp: Server died\n");
 		return -EIO;
 	}
-	ncp_req_get(req);
 	if (server->tx.creq || server->rcv.creq) {
 		req->status = RQ_QUEUED;
 		list_add_tail(&req->req, &server->tx.requests);
-		mutex_unlock(&server->rcv.creq_mutex);
+		up(&server->rcv.creq_sem);
 		return 0;
 	}
 	__ncp_start_request(server, req);
-	mutex_unlock(&server->rcv.creq_mutex);
+	up(&server->rcv.creq_sem);
 	return 0;
 }
 
-static void __ncp_next_request(struct ncp_server *server)
-{
+static void __ncp_next_request(struct ncp_server *server) {
 	struct ncp_request_reply *req;
 
 	server->rcv.creq = NULL;
@@ -360,11 +336,11 @@ static void __ncp_next_request(struct ncp_server *server)
 	__ncp_start_request(server, req);
 }
 
-static void info_server(struct ncp_server *server, unsigned int id, const void * data, size_t len)
-{
+static void info_server(struct ncp_server *server, unsigned int id, const void * data, size_t len) {
 	if (server->info_sock) {
-		struct kvec iov[2];
-		__be32 hdr[2];
+		struct iovec iov[2];
+		struct msghdr msg;
+		__u32 hdr[2];
 	
 		hdr[0] = cpu_to_be32(len + 8);
 		hdr[1] = cpu_to_be32(id);
@@ -374,14 +350,19 @@ static void info_server(struct ncp_server *server, unsigned int id, const void *
 		iov[1].iov_base = (void *) data;
 		iov[1].iov_len = len;
 
-		do_send(server->info_sock, iov, 2, len + 8, MSG_NOSIGNAL);
+		msg.msg_name = NULL;
+		msg.msg_namelen = 0;
+		msg.msg_control = NULL;
+		msg.msg_iov = iov;
+		msg.msg_iovlen = 2;
+		msg.msg_flags = MSG_NOSIGNAL;
+
+		sock_sendmsg(server->info_sock, &msg, len + 8);
 	}
 }
 
-void ncpdgram_rcv_proc(struct work_struct *work)
-{
-	struct ncp_server *server =
-		container_of(work, struct ncp_server, rcv.tq);
+static void __ncpdgram_rcv_proc(void *s) {
+	struct ncp_server *server = s;
 	struct socket* sock;
 	
 	sock = server->ncp_sock;
@@ -390,7 +371,7 @@ void ncpdgram_rcv_proc(struct work_struct *work)
 		struct ncp_reply_header reply;
 		int result;
 
-		result = _recv(sock, &reply, sizeof(reply), MSG_PEEK | MSG_DONTWAIT);
+		result = _recv(sock, (void*)&reply, sizeof(reply), MSG_PEEK | MSG_DONTWAIT);
 		if (result < 0) {
 			break;
 		}
@@ -428,7 +409,7 @@ void ncpdgram_rcv_proc(struct work_struct *work)
 				info_server(server, 0, server->unexpected_packet.data, result);
 				continue;
 			}
-			mutex_lock(&server->rcv.creq_mutex);
+			down(&server->rcv.creq_sem);		
 			req = server->rcv.creq;
 			if (req && (req->tx_type == NCP_ALLOC_SLOT_REQUEST || (server->sequence == reply.sequence && 
 					server->connection == get_conn_number(&reply)))) {
@@ -437,7 +418,7 @@ void ncpdgram_rcv_proc(struct work_struct *work)
 					server->timeout_last = NCP_MAX_RPC_TIMEOUT;
 					mod_timer(&server->timeout_tm, jiffies + NCP_MAX_RPC_TIMEOUT);
 				} else if (reply.type == NCP_REPLY) {
-					result = _recv(sock, server->rxbuf, req->datalen, MSG_DONTWAIT);
+					result = _recv(sock, (void*)req->reply_buf, req->datalen, MSG_DONTWAIT);
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
 					if (result >= 0 && server->sign_active && req->tx_type != NCP_DEALLOC_SLOT_REQUEST) {
 						if (result < 8 + 8) {
@@ -447,7 +428,7 @@ void ncpdgram_rcv_proc(struct work_struct *work)
 							
 							result -= 8;
 							hdrl = sock->sk->sk_family == AF_INET ? 8 : 6;
-							if (sign_verify_reply(server, server->rxbuf + hdrl, result - hdrl, cpu_to_le32(result), server->rxbuf + result)) {
+							if (sign_verify_reply(server, ((char*)req->reply_buf) + hdrl, result - hdrl, cpu_to_le32(result), ((char*)req->reply_buf) + result)) {
 								printk(KERN_INFO "ncpfs: Signature violation\n");
 								result = -EIO;
 							}
@@ -456,21 +437,30 @@ void ncpdgram_rcv_proc(struct work_struct *work)
 #endif
 					del_timer(&server->timeout_tm);
 				     	server->rcv.creq = NULL;
-					ncp_finish_request(server, req, result);
+					ncp_finish_request(req, result);
 					__ncp_next_request(server);
-					mutex_unlock(&server->rcv.creq_mutex);
+					up(&server->rcv.creq_sem);
 					continue;
 				}
 			}
-			mutex_unlock(&server->rcv.creq_mutex);
+			up(&server->rcv.creq_sem);
 		}
 drop:;		
-		_recv(sock, &reply, sizeof(reply), MSG_DONTWAIT);
+		_recv(sock, (void*)&reply, sizeof(reply), MSG_DONTWAIT);
 	}
 }
 
-static void __ncpdgram_timeout_proc(struct ncp_server *server)
-{
+void ncpdgram_rcv_proc(void *s) {
+	mm_segment_t fs;
+	struct ncp_server *server = s;
+	
+	fs = get_fs();
+	set_fs(get_ds());
+	__ncpdgram_rcv_proc(server);
+	set_fs(fs);
+}
+
+static void __ncpdgram_timeout_proc(struct ncp_server *server) {
 	/* If timer is pending, we are processing another request... */
 	if (!timer_pending(&server->timeout_tm)) {
 		struct ncp_request_reply* req;
@@ -497,17 +487,24 @@ static void __ncpdgram_timeout_proc(struct ncp_server *server)
 	}
 }
 
-void ncpdgram_timeout_proc(struct work_struct *work)
-{
-	struct ncp_server *server =
-		container_of(work, struct ncp_server, timeout_tq);
-	mutex_lock(&server->rcv.creq_mutex);
+void ncpdgram_timeout_proc(void *s) {
+	mm_segment_t fs;
+	struct ncp_server *server = s;
+	
+	fs = get_fs();
+	set_fs(get_ds());
+	down(&server->rcv.creq_sem);
 	__ncpdgram_timeout_proc(server);
-	mutex_unlock(&server->rcv.creq_mutex);
+	up(&server->rcv.creq_sem);
+	set_fs(fs);
 }
 
-static int do_tcp_rcv(struct ncp_server *server, void *buffer, size_t len)
-{
+static inline void ncp_init_req(struct ncp_request_reply* req) {
+	init_waitqueue_head(&req->wq);
+	req->status = RQ_IDLE;
+}
+
+static int do_tcp_rcv(struct ncp_server *server, void *buffer, size_t len) {
 	int result;
 	
 	if (buffer) {
@@ -530,8 +527,7 @@ static int do_tcp_rcv(struct ncp_server *server, void *buffer, size_t len)
 	return result;
 }	
 
-static int __ncptcp_rcv_proc(struct ncp_server *server)
-{
+static int __ncptcp_rcv_proc(struct ncp_server *server) {
 	/* We have to check the result, so store the complete header */
 	while (1) {
 		int result;
@@ -623,8 +619,8 @@ skipdata:;
 					goto skipdata;
 				}
 				req->datalen = datalen - 8;
-				((struct ncp_reply_header*)server->rxbuf)->type = NCP_REPLY;
-				server->rcv.ptr = server->rxbuf + 2;
+				req->reply_buf->type = NCP_REPLY;
+				server->rcv.ptr = (unsigned char*)(req->reply_buf) + 2;
 				server->rcv.len = datalen - 10;
 				server->rcv.state = 1;
 				break;
@@ -637,12 +633,12 @@ skipdata:;
 			case 1:
 				req = server->rcv.creq;
 				if (req->tx_type != NCP_ALLOC_SLOT_REQUEST) {
-					if (((struct ncp_reply_header*)server->rxbuf)->sequence != server->sequence) {
+					if (req->reply_buf->sequence != server->sequence) {
 						printk(KERN_ERR "ncpfs: tcp: Bad sequence number\n");
 						__ncp_abort_request(server, req, -EIO);
 						return -EIO;
 					}
-					if ((((struct ncp_reply_header*)server->rxbuf)->conn_low | (((struct ncp_reply_header*)server->rxbuf)->conn_high << 8)) != server->connection) {
+					if ((req->reply_buf->conn_low | (req->reply_buf->conn_high << 8)) != server->connection) {
 						printk(KERN_ERR "ncpfs: tcp: Connection number mismatch\n");
 						__ncp_abort_request(server, req, -EIO);
 						return -EIO;
@@ -650,14 +646,14 @@ skipdata:;
 				}
 #ifdef CONFIG_NCPFS_PACKET_SIGNING				
 				if (server->sign_active && req->tx_type != NCP_DEALLOC_SLOT_REQUEST) {
-					if (sign_verify_reply(server, server->rxbuf + 6, req->datalen - 6, cpu_to_be32(req->datalen + 16), &server->rcv.buf.type)) {
+					if (sign_verify_reply(server, (unsigned char*)(req->reply_buf) + 6, req->datalen - 6, cpu_to_be32(req->datalen + 16), &server->rcv.buf.type)) {
 						printk(KERN_ERR "ncpfs: tcp: Signature violation\n");
 						__ncp_abort_request(server, req, -EIO);
 						return -EIO;
 					}
 				}
 #endif				
-				ncp_finish_request(server, req, req->datalen);
+				ncp_finish_request(req, req->datalen);
 			nextreq:;
 				__ncp_next_request(server);
 			case 2:
@@ -667,7 +663,7 @@ skipdata:;
 				server->rcv.state = 0;
 				break;
 			case 3:
-				ncp_finish_request(server, server->rcv.creq, -EIO);
+				ncp_finish_request(server->rcv.creq, -EIO);
 				goto nextreq;
 			case 5:
 				info_server(server, 0, server->unexpected_packet.data, server->unexpected_packet.len);
@@ -676,60 +672,55 @@ skipdata:;
 	}
 }
 
-void ncp_tcp_rcv_proc(struct work_struct *work)
-{
-	struct ncp_server *server =
-		container_of(work, struct ncp_server, rcv.tq);
+void ncp_tcp_rcv_proc(void *s) {
+	mm_segment_t fs;
+	struct ncp_server *server = s;
 
-	mutex_lock(&server->rcv.creq_mutex);
+	fs = get_fs();
+	set_fs(get_ds());
+	down(&server->rcv.creq_sem);
 	__ncptcp_rcv_proc(server);
-	mutex_unlock(&server->rcv.creq_mutex);
+	up(&server->rcv.creq_sem);
+	set_fs(fs);
+	return;
 }
 
-void ncp_tcp_tx_proc(struct work_struct *work)
-{
-	struct ncp_server *server =
-		container_of(work, struct ncp_server, tx.tq);
+void ncp_tcp_tx_proc(void *s) {
+	mm_segment_t fs;
+	struct ncp_server *server = s;
 	
-	mutex_lock(&server->rcv.creq_mutex);
+	fs = get_fs();
+	set_fs(get_ds());
+	down(&server->rcv.creq_sem);
 	__ncptcp_try_send(server);
-	mutex_unlock(&server->rcv.creq_mutex);
+	up(&server->rcv.creq_sem);
+	set_fs(fs);
+	return;
 }
 
 static int do_ncp_rpc_call(struct ncp_server *server, int size,
-		unsigned char* reply_buf, int max_reply_size)
+		struct ncp_reply_header* reply_buf, int max_reply_size)
 {
 	int result;
-	struct ncp_request_reply *req;
+	struct ncp_request_reply req;
 
-	req = ncp_alloc_req();
-	if (!req)
-		return -ENOMEM;
+	ncp_init_req(&req);
+	req.reply_buf = reply_buf;
+	req.datalen = max_reply_size;
+	req.tx_iov[1].iov_base = (void *) server->packet;
+	req.tx_iov[1].iov_len = size;
+	req.tx_iovlen = 1;
+	req.tx_totallen = size;
+	req.tx_type = *(u_int16_t*)server->packet;
 
-	req->reply_buf = reply_buf;
-	req->datalen = max_reply_size;
-	req->tx_iov[1].iov_base = server->packet;
-	req->tx_iov[1].iov_len = size;
-	req->tx_iovlen = 1;
-	req->tx_totallen = size;
-	req->tx_type = *(u_int16_t*)server->packet;
-
-	result = ncp_add_request(server, req);
-	if (result < 0)
-		goto out;
-
-	if (wait_event_interruptible(req->wq, req->status == RQ_DONE)) {
-		ncp_abort_request(server, req, -EINTR);
-		result = -EINTR;
-		goto out;
+	result = ncp_add_request(server, &req);
+	if (result < 0) {
+		return result;
 	}
-
-	result = req->result;
-
-out:
-	ncp_req_put(req);
-
-	return result;
+	if (wait_event_interruptible(req.wq, req.status == RQ_DONE)) {
+		ncp_abort_request(server, &req, -EIO);
+	}
+	return req.result;
 }
 
 /*
@@ -746,9 +737,11 @@ static int ncp_do_request(struct ncp_server *server, int size,
 		return -EIO;
 	}
 	if (!ncp_conn_valid(server)) {
+		printk(KERN_ERR "ncpfs: Connection invalid!\n");
 		return -EIO;
 	}
 	{
+		mm_segment_t fs;
 		sigset_t old_set;
 		unsigned long mask, flags;
 
@@ -773,7 +766,12 @@ static int ncp_do_request(struct ncp_server *server, int size,
 		recalc_sigpending();
 		spin_unlock_irqrestore(&current->sighand->siglock, flags);
 		
+		fs = get_fs();
+		set_fs(get_ds());
+
 		result = do_ncp_rpc_call(server, size, reply, max_reply_size);
+
+		set_fs(fs);
 
 		spin_lock_irqsave(&current->sighand->siglock, flags);
 		current->blocked = old_set;
@@ -783,6 +781,11 @@ static int ncp_do_request(struct ncp_server *server, int size,
 
 	DDPRINTK("do_ncp_rpc_call returned %d\n", result);
 
+	if (result < 0) {
+		/* There was a problem with I/O, so the connections is
+		 * no longer usable. */
+		ncp_invalidate_conn(server);
+	}
 	return result;
 }
 
@@ -863,7 +866,7 @@ int ncp_disconnect(struct ncp_server *server)
 
 void ncp_lock_server(struct ncp_server *server)
 {
-	mutex_lock(&server->mutex);
+	down(&server->sem);
 	if (server->lock)
 		printk(KERN_WARNING "ncp_lock_server: was locked!\n");
 	server->lock = 1;
@@ -876,5 +879,5 @@ void ncp_unlock_server(struct ncp_server *server)
 		return;
 	}
 	server->lock = 0;
-	mutex_unlock(&server->mutex);
+	up(&server->sem);
 }

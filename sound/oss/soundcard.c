@@ -1,5 +1,5 @@
 /*
- * linux/sound/oss/soundcard.c
+ * linux/drivers/sound/soundcard.c
  *
  * Sound card driver for Linux
  *
@@ -22,6 +22,7 @@
  * Christoph Hellwig : Some cleanup work (2000/03/01)
  */
 
+#include <linux/config.h>
 
 #include "sound_config.h"
 #include <linux/init.h>
@@ -32,18 +33,17 @@
 #include <linux/ctype.h>
 #include <linux/stddef.h>
 #include <linux/kmod.h>
-#include <linux/kernel.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <linux/wait.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/major.h>
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
-#include <linux/mutex.h>
+#include <linux/smp_lock.h>
 #include <linux/module.h>
-#include <linux/mm.h>
-#include <linux/device.h>
 
 /*
  * This ought to be moved into include/asm/dma.h
@@ -55,8 +55,7 @@
 /*
  * Table for permanently allocated memory (used when unloading the module)
  */
-void *          sound_mem_blocks[MAX_MEM_BLOCKS];
-static DEFINE_MUTEX(soundcard_mutex);
+caddr_t         sound_mem_blocks[1024];
 int             sound_nblocks = 0;
 
 /* Persistent DMA buffers */
@@ -74,7 +73,6 @@ static char     dma_alloc_map[MAX_DMA_CHANNELS];
 
 
 unsigned long seq_time = 0;	/* Time for /dev/sequencer */
-extern struct class *sound_class;
 
 /*
  * Table for configurable mixer volume handling
@@ -87,7 +85,7 @@ int *load_mixer_volumes(char *name, int *levels, int present)
 	int             i, n;
 
 	for (i = 0; i < num_mixer_volumes; i++) {
-		if (strncmp(name, mixer_vols[i].name, 32) == 0) {
+		if (strcmp(name, mixer_vols[i].name) == 0) {
 			if (present)
 				mixer_vols[i].num = i;
 			return mixer_vols[i].levels;
@@ -99,7 +97,7 @@ int *load_mixer_volumes(char *name, int *levels, int present)
 	}
 	n = num_mixer_volumes++;
 
-	strncpy(mixer_vols[n].name, name, 32);
+	strcpy(mixer_vols[n].name, name);
 
 	if (present)
 		mixer_vols[n].num = n;
@@ -110,9 +108,8 @@ int *load_mixer_volumes(char *name, int *levels, int present)
 		mixer_vols[n].levels[i] = levels[i];
 	return mixer_vols[n].levels;
 }
-EXPORT_SYMBOL(load_mixer_volumes);
 
-static int set_mixer_levels(void __user * arg)
+static int set_mixer_levels(caddr_t arg)
 {
         /* mixer_vol_table is 174 bytes, so IMHO no reason to not allocate it on the stack */
 	mixer_vol_table buf;   
@@ -125,11 +122,11 @@ static int set_mixer_levels(void __user * arg)
 	return 0;
 }
 
-static int get_mixer_levels(void __user * arg)
+static int get_mixer_levels(caddr_t arg)
 {
 	int n;
 
-	if (__get_user(n, (int __user *)(&(((mixer_vol_table __user *)arg)->num))))
+	if (__get_user(n, (int *)(&(((mixer_vol_table *)arg)->num))))
 		return -EFAULT;
 	if (n < 0 || n >= num_mixer_volumes)
 		return -EINVAL;
@@ -138,12 +135,16 @@ static int get_mixer_levels(void __user * arg)
 	return 0;
 }
 
+#ifndef MIN
+#define MIN(a,b) (((a) < (b)) ? (a) : (b))
+#endif
+
 /* 4K page size but our output routines use some slack for overruns */
 #define PROC_BLOCK_SIZE (3*1024)
 
-static ssize_t sound_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+static ssize_t sound_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
-	int dev = iminor(file->f_path.dentry->d_inode);
+	int dev = iminor(file->f_dentry->d_inode);
 	int ret = -EINVAL;
 
 	/*
@@ -152,7 +153,7 @@ static ssize_t sound_read(struct file *file, char __user *buf, size_t count, lof
 	 *	big one anyway, we might as well bandage here..
 	 */
 	 
-	mutex_lock(&soundcard_mutex);
+	lock_kernel();
 	
 	DEB(printk("sound_read(dev=%d, count=%d)\n", dev, count));
 	switch (dev & 0x0f) {
@@ -170,16 +171,16 @@ static ssize_t sound_read(struct file *file, char __user *buf, size_t count, lof
 	case SND_DEV_MIDIN:
 		ret = MIDIbuf_read(dev, file, buf, count);
 	}
-	mutex_unlock(&soundcard_mutex);
+	unlock_kernel();
 	return ret;
 }
 
-static ssize_t sound_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+static ssize_t sound_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
-	int dev = iminor(file->f_path.dentry->d_inode);
+	int dev = iminor(file->f_dentry->d_inode);
 	int ret = -EINVAL;
 	
-	mutex_lock(&soundcard_mutex);
+	lock_kernel();
 	DEB(printk("sound_write(dev=%d, count=%d)\n", dev, count));
 	switch (dev & 0x0f) {
 	case SND_DEV_SEQ:
@@ -197,7 +198,7 @@ static ssize_t sound_write(struct file *file, const char __user *buf, size_t cou
 		ret =  MIDIbuf_write(dev, file, buf, count);
 		break;
 	}
-	mutex_unlock(&soundcard_mutex);
+	unlock_kernel();
 	return ret;
 }
 
@@ -211,52 +212,50 @@ static int sound_open(struct inode *inode, struct file *file)
 		printk(KERN_ERR "Invalid minor device %d\n", dev);
 		return -ENXIO;
 	}
-	mutex_lock(&soundcard_mutex);
 	switch (dev & 0x0f) {
 	case SND_DEV_CTL:
 		dev >>= 4;
 		if (dev >= 0 && dev < MAX_MIXER_DEV && mixer_devs[dev] == NULL) {
 			request_module("mixer%d", dev);
 		}
-		retval = -ENXIO;
 		if (dev && (dev >= num_mixers || mixer_devs[dev] == NULL))
-			break;
+			return -ENXIO;
 	
 		if (!try_module_get(mixer_devs[dev]->owner))
-			break;
-
-		retval = 0;
+			return -ENXIO;
 		break;
 
 	case SND_DEV_SEQ:
 	case SND_DEV_SEQ2:
-		retval = sequencer_open(dev, file);
+		if ((retval = sequencer_open(dev, file)) < 0)
+			return retval;
 		break;
 
 	case SND_DEV_MIDIN:
-		retval = MIDIbuf_open(dev, file);
+		if ((retval = MIDIbuf_open(dev, file)) < 0)
+			return retval;
 		break;
 
 	case SND_DEV_DSP:
 	case SND_DEV_DSP16:
 	case SND_DEV_AUDIO:
-		retval = audio_open(dev, file);
+		if ((retval = audio_open(dev, file)) < 0)
+			return retval;
 		break;
 
 	default:
 		printk(KERN_ERR "Invalid minor device %d\n", dev);
-		retval = -ENXIO;
+		return -ENXIO;
 	}
 
-	mutex_unlock(&soundcard_mutex);
-	return retval;
+	return 0;
 }
 
 static int sound_release(struct inode *inode, struct file *file)
 {
 	int dev = iminor(inode);
 
-	mutex_lock(&soundcard_mutex);
+	lock_kernel();
 	DEB(printk("sound_release(dev=%d)\n", dev));
 	switch (dev & 0x0f) {
 	case SND_DEV_CTL:
@@ -281,12 +280,12 @@ static int sound_release(struct inode *inode, struct file *file)
 	default:
 		printk(KERN_ERR "Sound error: Releasing unknown device 0x%02x\n", dev);
 	}
-	mutex_unlock(&soundcard_mutex);
+	unlock_kernel();
 
 	return 0;
 }
 
-static int get_mixer_info(int dev, void __user *arg)
+static int get_mixer_info(int dev, caddr_t arg)
 {
 	mixer_info info;
 	memset(&info, 0, sizeof(info));
@@ -298,7 +297,7 @@ static int get_mixer_info(int dev, void __user *arg)
 	return 0;
 }
 
-static int get_old_mixer_info(int dev, void __user *arg)
+static int get_old_mixer_info(int dev, caddr_t arg)
 {
 	_old_mixer_info info;
 	memset(&info, 0, sizeof(info));
@@ -309,7 +308,7 @@ static int get_old_mixer_info(int dev, void __user *arg)
 	return 0;
 }
 
-static int sound_mixer_ioctl(int mixdev, unsigned int cmd, void __user *arg)
+static int sound_mixer_ioctl(int mixdev, unsigned int cmd, caddr_t arg)
 {
  	if (mixdev < 0 || mixdev >= MAX_MIXER_DEV)
  		return -ENXIO;
@@ -330,32 +329,30 @@ static int sound_mixer_ioctl(int mixdev, unsigned int cmd, void __user *arg)
 	return mixer_devs[mixdev]->ioctl(mixdev, cmd, arg);
 }
 
-static long sound_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static int sound_ioctl(struct inode *inode, struct file *file,
+		       unsigned int cmd, unsigned long arg)
 {
-	int len = 0, dtype;
-	int dev = iminor(file->f_dentry->d_inode);
-	long ret = -EINVAL;
-	void __user *p = (void __user *)arg;
+	int err, len = 0, dtype;
+	int dev = iminor(inode);
 
 	if (_SIOC_DIR(cmd) != _SIOC_NONE && _SIOC_DIR(cmd) != 0) {
 		/*
 		 * Have to validate the address given by the process.
 		 */
 		len = _SIOC_SIZE(cmd);
-		if (len < 1 || len > 65536 || !p)
+		if (len < 1 || len > 65536 || arg == 0)
 			return -EFAULT;
 		if (_SIOC_DIR(cmd) & _SIOC_WRITE)
-			if (!access_ok(VERIFY_READ, p, len))
-				return -EFAULT;
+			if ((err = verify_area(VERIFY_READ, (void *)arg, len)) < 0)
+				return err;
 		if (_SIOC_DIR(cmd) & _SIOC_READ)
-			if (!access_ok(VERIFY_WRITE, p, len))
-				return -EFAULT;
+			if ((err = verify_area(VERIFY_WRITE, (void *)arg, len)) < 0)
+				return err;
 	}
 	DEB(printk("sound_ioctl(dev=%d, cmd=0x%x, arg=0x%x)\n", dev, cmd, arg));
 	if (cmd == OSS_GETVERSION)
-		return __put_user(SOUND_VERSION, (int __user *)p);
+		return __put_user(SOUND_VERSION, (int *)arg);
 	
-	mutex_lock(&soundcard_mutex);
 	if (_IOC_TYPE(cmd) == 'M' && num_mixers > 0 &&   /* Mixer ioctl */
 	    (dev & 0x0f) != SND_DEV_CTL) {              
 		dtype = dev & 0x0f;
@@ -363,50 +360,42 @@ static long sound_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		case SND_DEV_DSP:
 		case SND_DEV_DSP16:
 		case SND_DEV_AUDIO:
-			ret = sound_mixer_ioctl(audio_devs[dev >> 4]->mixer_dev,
-						 cmd, p);
-			break;			
+			return sound_mixer_ioctl(audio_devs[dev >> 4]->mixer_dev,
+						 cmd, (caddr_t)arg);
+			
 		default:
-			ret = sound_mixer_ioctl(dev >> 4, cmd, p);
-			break;
+			return sound_mixer_ioctl(dev >> 4, cmd, (caddr_t)arg);
 		}
-		mutex_unlock(&soundcard_mutex);
-		return ret;
 	}
-
 	switch (dev & 0x0f) {
 	case SND_DEV_CTL:
 		if (cmd == SOUND_MIXER_GETLEVELS)
-			ret = get_mixer_levels(p);
-		else if (cmd == SOUND_MIXER_SETLEVELS)
-			ret = set_mixer_levels(p);
-		else
-			ret = sound_mixer_ioctl(dev >> 4, cmd, p);
-		break;
+			return get_mixer_levels((caddr_t)arg);
+		if (cmd == SOUND_MIXER_SETLEVELS)
+			return set_mixer_levels((caddr_t)arg);
+		return sound_mixer_ioctl(dev >> 4, cmd, (caddr_t)arg);
 
 	case SND_DEV_SEQ:
 	case SND_DEV_SEQ2:
-		ret = sequencer_ioctl(dev, file, cmd, p);
-		break;
+		return sequencer_ioctl(dev, file, cmd, (caddr_t)arg);
 
 	case SND_DEV_DSP:
 	case SND_DEV_DSP16:
 	case SND_DEV_AUDIO:
-		ret = audio_ioctl(dev, file, cmd, p);
+		return audio_ioctl(dev, file, cmd, (caddr_t)arg);
 		break;
 
 	case SND_DEV_MIDIN:
-		ret = MIDIbuf_ioctl(dev, file, cmd, p);
+		return MIDIbuf_ioctl(dev, file, cmd, (caddr_t)arg);
 		break;
 
 	}
-	mutex_unlock(&soundcard_mutex);
-	return ret;
+	return -EINVAL;
 }
 
 static unsigned int sound_poll(struct file *file, poll_table * wait)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file->f_dentry->d_inode;
 	int dev = iminor(inode);
 
 	DEB(printk("sound_poll(dev=%d)\n", dev));
@@ -431,7 +420,7 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	int dev_class;
 	unsigned long size;
 	struct dma_buffparms *dmap = NULL;
-	int dev = iminor(file->f_path.dentry->d_inode);
+	int dev = iminor(file->f_dentry->d_inode);
 
 	dev_class = dev & 0x0f;
 	dev >>= 4;
@@ -440,35 +429,35 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 		printk(KERN_ERR "Sound: mmap() not supported for other than audio devices\n");
 		return -EINVAL;
 	}
-	mutex_lock(&soundcard_mutex);
+	lock_kernel();
 	if (vma->vm_flags & VM_WRITE)	/* Map write and read/write to the output buf */
 		dmap = audio_devs[dev]->dmap_out;
 	else if (vma->vm_flags & VM_READ)
 		dmap = audio_devs[dev]->dmap_in;
 	else {
 		printk(KERN_ERR "Sound: Undefined mmap() access\n");
-		mutex_unlock(&soundcard_mutex);
+		unlock_kernel();
 		return -EINVAL;
 	}
 
 	if (dmap == NULL) {
 		printk(KERN_ERR "Sound: mmap() error. dmap == NULL\n");
-		mutex_unlock(&soundcard_mutex);
+		unlock_kernel();
 		return -EIO;
 	}
 	if (dmap->raw_buf == NULL) {
 		printk(KERN_ERR "Sound: mmap() called when raw_buf == NULL\n");
-		mutex_unlock(&soundcard_mutex);
+		unlock_kernel();
 		return -EIO;
 	}
 	if (dmap->mapping_flags) {
 		printk(KERN_ERR "Sound: mmap() called twice for the same DMA buffer\n");
-		mutex_unlock(&soundcard_mutex);
+		unlock_kernel();
 		return -EIO;
 	}
 	if (vma->vm_pgoff != 0) {
 		printk(KERN_ERR "Sound: mmap() offset must be 0.\n");
-		mutex_unlock(&soundcard_mutex);
+		unlock_kernel();
 		return -EINVAL;
 	}
 	size = vma->vm_end - vma->vm_start;
@@ -476,10 +465,10 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	if (size != dmap->bytes_in_use) {
 		printk(KERN_WARNING "Sound: mmap() size = %ld. Should be %d\n", size, dmap->bytes_in_use);
 	}
-	if (remap_pfn_range(vma, vma->vm_start,
-			virt_to_phys(dmap->raw_buf) >> PAGE_SHIFT,
-			vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
-		mutex_unlock(&soundcard_mutex);
+	if (remap_page_range(vma, vma->vm_start, virt_to_phys(dmap->raw_buf),
+		vma->vm_end - vma->vm_start,
+		vma->vm_page_prot)) {
+		unlock_kernel();
 		return -EAGAIN;
 	}
 
@@ -491,17 +480,17 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	memset(dmap->raw_buf,
 	       dmap->neutral_byte,
 	       dmap->bytes_in_use);
-	mutex_unlock(&soundcard_mutex);
+	unlock_kernel();
 	return 0;
 }
 
-const struct file_operations oss_sound_fops = {
+struct file_operations oss_sound_fops = {
 	.owner		= THIS_MODULE,
 	.llseek		= no_llseek,
 	.read		= sound_read,
 	.write		= sound_write,
 	.poll		= sound_poll,
-	.unlocked_ioctl	= sound_ioctl,
+	.ioctl		= sound_ioctl,
 	.mmap		= sound_mmap,
 	.open		= sound_open,
 	.release	= sound_release,
@@ -526,26 +515,42 @@ bad:
 }
 
 
+/* These device names follow the official Linux device list,
+ * Documentation/devices.txt.  Let us know if there are other
+ * common names we should support for compatibility.
+ * Only those devices not created by the generic code in sound_core.c are
+ * registered here.
+ */
+static const struct {
+	unsigned short minor;
+	char *name;
+	umode_t mode;
+	int *num;
+} dev_list[] = { /* list of minor devices */
+/* seems to be some confusion here -- this device is not in the device list */
+	{SND_DEV_DSP16,     "dspW",	 S_IWUGO | S_IRUSR | S_IRGRP,
+	 &num_audiodevs},
+	{SND_DEV_AUDIO,     "audio",	 S_IWUGO | S_IRUSR | S_IRGRP,
+	 &num_audiodevs},
+};
+
 static int dmabuf;
 static int dmabug;
 
-module_param(dmabuf, int, 0444);
-module_param(dmabug, int, 0444);
-
-/* additional minors for compatibility */
-struct oss_minor_dev {
-	unsigned short minor;
-	unsigned int enabled;
-} dev_list[] = {
-	{ SND_DEV_DSP16 },
-	{ SND_DEV_AUDIO },
-};
+MODULE_PARM(dmabuf, "i");
+MODULE_PARM(dmabug, "i");
 
 static int __init oss_init(void)
 {
 	int             err;
 	int i, j;
 	
+	/* drag in sound_syms.o */
+	{
+		extern char sound_syms_symbol;
+		sound_syms_symbol = 0;
+	}
+
 #ifdef CONFIG_PCI
 	if(dmabug)
 		isa_dma_bridge_buggy = dmabug;
@@ -560,16 +565,23 @@ static int __init oss_init(void)
 	/* Protecting the innocent */
 	sound_dmap_flag = (dmabuf > 0 ? 1 : 0);
 
-	for (i = 0; i < ARRAY_SIZE(dev_list); i++) {
-		j = 0;
-		do {
-			unsigned short minor = dev_list[i].minor + j * 0x10;
-			if (!register_sound_special(&oss_sound_fops, minor))
-				dev_list[i].enabled = (1 << j);
-		} while (++j < num_audiodevs);
+	for (i = 0; i < sizeof (dev_list) / sizeof *dev_list; i++) {
+		devfs_mk_cdev(MKDEV(SOUND_MAJOR, dev_list[i].minor),
+				S_IFCHR | dev_list[i].mode,
+				"sound/%s", dev_list[i].name);
+
+		if (!dev_list[i].num)
+			continue;
+
+		for (j = 1; j < *dev_list[i].num; j++) {
+			devfs_mk_cdev(MKDEV(SOUND_MAJOR,
+						dev_list[i].minor + (j*0x10)),
+					S_IFCHR | dev_list[i].mode,
+					"sound/%s%d", dev_list[i].name, j);
+		}
 	}
 
-	if (sound_nblocks >= MAX_MEM_BLOCKS - 1)
+	if (sound_nblocks >= 1024)
 		printk(KERN_ERR "Sound warning: Deallocation table was too small.\n");
 	
 	return 0;
@@ -579,12 +591,12 @@ static void __exit oss_cleanup(void)
 {
 	int i, j;
 
-	for (i = 0; i < ARRAY_SIZE(dev_list); i++) {
-		j = 0;
-		do {
-			if (dev_list[i].enabled & (1 << j))
-				unregister_sound_special(dev_list[i].minor);
-		} while (++j < num_audiodevs);
+	for (i = 0; i < sizeof (dev_list) / sizeof *dev_list; i++) {
+		devfs_remove("sound/%s", dev_list[i].name);
+		if (!dev_list[i].num)
+			continue;
+		for (j = 1; j < *dev_list[i].num; j++)
+			devfs_remove("sound/%s%d", dev_list[i].name, j);
 	}
 	
 	unregister_sound_special(1);
@@ -608,8 +620,6 @@ static void __exit oss_cleanup(void)
 module_init(oss_init);
 module_exit(oss_cleanup);
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("OSS Sound subsystem");
-MODULE_AUTHOR("Hannu Savolainen, et al.");
 
 
 int sound_alloc_dma(int chn, char *deviceID)
@@ -623,7 +633,6 @@ int sound_alloc_dma(int chn, char *deviceID)
 
 	return 0;
 }
-EXPORT_SYMBOL(sound_alloc_dma);
 
 int sound_open_dma(int chn, char *deviceID)
 {
@@ -639,7 +648,6 @@ int sound_open_dma(int chn, char *deviceID)
 	dma_alloc_map[chn] = DMA_MAP_BUSY;
 	return 0;
 }
-EXPORT_SYMBOL(sound_open_dma);
 
 void sound_free_dma(int chn)
 {
@@ -650,7 +658,6 @@ void sound_free_dma(int chn)
 	free_dma(chn);
 	dma_alloc_map[chn] = DMA_MAP_UNAVAIL;
 }
-EXPORT_SYMBOL(sound_free_dma);
 
 void sound_close_dma(int chn)
 {
@@ -660,7 +667,6 @@ void sound_close_dma(int chn)
 	}
 	dma_alloc_map[chn] = DMA_MAP_FREE;
 }
-EXPORT_SYMBOL(sound_close_dma);
 
 static void do_sequencer_timer(unsigned long dummy)
 {
@@ -668,7 +674,8 @@ static void do_sequencer_timer(unsigned long dummy)
 }
 
 
-static DEFINE_TIMER(seq_timer, do_sequencer_timer, 0, 0);
+static struct timer_list seq_timer =
+		TIMER_INITIALIZER(do_sequencer_timer, 0, 0);
 
 void request_sound_timer(int count)
 {
@@ -692,7 +699,7 @@ void request_sound_timer(int count)
 
 void sound_stop_timer(void)
 {
-	del_timer(&seq_timer);
+	del_timer(&seq_timer);;
 }
 
 void conf_printf(char *name, struct address_info *hw_config)
@@ -714,7 +721,6 @@ void conf_printf(char *name, struct address_info *hw_config)
 	printk("\n");
 #endif
 }
-EXPORT_SYMBOL(conf_printf);
 
 void conf_printf2(char *name, int base, int irq, int dma, int dma2)
 {
@@ -735,5 +741,3 @@ void conf_printf2(char *name, int base, int irq, int dma, int dma2)
 	printk("\n");
 #endif
 }
-EXPORT_SYMBOL(conf_printf2);
-

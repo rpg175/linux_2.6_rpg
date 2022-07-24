@@ -1,8 +1,9 @@
-/* 
+/* $Id: atp870u.c,v 1.0 1997/05/07 15:22:00 root Exp root $
+ *  linux/kernel/atp870u.c
+ *
  *  Copyright (C) 1997	Wu Ching Chen
  *  2.1.x update (C) 1998  Krzysztof G. Baranowski
- *  2.5.x update (C) 2002  Red Hat
- *  2.6.x update (C) 2004  Red Hat
+ *  2.5.x update (C) 2002  Red Hat <alan@redhat.com>
  *
  * Marcelo Tosatti <marcelo@conectiva.com.br> : SMP fixes
  *
@@ -13,11 +14,9 @@
  *		   fix disconnect bug  2000/12/21
  *		   support atp880 chip lvd u160 2001/05/15
  *		   fix prd table bug 2001/09/12 (7.1)
- *
- * atp885 support add by ACARD Hao Ping Lian 2005/01/05
  */
+
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -28,67 +27,95 @@
 #include <linux/spinlock.h>
 #include <linux/pci.h>
 #include <linux/blkdev.h>
-#include <linux/dma-mapping.h>
-#include <linux/slab.h>
+#include <linux/stat.h>
+
 #include <asm/system.h>
 #include <asm/io.h>
 
-#include <scsi/scsi.h>
-#include <scsi/scsi_cmnd.h>
-#include <scsi/scsi_device.h>
-#include <scsi/scsi_host.h>
-
+#include "scsi.h"
+#include "hosts.h"
 #include "atp870u.h"
 
-static struct scsi_host_template atp870u_template;
-static void send_s870(struct atp_unit *dev,unsigned char c);
-static void is885(struct atp_unit *dev, unsigned int wkport,unsigned char c);
-static void tscam_885(void);
+/*
+ *   static const char RCSid[] = "$Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/atp870u.c,v 1.0 1997/05/07 15:22:00 root Exp root $";
+ */
 
-static irqreturn_t atp870u_intr_handle(int irq, void *dev_id)
+static unsigned short int sync_idu;
+
+#define MAX_ATP		16
+
+struct atp_unit {
+	unsigned long ioport;
+	unsigned long irq;
+	unsigned long pciport;
+	unsigned char last_cmd;
+	unsigned char in_snd;
+	unsigned char in_int;
+	unsigned char quhdu;
+	unsigned char quendu;
+	unsigned char scam_on;
+	unsigned char global_map;
+	unsigned char chip_veru;
+	unsigned char host_idu;
+	int working;
+	unsigned short wide_idu;
+	unsigned short active_idu;
+	unsigned short ultra_map;
+	unsigned short async;
+	unsigned short deviceid;
+	unsigned char ata_cdbu[16];
+	unsigned char sp[16];
+	Scsi_Cmnd *querequ[qcnt];
+	struct atp_id {
+		unsigned char dirctu;
+		unsigned char devspu;
+		unsigned char devtypeu;
+		unsigned long prdaddru;
+		unsigned long tran_lenu;
+		unsigned long last_lenu;
+		unsigned char *prd_posu;
+		unsigned char *prd_tableu;
+		dma_addr_t prd_phys;
+		Scsi_Cmnd *curr_req;
+	} id[16];
+	struct Scsi_Host *host;
+	struct pci_dev *pdev;
+};
+
+static struct Scsi_Host *atp_host[MAX_ATP];
+
+static void send_s870(struct Scsi_Host *);
+
+static irqreturn_t atp870u_intr_handle(int irq, void *dev_id,
+					struct pt_regs *regs)
 {
 	unsigned long flags;
 	unsigned short int tmpcip, id;
-	unsigned char i, j, c, target_id, lun,cmdp;
+	unsigned char i, j, target_id, lun;
 	unsigned char *prd;
-	struct scsi_cmnd *workreq;
-	unsigned int workport, tmport, tmport1;
-	unsigned long adrcnt, k;
-#ifdef ED_DBGP
-	unsigned long l;
-#endif
+	Scsi_Cmnd *workrequ;
+	unsigned int workportu, tmport;
+	unsigned long adrcntu, k;
 	int errstus;
 	struct Scsi_Host *host = dev_id;
 	struct atp_unit *dev = (struct atp_unit *)&host->hostdata;
 
-	for (c = 0; c < 2; c++) {
-		tmport = dev->ioport[c] + 0x1f;
+	dev->in_int = 1;
+	workportu = dev->ioport;
+	tmport = workportu;
+
+	if (dev->working != 0) {
+		tmport += 0x1f;
 		j = inb(tmport);
-		if ((j & 0x80) != 0)
-		{			
-	   		goto ch_sel;
+		if ((j & 0x80) == 0) {
+			dev->in_int = 0;
+			return IRQ_NONE;
 		}
-		dev->in_int[c] = 0;
-	}
-	return IRQ_NONE;
-ch_sel:
-#ifdef ED_DBGP	
-	printk("atp870u_intr_handle enter\n");
-#endif	
-	dev->in_int[c] = 1;
-	cmdp = inb(dev->ioport[c] + 0x10);
-	workport = dev->ioport[c];
-	if (dev->working[c] != 0) {
-		if (dev->dev_id == ATP885_DEVID) {
-			tmport1 = workport + 0x16;
-			if ((inb(tmport1) & 0x80) == 0)
-				outb((inb(tmport1) | 0x80), tmport1);
-		}		
-		tmpcip = dev->pciport[c];
-		if ((inb(tmpcip) & 0x08) != 0)
-		{
+
+		tmpcip = dev->pciport;
+		if ((inb(tmpcip) & 0x08) != 0) {
 			tmpcip += 0x2;
-			for (k=0; k < 1000; k++) {
+			for (k = 0; k < 1000; k++) {
 				if ((inb(tmpcip) & 0x08) == 0) {
 					goto stop_dma;
 				}
@@ -98,24 +125,18 @@ ch_sel:
 			}
 		}
 stop_dma:
-		tmpcip = dev->pciport[c];
+		tmpcip = dev->pciport;
 		outb(0x00, tmpcip);
 		tmport -= 0x08;
-		
+
 		i = inb(tmport);
-		
-		if (dev->dev_id == ATP885_DEVID) {
-			tmpcip += 2;
-			outb(0x06, tmpcip);
-			tmpcip -= 2;
-		}
 
 		tmport -= 0x02;
 		target_id = inb(tmport);
 		tmport += 0x02;
 
 		/*
-		 *	Remap wide devices onto id numbers
+		 *      Remap wide devices onto id numbers
 		 */
 
 		if ((target_id & 0x40) != 0) {
@@ -125,449 +146,320 @@ stop_dma:
 		}
 
 		if ((j & 0x40) != 0) {
-		     if (dev->last_cmd[c] == 0xff) {
-			dev->last_cmd[c] = target_id;
-		     }
-		     dev->last_cmd[c] |= 0x40;
+			if (dev->last_cmd == 0xff) {
+				dev->last_cmd = target_id;
+			}
+			dev->last_cmd |= 0x40;
 		}
-		if (dev->dev_id == ATP885_DEVID) 
-			dev->r1f[c][target_id] |= j;
-#ifdef ED_DBGP
-		printk("atp870u_intr_handle status = %x\n",i);
-#endif	
-		if (i == 0x85) {
-			if ((dev->last_cmd[c] & 0xf0) != 0x40) {
-			   dev->last_cmd[c] = 0xff;
-			}
-			if (dev->dev_id == ATP885_DEVID) {
-				tmport -= 0x05;
-				adrcnt = 0;
-				((unsigned char *) &adrcnt)[2] = inb(tmport++);
-				((unsigned char *) &adrcnt)[1] = inb(tmport++);
-				((unsigned char *) &adrcnt)[0] = inb(tmport);
-				if (dev->id[c][target_id].last_len != adrcnt)
-				{
-			   		k = dev->id[c][target_id].last_len;
-			   		k -= adrcnt;
-			   		dev->id[c][target_id].tran_len = k;			   
-			   	dev->id[c][target_id].last_len = adrcnt;			   
-				}
-#ifdef ED_DBGP
-				printk("tmport = %x dev->id[c][target_id].last_len = %d dev->id[c][target_id].tran_len = %d\n",tmport,dev->id[c][target_id].last_len,dev->id[c][target_id].tran_len);
-#endif		
-			}
 
+		if (i == 0x85) {
+			if ((dev->last_cmd & 0xf0) != 0x40) {
+				dev->last_cmd = 0xff;
+			}
 			/*
 			 *      Flip wide
-			 */			
-			if (dev->wide_id[c] != 0) {
-				tmport = workport + 0x1b;
+			 */
+			if (dev->wide_idu != 0) {
+				tmport = workportu + 0x1b;
 				outb(0x01, tmport);
 				while ((inb(tmport) & 0x01) != 0x01) {
 					outb(0x01, tmport);
 				}
-			}		
-			/*
-			 *	Issue more commands
-			 */
-			spin_lock_irqsave(dev->host->host_lock, flags);			 			 
-			if (((dev->quhd[c] != dev->quend[c]) || (dev->last_cmd[c] != 0xff)) &&
-			    (dev->in_snd[c] == 0)) {
-#ifdef ED_DBGP
-				printk("Call sent_s870\n");
-#endif				
-				send_s870(dev,c);
 			}
-			spin_unlock_irqrestore(dev->host->host_lock, flags);
 			/*
-			 *	Done
+			 *      Issue more commands
 			 */
-			dev->in_int[c] = 0;
-#ifdef ED_DBGP
-				printk("Status 0x85 return\n");
-#endif				
-			goto handled;
+			if (((dev->quhdu != dev->quendu) || (dev->last_cmd != 0xff)) && (dev->in_snd == 0)) {
+				send_s870(host);
+			}
+			/*
+			 *      Done
+			 */
+			dev->in_int = 0;
+			goto out;
 		}
 
 		if (i == 0x40) {
-		     dev->last_cmd[c] |= 0x40;
-		     dev->in_int[c] = 0;
-		     goto handled;
+			dev->last_cmd |= 0x40;
+			dev->in_int = 0;
+			goto out;
 		}
 
 		if (i == 0x21) {
-			if ((dev->last_cmd[c] & 0xf0) != 0x40) {
-			   dev->last_cmd[c] = 0xff;
+			if ((dev->last_cmd & 0xf0) != 0x40) {
+				dev->last_cmd = 0xff;
 			}
 			tmport -= 0x05;
-			adrcnt = 0;
-			((unsigned char *) &adrcnt)[2] = inb(tmport++);
-			((unsigned char *) &adrcnt)[1] = inb(tmport++);
-			((unsigned char *) &adrcnt)[0] = inb(tmport);
-			k = dev->id[c][target_id].last_len;
-			k -= adrcnt;
-			dev->id[c][target_id].tran_len = k;
-			dev->id[c][target_id].last_len = adrcnt;
+			adrcntu = 0;
+			((unsigned char *) &adrcntu)[2] = inb(tmport++);
+			((unsigned char *) &adrcntu)[1] = inb(tmport++);
+			((unsigned char *) &adrcntu)[0] = inb(tmport);
+			k = dev->id[target_id].last_lenu;
+			k -= adrcntu;
+			dev->id[target_id].tran_lenu = k;
+			dev->id[target_id].last_lenu = adrcntu;
 			tmport -= 0x04;
 			outb(0x41, tmport);
 			tmport += 0x08;
 			outb(0x08, tmport);
-			dev->in_int[c] = 0;
-			goto handled;
-		}
-
-		if (dev->dev_id == ATP885_DEVID) {
-			if ((i == 0x4c) || (i == 0x4d) || (i == 0x8c) || (i == 0x8d)) {
-		   		if ((i == 0x4c) || (i == 0x8c)) 
-		      			i=0x48;
-		   		else 
-		      			i=0x49;
-		   	}	
-			
+			dev->in_int = 0;
+			goto out;
 		}
 		if ((i == 0x80) || (i == 0x8f)) {
-#ifdef ED_DBGP
-			printk(KERN_DEBUG "Device reselect\n");
-#endif			
 			lun = 0;
 			tmport -= 0x07;
-			if (cmdp == 0x44 || i==0x80) {
+			j = inb(tmport);
+			if (j == 0x44 || i == 0x80) {
 				tmport += 0x0d;
 				lun = inb(tmport) & 0x07;
 			} else {
-				if ((dev->last_cmd[c] & 0xf0) != 0x40) {
-				   dev->last_cmd[c] = 0xff;
+				if ((dev->last_cmd & 0xf0) != 0x40) {
+					dev->last_cmd = 0xff;
 				}
-				if (cmdp == 0x41) {
-#ifdef ED_DBGP
-					printk("cmdp = 0x41\n");
-#endif						
+				if (j == 0x41) {
 					tmport += 0x02;
-					adrcnt = 0;
-					((unsigned char *) &adrcnt)[2] = inb(tmport++);
-					((unsigned char *) &adrcnt)[1] = inb(tmport++);
-					((unsigned char *) &adrcnt)[0] = inb(tmport);
-					k = dev->id[c][target_id].last_len;
-					k -= adrcnt;
-					dev->id[c][target_id].tran_len = k;
-					dev->id[c][target_id].last_len = adrcnt;
+					adrcntu = 0;
+					((unsigned char *) &adrcntu)[2] = inb(tmport++);
+					((unsigned char *) &adrcntu)[1] = inb(tmport++);
+					((unsigned char *) &adrcntu)[0] = inb(tmport);
+					k = dev->id[target_id].last_lenu;
+					k -= adrcntu;
+					dev->id[target_id].tran_lenu = k;
+					dev->id[target_id].last_lenu = adrcntu;
 					tmport += 0x04;
 					outb(0x08, tmport);
-					dev->in_int[c] = 0;
-					goto handled;
+					dev->in_int = 0;
+					goto out;
 				} else {
-#ifdef ED_DBGP
-					printk("cmdp != 0x41\n");
-#endif						
 					outb(0x46, tmport);
-					dev->id[c][target_id].dirct = 0x00;
+					dev->id[target_id].dirctu = 0x00;
 					tmport += 0x02;
 					outb(0x00, tmport++);
 					outb(0x00, tmport++);
 					outb(0x00, tmport++);
 					tmport += 0x03;
 					outb(0x08, tmport);
-					dev->in_int[c] = 0;
-					goto handled;
+					dev->in_int = 0;
+					goto out;
 				}
 			}
-			if (dev->last_cmd[c] != 0xff) {
-			   dev->last_cmd[c] |= 0x40;
+			if (dev->last_cmd != 0xff) {
+				dev->last_cmd |= 0x40;
 			}
-			if (dev->dev_id == ATP885_DEVID) {
-				j = inb(dev->baseport + 0x29) & 0xfe;
-				outb(j, dev->baseport + 0x29);
-				tmport = workport + 0x16;
-			} else {
-				tmport = workport + 0x10;
-				outb(0x45, tmport);
-				tmport += 0x06;				
-			}
-			
+			tmport = workportu + 0x10;
+			outb(0x45, tmport);
+			tmport += 0x06;
 			target_id = inb(tmport);
 			/*
-			 *	Remap wide identifiers
+			 *      Remap wide identifiers
 			 */
 			if ((target_id & 0x10) != 0) {
 				target_id = (target_id & 0x07) | 0x08;
 			} else {
 				target_id &= 0x07;
 			}
-			if (dev->dev_id == ATP885_DEVID) {
-				tmport = workport + 0x10;
-				outb(0x45, tmport);
-			}
-			workreq = dev->id[c][target_id].curr_req;
-#ifdef ED_DBGP			
-			scmd_printk(KERN_DEBUG, workreq, "CDB");
-			for (l = 0; l < workreq->cmd_len; l++)
-				printk(KERN_DEBUG " %x",workreq->cmnd[l]);
-			printk("\n");
-#endif	
-			
-			tmport = workport + 0x0f;
+			workrequ = dev->id[target_id].curr_req;
+			tmport = workportu + 0x0f;
 			outb(lun, tmport);
 			tmport += 0x02;
-			outb(dev->id[c][target_id].devsp, tmport++);
-			adrcnt = dev->id[c][target_id].tran_len;
-			k = dev->id[c][target_id].last_len;
-
+			outb(dev->id[target_id].devspu, tmport++);
+			adrcntu = dev->id[target_id].tran_lenu;
+			k = dev->id[target_id].last_lenu;
 			outb(((unsigned char *) &k)[2], tmport++);
 			outb(((unsigned char *) &k)[1], tmport++);
 			outb(((unsigned char *) &k)[0], tmport++);
-#ifdef ED_DBGP			
-			printk("k %x, k[0] 0x%x k[1] 0x%x k[2] 0x%x\n", k, inb(tmport-1), inb(tmport-2), inb(tmport-3));
-#endif			
 			/* Remap wide */
 			j = target_id;
 			if (target_id > 7) {
 				j = (j & 0x07) | 0x40;
 			}
 			/* Add direction */
-			j |= dev->id[c][target_id].dirct;
+			j |= dev->id[target_id].dirctu;
 			outb(j, tmport++);
-			outb(0x80,tmport);
-			
-			/* enable 32 bit fifo transfer */	
-			if (dev->dev_id == ATP885_DEVID) {
-				tmpcip = dev->pciport[c] + 1;
-				i=inb(tmpcip) & 0xf3;
-				//j=workreq->cmnd[0];	    		    	
-				if ((workreq->cmnd[0] == 0x08) || (workreq->cmnd[0] == 0x28) || (workreq->cmnd[0] == 0x0a) || (workreq->cmnd[0] == 0x2a)) {
-				   i |= 0x0c;
+			outb(0x80, tmport);
+
+			/* enable 32 bit fifo transfer */
+			if (dev->deviceid != 0x8081) {
+				tmport = workportu + 0x3a;
+				if ((dev->ata_cdbu[0] == 0x08) || (dev->ata_cdbu[0] == 0x28) || (dev->ata_cdbu[0] == 0x0a) || (dev->ata_cdbu[0] == 0x2a)) {
+					outb((unsigned char) ((inb(tmport) & 0xf3) | 0x08), tmport);
+				} else {
+					outb((unsigned char) (inb(tmport) & 0xf3), tmport);
 				}
-				outb(i,tmpcip);		    		    		
-			} else if ((dev->dev_id == ATP880_DEVID1) ||
-	    		    	   (dev->dev_id == ATP880_DEVID2) ) {
-				tmport = workport - 0x05;
-				if ((workreq->cmnd[0] == 0x08) || (workreq->cmnd[0] == 0x28) || (workreq->cmnd[0] == 0x0a) || (workreq->cmnd[0] == 0x2a)) {
+			} else {
+				tmport = workportu - 0x05;
+				if ((dev->ata_cdbu[0] == 0x08) || (dev->ata_cdbu[0] == 0x28) || (dev->ata_cdbu[0] == 0x0a) || (dev->ata_cdbu[0] == 0x2a)) {
 					outb((unsigned char) ((inb(tmport) & 0x3f) | 0xc0), tmport);
 				} else {
 					outb((unsigned char) (inb(tmport) & 0x3f), tmport);
 				}
-			} else {				
-				tmport = workport + 0x3a;
-				if ((workreq->cmnd[0] == 0x08) || (workreq->cmnd[0] == 0x28) || (workreq->cmnd[0] == 0x0a) || (workreq->cmnd[0] == 0x2a)) {
-					outb((unsigned char) ((inb(tmport) & 0xf3) | 0x08), tmport);
-				} else {
-					outb((unsigned char) (inb(tmport) & 0xf3), tmport);
-				}														
-			}	
-			tmport = workport + 0x1b;
+			}
+
+			tmport = workportu + 0x1b;
 			j = 0;
 			id = 1;
 			id = id << target_id;
 			/*
-			 *	Is this a wide device
+			 *      Is this a wide device
 			 */
-			if ((id & dev->wide_id[c]) != 0) {
+			if ((id & dev->wide_idu) != 0) {
 				j |= 0x01;
 			}
 			outb(j, tmport);
 			while ((inb(tmport) & 0x01) != j) {
-				outb(j,tmport);
+				outb(j, tmport);
 			}
-			if (dev->id[c][target_id].last_len == 0) {
-				tmport = workport + 0x18;
+
+			if (dev->id[target_id].last_lenu == 0) {
+				tmport = workportu + 0x18;
 				outb(0x08, tmport);
-				dev->in_int[c] = 0;
-#ifdef ED_DBGP
-				printk("dev->id[c][target_id].last_len = 0\n");
-#endif					
-				goto handled;
+				dev->in_int = 0;
+				goto out;
 			}
-#ifdef ED_DBGP
-			printk("target_id = %d adrcnt = %d\n",target_id,adrcnt);
-#endif			
-			prd = dev->id[c][target_id].prd_pos;
-			while (adrcnt != 0) {
-				id = ((unsigned short int *)prd)[2];
+			prd = dev->id[target_id].prd_posu;
+			while (adrcntu != 0) {
+				id = ((unsigned short int *) (prd))[2];
 				if (id == 0) {
 					k = 0x10000;
 				} else {
 					k = id;
 				}
-				if (k > adrcnt) {
-					((unsigned short int *)prd)[2] = (unsigned short int)
-					    (k - adrcnt);
-					((unsigned long *)prd)[0] += adrcnt;
-					adrcnt = 0;
-					dev->id[c][target_id].prd_pos = prd;
+				if (k > adrcntu) {
+					((unsigned short int *) (prd))[2] = (unsigned short int)
+					    (k - adrcntu);
+					((unsigned long *) (prd))[0] += adrcntu;
+					adrcntu = 0;
+					dev->id[target_id].prd_posu = prd;
 				} else {
-					adrcnt -= k;
-					dev->id[c][target_id].prdaddr += 0x08;
+					adrcntu -= k;
+					dev->id[target_id].prdaddru += 0x08;
 					prd += 0x08;
-					if (adrcnt == 0) {
-						dev->id[c][target_id].prd_pos = prd;
+					if (adrcntu == 0) {
+						dev->id[target_id].prd_posu = prd;
 					}
-				}				
+				}
 			}
-			tmpcip = dev->pciport[c] + 0x04;
-			outl(dev->id[c][target_id].prdaddr, tmpcip);
-#ifdef ED_DBGP
-			printk("dev->id[%d][%d].prdaddr 0x%8x\n", c, target_id, dev->id[c][target_id].prdaddr);
-#endif
-			if (dev->dev_id == ATP885_DEVID) {
-				tmpcip -= 0x04;
-			} else {
-				tmpcip -= 0x02;
-				outb(0x06, tmpcip);
-				outb(0x00, tmpcip);
-				tmpcip -= 0x02;
-			}
-			tmport = workport + 0x18;
+			tmpcip = dev->pciport + 0x04;
+			outl(dev->id[target_id].prdaddru, tmpcip);
+			tmpcip -= 0x02;
+			outb(0x06, tmpcip);
+			outb(0x00, tmpcip);
+			tmpcip -= 0x02;
+			tmport = workportu + 0x18;
 			/*
-			 *	Check transfer direction
+			 *      Check transfer direction
 			 */
-			if (dev->id[c][target_id].dirct != 0) {
+			if (dev->id[target_id].dirctu != 0) {
 				outb(0x08, tmport);
 				outb(0x01, tmpcip);
-				dev->in_int[c] = 0;
-#ifdef ED_DBGP
-				printk("status 0x80 return dirct != 0\n");
-#endif				
-				goto handled;
+				dev->in_int = 0;
+				goto out;
 			}
 			outb(0x08, tmport);
 			outb(0x09, tmpcip);
-			dev->in_int[c] = 0;
-#ifdef ED_DBGP
-			printk("status 0x80 return dirct = 0\n");
-#endif			
-			goto handled;
+			dev->in_int = 0;
+			goto out;
 		}
 
 		/*
-		 *	Current scsi request on this target
+		 *      Current scsi request on this target
 		 */
 
-		workreq = dev->id[c][target_id].curr_req;
+		workrequ = dev->id[target_id].curr_req;
 
 		if (i == 0x42) {
-			if ((dev->last_cmd[c] & 0xf0) != 0x40)
-			{
-			   dev->last_cmd[c] = 0xff;
+			if ((dev->last_cmd & 0xf0) != 0x40) {
+				dev->last_cmd = 0xff;
 			}
 			errstus = 0x02;
-			workreq->result = errstus;
+			workrequ->result = errstus;
 			goto go_42;
 		}
 		if (i == 0x16) {
-			if ((dev->last_cmd[c] & 0xf0) != 0x40) {
-			   dev->last_cmd[c] = 0xff;
+			if ((dev->last_cmd & 0xf0) != 0x40) {
+				dev->last_cmd = 0xff;
 			}
 			errstus = 0;
 			tmport -= 0x08;
 			errstus = inb(tmport);
-			if (((dev->r1f[c][target_id] & 0x10) != 0)&&(dev->dev_id==ATP885_DEVID)) {
-			   printk(KERN_WARNING "AEC67162 CRC ERROR !\n");
-			   errstus = 0x02;
-			}
-			workreq->result = errstus;
+			workrequ->result = errstus;
 go_42:
-			if (dev->dev_id == ATP885_DEVID) {		
-				j = inb(dev->baseport + 0x29) | 0x01;
-				outb(j, dev->baseport + 0x29);
-			}
 			/*
-			 *	Complete the command
+			 *      Complete the command
 			 */
-			scsi_dma_unmap(workreq);
-
+			 
+			if(workrequ->use_sg)
+				pci_unmap_sg(dev->pdev, (struct scatterlist *)workrequ->buffer, workrequ->use_sg, scsi_to_pci_dma_dir(workrequ->sc_data_direction));
+			else if(workrequ->request_bufflen && workrequ->sc_data_direction != SCSI_DATA_NONE)
+				pci_unmap_single(dev->pdev, workrequ->SCp.dma_handle, workrequ->request_bufflen, scsi_to_pci_dma_dir(workrequ->sc_data_direction));
 			spin_lock_irqsave(dev->host->host_lock, flags);
-			(*workreq->scsi_done) (workreq);
-#ifdef ED_DBGP
-			   printk("workreq->scsi_done\n");
-#endif	
+			(*workrequ->scsi_done) (workrequ);
+
 			/*
-			 *	Clear it off the queue
+			 *      Clear it off the queue
 			 */
-			dev->id[c][target_id].curr_req = NULL;
-			dev->working[c]--;
+			dev->id[target_id].curr_req = 0;
+			dev->working--;
 			spin_unlock_irqrestore(dev->host->host_lock, flags);
 			/*
 			 *      Take it back wide
 			 */
-			if (dev->wide_id[c] != 0) {
-				tmport = workport + 0x1b;
+			if (dev->wide_idu != 0) {
+				tmport = workportu + 0x1b;
 				outb(0x01, tmport);
 				while ((inb(tmport) & 0x01) != 0x01) {
 					outb(0x01, tmport);
-				}       
-			} 
-			/*
-			 *	If there is stuff to send and nothing going then send it
-			 */
-			spin_lock_irqsave(dev->host->host_lock, flags);
-			if (((dev->last_cmd[c] != 0xff) || (dev->quhd[c] != dev->quend[c])) &&
-			    (dev->in_snd[c] == 0)) {
-#ifdef ED_DBGP
-			   printk("Call sent_s870(scsi_done)\n");
-#endif				   
-			   send_s870(dev,c);
+				}
 			}
-			spin_unlock_irqrestore(dev->host->host_lock, flags);
-			dev->in_int[c] = 0;
-			goto handled;
+			/*
+			 *      If there is stuff to send and nothing going then send it
+			 */
+			if (((dev->last_cmd != 0xff) || (dev->quhdu != dev->quendu)) && (dev->in_snd == 0)) {
+				send_s870(host);
+			}
+			dev->in_int = 0;
+			goto out;
 		}
-		if ((dev->last_cmd[c] & 0xf0) != 0x40) {
-		   dev->last_cmd[c] = 0xff;
+		if ((dev->last_cmd & 0xf0) != 0x40) {
+			dev->last_cmd = 0xff;
 		}
 		if (i == 0x4f) {
 			i = 0x89;
 		}
 		i &= 0x0f;
 		if (i == 0x09) {
-			tmpcip += 4;
-			outl(dev->id[c][target_id].prdaddr, tmpcip);
+			tmpcip = tmpcip + 4;
+			outl(dev->id[target_id].prdaddru, tmpcip);
 			tmpcip = tmpcip - 2;
 			outb(0x06, tmpcip);
 			outb(0x00, tmpcip);
 			tmpcip = tmpcip - 2;
-			tmport = workport + 0x10;
+			tmport = workportu + 0x10;
 			outb(0x41, tmport);
-			if (dev->dev_id == ATP885_DEVID) {
-				tmport += 2;
-				k = dev->id[c][target_id].last_len;
-				outb((unsigned char) (((unsigned char *) (&k))[2]), tmport++);
-				outb((unsigned char) (((unsigned char *) (&k))[1]), tmport++);
-				outb((unsigned char) (((unsigned char *) (&k))[0]), tmport);
-				dev->id[c][target_id].dirct = 0x00;
-				tmport += 0x04;
-			} else {
-				dev->id[c][target_id].dirct = 0x00;
-				tmport += 0x08;				
-			}
+			dev->id[target_id].dirctu = 0x00;
+			tmport += 0x08;
 			outb(0x08, tmport);
 			outb(0x09, tmpcip);
-			dev->in_int[c] = 0;
-			goto handled;
+			dev->in_int = 0;
+			goto out;
 		}
 		if (i == 0x08) {
-			tmpcip += 4;
-			outl(dev->id[c][target_id].prdaddr, tmpcip);
+			tmpcip = tmpcip + 4;
+			outl(dev->id[target_id].prdaddru, tmpcip);
 			tmpcip = tmpcip - 2;
 			outb(0x06, tmpcip);
 			outb(0x00, tmpcip);
 			tmpcip = tmpcip - 2;
-			tmport = workport + 0x10;
+			tmport = workportu + 0x10;
 			outb(0x41, tmport);
-			if (dev->dev_id == ATP885_DEVID) {		
-				tmport += 2;
-				k = dev->id[c][target_id].last_len;
-				outb((unsigned char) (((unsigned char *) (&k))[2]), tmport++);
-				outb((unsigned char) (((unsigned char *) (&k))[1]), tmport++);
-				outb((unsigned char) (((unsigned char *) (&k))[0]), tmport++);
-			} else {
-				tmport += 5;
-			}
+			tmport += 0x05;
 			outb((unsigned char) (inb(tmport) | 0x20), tmport);
-			dev->id[c][target_id].dirct = 0x20;
+			dev->id[target_id].dirctu = 0x20;
 			tmport += 0x03;
 			outb(0x08, tmport);
 			outb(0x01, tmpcip);
-			dev->in_int[c] = 0;
-			goto handled;
+			dev->in_int = 0;
+			goto out;
 		}
 		tmport -= 0x07;
 		if (i == 0x0a) {
@@ -575,422 +467,364 @@ go_42:
 		} else {
 			outb(0x46, tmport);
 		}
-		dev->id[c][target_id].dirct = 0x00;
+		dev->id[target_id].dirctu = 0x00;
 		tmport += 0x02;
 		outb(0x00, tmport++);
 		outb(0x00, tmport++);
 		outb(0x00, tmport++);
 		tmport += 0x03;
 		outb(0x08, tmport);
-		dev->in_int[c] = 0;
-		goto handled;
+		dev->in_int = 0;
+		goto out;
 	} else {
-//		tmport = workport + 0x17;
-//		inb(tmport);
-//		dev->working[c] = 0;
-		dev->in_int[c] = 0;
-		goto handled;
+//              tmport = workportu + 0x17;
+//              inb(tmport);
+//              dev->working = 0;
+		dev->in_int = 0;
 	}
-	
-handled:
-#ifdef ED_DBGP
-	printk("atp870u_intr_handle exit\n");
-#endif			
+out:
 	return IRQ_HANDLED;
 }
-/**
- *	atp870u_queuecommand	-	Queue SCSI command
- *	@req_p: request block
- *	@done: completion function
- *
- *	Queue a command to the ATP queue. Called with the host lock held.
- */
-static int atp870u_queuecommand_lck(struct scsi_cmnd *req_p,
-			 void (*done) (struct scsi_cmnd *))
-{
-	unsigned char c;
-	unsigned int tmport,m;	
-	struct atp_unit *dev;
-	struct Scsi_Host *host;
 
-	c = scmd_channel(req_p);
-	req_p->sense_buffer[0]=0;
-	scsi_set_resid(req_p, 0);
-	if (scmd_channel(req_p) > 1) {
+static int atp870u_queuecommand(Scsi_Cmnd * req_p, void (*done) (Scsi_Cmnd *))
+{
+	unsigned long flags;
+	unsigned short int m;
+	unsigned int tmport;
+	struct Scsi_Host *host;
+	struct atp_unit *dev;
+
+	if (req_p->device->channel != 0) {
 		req_p->result = 0x00040000;
 		done(req_p);
-#ifdef ED_DBGP		
-		printk("atp870u_queuecommand : req_p->device->channel > 1\n");	
-#endif			
 		return 0;
-	}
+	};
 
 	host = req_p->device->host;
 	dev = (struct atp_unit *)&host->hostdata;
-		
-
-		
+	
 	m = 1;
-	m = m << scmd_id(req_p);
+	m = m << req_p->device->id;
 
 	/*
 	 *      Fake a timeout for missing targets
 	 */
 
-	if ((m & dev->active_id[c]) == 0) {
+	if ((m & dev->active_idu) == 0) {
 		req_p->result = 0x00040000;
 		done(req_p);
 		return 0;
 	}
-
 	if (done) {
 		req_p->scsi_done = done;
 	} else {
-#ifdef ED_DBGP		
-		printk( "atp870u_queuecommand: done can't be NULL\n");
-#endif		
+		printk(KERN_WARNING "atp870u_queuecommand: done can't be NULL\n");
 		req_p->result = 0;
 		done(req_p);
 		return 0;
 	}
-	
 	/*
-	 *	Count new command
+	 *      Count new command
 	 */
-	dev->quend[c]++;
-	if (dev->quend[c] >= qcnt) {
-		dev->quend[c] = 0;
+
+	spin_lock_irqsave(host->host_lock, flags);
+	dev->quendu++;
+	if (dev->quendu >= qcnt) {
+		dev->quendu = 0;
 	}
-	
 	/*
-	 *	Check queue state
+	 *      Check queue state
 	 */
-	if (dev->quhd[c] == dev->quend[c]) {
-		if (dev->quend[c] == 0) {
-			dev->quend[c] = qcnt;
+	if (dev->quhdu == dev->quendu) {
+		if (dev->quendu == 0) {
+			dev->quendu = qcnt;
 		}
-#ifdef ED_DBGP		
-		printk("atp870u_queuecommand : dev->quhd[c] == dev->quend[c]\n");
-#endif		
-		dev->quend[c]--;
+		dev->quendu--;
 		req_p->result = 0x00020000;
-		done(req_p);	
+		spin_unlock_irqrestore(host->host_lock, flags);
+		done(req_p);
 		return 0;
 	}
-	dev->quereq[c][dev->quend[c]] = req_p;
-	tmport = dev->ioport[c] + 0x1c;
-#ifdef ED_DBGP	
-	printk("dev->ioport[c] = %x inb(tmport) = %x dev->in_int[%d] = %d dev->in_snd[%d] = %d\n",dev->ioport[c],inb(tmport),c,dev->in_int[c],c,dev->in_snd[c]);
-#endif
-	if ((inb(tmport) == 0) && (dev->in_int[c] == 0) && (dev->in_snd[c] == 0)) {
-#ifdef ED_DBGP
-		printk("Call sent_s870(atp870u_queuecommand)\n");
-#endif		
-		send_s870(dev,c);
+	dev->querequ[dev->quendu] = req_p;
+	tmport = dev->ioport + 0x1c;
+	spin_unlock_irqrestore(host->host_lock, flags);
+	if ((inb(tmport) == 0) && (dev->in_int == 0) && (dev->in_snd == 0)) {
+		send_s870(host);
 	}
-#ifdef ED_DBGP	
-	printk("atp870u_queuecommand : exit\n");
-#endif	
 	return 0;
 }
 
-static DEF_SCSI_QCMD(atp870u_queuecommand)
-
-/**
- *	send_s870	-	send a command to the controller
- *	@host: host
- *
- *	On entry there is work queued to be done. We move some of that work to the
- *	controller itself. 
- *
- *	Caller holds the host lock.
- */
-static void send_s870(struct atp_unit *dev,unsigned char c)
+static void send_s870(struct Scsi_Host *host)
 {
 	unsigned int tmport;
-	struct scsi_cmnd *workreq;
-	unsigned int i;//,k;
-	unsigned char  j, target_id;
+	Scsi_Cmnd *workrequ;
+	unsigned long flags;
+	unsigned int i;
+	unsigned char j, target_id;
 	unsigned char *prd;
 	unsigned short int tmpcip, w;
-	unsigned long l, bttl = 0;
-	unsigned int workport;
-	unsigned long  sg_count;
+	unsigned long l;
+	dma_addr_t bttl;
+	unsigned int workportu;
+	struct scatterlist *sgpnt;
+	struct atp_unit *dev = (struct atp_unit *)&host->hostdata;
+	int sg_count;
 
-	if (dev->in_snd[c] != 0) {
-#ifdef ED_DBGP		
-		printk("cmnd in_snd\n");
-#endif
+	spin_lock_irqsave(host->host_lock, flags);
+	
+	if (dev->in_snd != 0) {
+		spin_unlock_irqrestore(host->host_lock, flags);
 		return;
 	}
-#ifdef ED_DBGP
-	printk("Sent_s870 enter\n");
-#endif
-	dev->in_snd[c] = 1;
-	if ((dev->last_cmd[c] != 0xff) && ((dev->last_cmd[c] & 0x40) != 0)) {
-		dev->last_cmd[c] &= 0x0f;
-		workreq = dev->id[c][dev->last_cmd[c]].curr_req;
-		if (workreq != NULL) {	/* check NULL pointer */
-		   goto cmd_subp;
+	dev->in_snd = 1;
+	if ((dev->last_cmd != 0xff) && ((dev->last_cmd & 0x40) != 0)) {
+		dev->last_cmd &= 0x0f;
+		workrequ = dev->id[dev->last_cmd].curr_req;
+		if (workrequ != NULL) {	/* check NULL pointer */
+			goto cmd_subp;
 		}
-		dev->last_cmd[c] = 0xff;	
-		if (dev->quhd[c] == dev->quend[c]) {
-		   	dev->in_snd[c] = 0;
-		   	return ;
+		dev->last_cmd = 0xff;
+		if (dev->quhdu == dev->quendu) {
+			dev->in_snd = 0;
+			spin_unlock_irqrestore(dev->host->host_lock, flags);
+			return;
 		}
 	}
-	if ((dev->last_cmd[c] != 0xff) && (dev->working[c] != 0)) {
-	     	dev->in_snd[c] = 0;
-	     	return ;
+	if ((dev->last_cmd != 0xff) && (dev->working != 0)) {
+		dev->in_snd = 0;
+		spin_unlock_irqrestore(dev->host->host_lock, flags);
+		return;
 	}
-	dev->working[c]++;
-	j = dev->quhd[c];
-	dev->quhd[c]++;
-	if (dev->quhd[c] >= qcnt) {
-		dev->quhd[c] = 0;
+	dev->working++;
+	j = dev->quhdu;
+	dev->quhdu++;
+	if (dev->quhdu >= qcnt) {
+		dev->quhdu = 0;
 	}
-	workreq = dev->quereq[c][dev->quhd[c]];
-	if (dev->id[c][scmd_id(workreq)].curr_req == NULL) {
-		dev->id[c][scmd_id(workreq)].curr_req = workreq;
-		dev->last_cmd[c] = scmd_id(workreq);
+	workrequ = dev->querequ[dev->quhdu];
+	if (dev->id[workrequ->device->id].curr_req == 0) {
+		dev->id[workrequ->device->id].curr_req = workrequ;
+		dev->last_cmd = workrequ->device->id;
 		goto cmd_subp;
-	}	
-	dev->quhd[c] = j;
-	dev->working[c]--;
-	dev->in_snd[c] = 0;
+	}
+	dev->quhdu = j;
+	dev->working--;
+	dev->in_snd = 0;
+	spin_unlock_irqrestore(host->host_lock, flags);
 	return;
 cmd_subp:
-	workport = dev->ioport[c];
-	tmport = workport + 0x1f;
+	workportu = dev->ioport;
+	tmport = workportu + 0x1f;
 	if ((inb(tmport) & 0xb0) != 0) {
 		goto abortsnd;
 	}
-	tmport = workport + 0x1c;
+	tmport = workportu + 0x1c;
 	if (inb(tmport) == 0) {
 		goto oktosend;
 	}
 abortsnd:
-#ifdef ED_DBGP
-	printk("Abort to Send\n");
-#endif
-	dev->last_cmd[c] |= 0x40;
-	dev->in_snd[c] = 0;
+	dev->last_cmd |= 0x40;
+	dev->in_snd = 0;
+	spin_unlock_irqrestore(dev->host->host_lock, flags);
 	return;
 oktosend:
-#ifdef ED_DBGP
-	printk("OK to Send\n");
-	scmd_printk(KERN_DEBUG, workreq, "CDB");
-	for(i=0;i<workreq->cmd_len;i++) {
-		printk(" %x",workreq->cmnd[i]);
+	memcpy(&dev->ata_cdbu[0], &workrequ->cmnd[0], workrequ->cmd_len);
+	if (dev->ata_cdbu[0] == READ_CAPACITY) {
+		if (workrequ->request_bufflen > 8) {
+			workrequ->request_bufflen = 0x08;
+		}
 	}
-	printk("\n");
-#endif	
-	l = scsi_bufflen(workreq);
-
-	if (dev->dev_id == ATP885_DEVID) {
-		j = inb(dev->baseport + 0x29) & 0xfe;
-		outb(j, dev->baseport + 0x29);
-		dev->r1f[c][scmd_id(workreq)] = 0;
-	}
-	
-	if (workreq->cmnd[0] == READ_CAPACITY) {
-		if (l > 8)
-			l = 8;
-	}
-	if (workreq->cmnd[0] == 0x00) {
-		l = 0;
+	if (dev->ata_cdbu[0] == 0x00) {
+		workrequ->request_bufflen = 0;
 	}
 
-	tmport = workport + 0x1b;
+	tmport = workportu + 0x1b;
 	j = 0;
-	target_id = scmd_id(workreq);
+	target_id = workrequ->device->id;
 
 	/*
-	 *	Wide ?
+	 *      Wide ?
 	 */
 	w = 1;
 	w = w << target_id;
-	if ((w & dev->wide_id[c]) != 0) {
+	if ((w & dev->wide_idu) != 0) {
 		j |= 0x01;
 	}
 	outb(j, tmport);
 	while ((inb(tmport) & 0x01) != j) {
-		outb(j,tmport);
-#ifdef ED_DBGP
-		printk("send_s870 while loop 1\n");
-#endif
+		outb(j, tmport);
 	}
+
 	/*
-	 *	Write the command
+	 *      Write the command
 	 */
 
-	tmport = workport;
-	outb(workreq->cmd_len, tmport++);
+	tmport = workportu;
+	outb(workrequ->cmd_len, tmport++);
 	outb(0x2c, tmport++);
-	if (dev->dev_id == ATP885_DEVID) {
-		outb(0x7f, tmport++);
-	} else {
-		outb(0xcf, tmport++); 	
-	}	
-	for (i = 0; i < workreq->cmd_len; i++) {
-		outb(workreq->cmnd[i], tmport++);
+	outb(0xcf, tmport++);
+	for (i = 0; i < workrequ->cmd_len; i++) {
+		outb(dev->ata_cdbu[i], tmport++);
 	}
-	tmport = workport + 0x0f;
-	outb(workreq->device->lun, tmport);
+	tmport = workportu + 0x0f;
+	outb(workrequ->device->lun, tmport);
 	tmport += 0x02;
 	/*
-	 *	Write the target
+	 *      Write the target
 	 */
-	outb(dev->id[c][target_id].devsp, tmport++);	 
-#ifdef ED_DBGP	
-	printk("dev->id[%d][%d].devsp = %2x\n",c,target_id,dev->id[c][target_id].devsp);
-#endif
+	outb(dev->id[target_id].devspu, tmport++);
 
-	sg_count = scsi_dma_map(workreq);
 	/*
-	 *	Write transfer size
+	 *      Figure out the transfer size
+	 */
+	if (workrequ->use_sg) {
+		l = 0;
+		sgpnt = (struct scatterlist *) workrequ->request_buffer;
+		sg_count = pci_map_sg(dev->pdev, sgpnt, workrequ->use_sg, scsi_to_pci_dma_dir(workrequ->sc_data_direction));
+		for (i = 0; i < workrequ->use_sg; i++) {
+			if (sgpnt[i].length == 0 || workrequ->use_sg > ATP870U_SCATTER) {
+				panic("Foooooooood fight!");
+			}
+			l += sgpnt[i].length;
+		}
+	} else if(workrequ->request_bufflen && workrequ->sc_data_direction != PCI_DMA_NONE) {
+		workrequ->SCp.dma_handle = pci_map_single(dev->pdev, workrequ->request_buffer, workrequ->request_bufflen, scsi_to_pci_dma_dir(workrequ->sc_data_direction));
+		l = workrequ->request_bufflen;
+	}
+	else l = 0;
+	/*
+	 *      Write transfer size
 	 */
 	outb((unsigned char) (((unsigned char *) (&l))[2]), tmport++);
 	outb((unsigned char) (((unsigned char *) (&l))[1]), tmport++);
 	outb((unsigned char) (((unsigned char *) (&l))[0]), tmport++);
-	j = target_id;	
-	dev->id[c][j].last_len = l;
-	dev->id[c][j].tran_len = 0;
-#ifdef ED_DBGP	
-	printk("dev->id[%2d][%2d].last_len = %d\n",c,j,dev->id[c][j].last_len);
-#endif	
+	j = target_id;
+	dev->id[j].last_lenu = l;
+	dev->id[j].tran_lenu = 0;
 	/*
-	 *	Flip the wide bits
+	 *      Flip the wide bits
 	 */
 	if ((j & 0x08) != 0) {
 		j = (j & 0x07) | 0x40;
 	}
 	/*
-	 *	Check transfer direction
+	 *      Check transfer direction
 	 */
-	if (workreq->sc_data_direction == DMA_TO_DEVICE) {
+	if (workrequ->sc_data_direction == SCSI_DATA_WRITE) {
 		outb((unsigned char) (j | 0x20), tmport++);
 	} else {
 		outb(j, tmport++);
 	}
 	outb((unsigned char) (inb(tmport) | 0x80), tmport);
 	outb(0x80, tmport);
-	tmport = workport + 0x1c;
-	dev->id[c][target_id].dirct = 0;
+	tmport = workportu + 0x1c;
+	dev->id[target_id].dirctu = 0;
 	if (l == 0) {
 		if (inb(tmport) == 0) {
-			tmport = workport + 0x18;
-#ifdef ED_DBGP
-			printk("change SCSI_CMD_REG 0x08\n");	
-#endif				
+			tmport = workportu + 0x18;
 			outb(0x08, tmport);
 		} else {
-			dev->last_cmd[c] |= 0x40;
+			dev->last_cmd |= 0x40;
 		}
-		dev->in_snd[c] = 0;
+		dev->in_snd = 0;
+		spin_unlock_irqrestore(host->host_lock, flags);
 		return;
 	}
-	tmpcip = dev->pciport[c];
-	prd = dev->id[c][target_id].prd_table;
-	dev->id[c][target_id].prd_pos = prd;
+	tmpcip = dev->pciport;
+	prd = dev->id[target_id].prd_tableu;
+	dev->id[target_id].prd_posu = prd;
 
 	/*
-	 *	Now write the request list. Either as scatter/gather or as
-	 *	a linear chain.
+	 *      Now write the request list. Either as scatter/gather or as
+	 *      a linear chain.
 	 */
 
-	if (l) {
-		struct scatterlist *sgpnt;
+	if (workrequ->use_sg) {
+		sgpnt = (struct scatterlist *) workrequ->request_buffer;
 		i = 0;
-		scsi_for_each_sg(workreq, sgpnt, sg_count, j) {
-			bttl = sg_dma_address(sgpnt);
-			l=sg_dma_len(sgpnt);
-#ifdef ED_DBGP		
-			printk("1. bttl %x, l %x\n",bttl, l);
-#endif			
+		for (j = 0; j < workrequ->use_sg; j++) {
+			bttl = sg_dma_address(&sgpnt[j]);
+			l = sg_dma_len(&sgpnt[j]);
 			while (l > 0x10000) {
-				(((u16 *) (prd))[i + 3]) = 0x0000;
-				(((u16 *) (prd))[i + 2]) = 0x0000;
-				(((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
+				(u16) (((u16 *) (prd))[i + 3]) = 0x0000;
+				(u16) (((u16 *) (prd))[i + 2]) = 0x0000;
+				(u32) (((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
 				l -= 0x10000;
 				bttl += 0x10000;
 				i += 0x04;
 			}
-			(((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
-			(((u16 *) (prd))[i + 2]) = cpu_to_le16(l);
-			(((u16 *) (prd))[i + 3]) = 0;
-			i += 0x04;			
+			(u32) (((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
+			(u16) (((u16 *) (prd))[i + 2]) = cpu_to_le16(l);
+			(u16) (((u16 *) (prd))[i + 3]) = 0;
+			i += 0x04;
 		}
-		(((u16 *) (prd))[i - 1]) = cpu_to_le16(0x8000);	
-#ifdef ED_DBGP		
-		printk("prd %4x %4x %4x %4x\n",(((unsigned short int *)prd)[0]),(((unsigned short int *)prd)[1]),(((unsigned short int *)prd)[2]),(((unsigned short int *)prd)[3]));
-		printk("2. bttl %x, l %x\n",bttl, l);
-#endif			
+		(u16) (((u16 *) (prd))[i - 1]) = cpu_to_le16(0x8000);
+	} else {
+		/*
+		 *      For a linear request write a chain of blocks
+		 */
+		bttl = workrequ->SCp.dma_handle;
+		l = workrequ->request_bufflen;
+		i = 0;
+		while (l > 0x10000) {
+			(u16) (((u16 *) (prd))[i + 3]) = 0x0000;
+			(u16) (((u16 *) (prd))[i + 2]) = 0x0000;
+			(u32) (((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
+			l -= 0x10000;
+			bttl += 0x10000;
+			i += 0x04;
+		}
+		(u16) (((u16 *) (prd))[i + 3]) = cpu_to_le16(0x8000);
+		(u16) (((u16 *) (prd))[i + 2]) = cpu_to_le16(l);
+		(u32) (((u32 *) (prd))[i >> 1]) = cpu_to_le32(bttl);
 	}
-	tmpcip += 4;
-#ifdef ED_DBGP		
-	printk("send_s870: prdaddr_2 0x%8x tmpcip %x target_id %d\n", dev->id[c][target_id].prdaddr,tmpcip,target_id);
-#endif	
-	dev->id[c][target_id].prdaddr = dev->id[c][target_id].prd_bus;
-	outl(dev->id[c][target_id].prdaddr, tmpcip);
+	tmpcip = tmpcip + 4;
+	dev->id[target_id].prdaddru = dev->id[target_id].prd_phys;
+	outl(dev->id[target_id].prd_phys, tmpcip);
 	tmpcip = tmpcip - 2;
 	outb(0x06, tmpcip);
 	outb(0x00, tmpcip);
-	if (dev->dev_id == ATP885_DEVID) {
-		tmpcip--;
-		j=inb(tmpcip) & 0xf3;
-		if ((workreq->cmnd[0] == 0x08) || (workreq->cmnd[0] == 0x28) ||
-	    	(workreq->cmnd[0] == 0x0a) || (workreq->cmnd[0] == 0x2a)) {
-	   		j |= 0x0c;
-		}
-		outb(j,tmpcip);
-		tmpcip--;	    	
-	} else if ((dev->dev_id == ATP880_DEVID1) ||
-	    	   (dev->dev_id == ATP880_DEVID2)) {
-		tmpcip =tmpcip -2;	
-		tmport = workport - 0x05;
-		if ((workreq->cmnd[0] == 0x08) || (workreq->cmnd[0] == 0x28) || (workreq->cmnd[0] == 0x0a) || (workreq->cmnd[0] == 0x2a)) {
-			outb((unsigned char) ((inb(tmport) & 0x3f) | 0xc0), tmport);
-		} else {
-			outb((unsigned char) (inb(tmport) & 0x3f), tmport);
-		}		
-	} else {		
-		tmpcip =tmpcip -2;
-		tmport = workport + 0x3a;
-		if ((workreq->cmnd[0] == 0x08) || (workreq->cmnd[0] == 0x28) || (workreq->cmnd[0] == 0x0a) || (workreq->cmnd[0] == 0x2a)) {
+	tmpcip = tmpcip - 2;
+
+	if (dev->deviceid != 0x8081) {
+		tmport = workportu + 0x3a;
+		if ((dev->ata_cdbu[0] == 0x08) || (dev->ata_cdbu[0] == 0x28) || (dev->ata_cdbu[0] == 0x0a) || (dev->ata_cdbu[0] == 0x2a)) {
 			outb((inb(tmport) & 0xf3) | 0x08, tmport);
 		} else {
 			outb(inb(tmport) & 0xf3, tmport);
-		}		
-	}	
-	tmport = workport + 0x1c;
+		}
+	} else {
+		tmport = workportu - 0x05;
+		if ((dev->ata_cdbu[0] == 0x08) || (dev->ata_cdbu[0] == 0x28) || (dev->ata_cdbu[0] == 0x0a) || (dev->ata_cdbu[0] == 0x2a)) {
+			outb((unsigned char) ((inb(tmport) & 0x3f) | 0xc0), tmport);
+		} else {
+			outb((unsigned char) (inb(tmport) & 0x3f), tmport);
+		}
+	}
+	tmport = workportu + 0x1c;
 
-	if(workreq->sc_data_direction == DMA_TO_DEVICE) {
-		dev->id[c][target_id].dirct = 0x20;
+	if (workrequ->sc_data_direction == SCSI_DATA_WRITE) {
+		dev->id[target_id].dirctu = 0x20;
 		if (inb(tmport) == 0) {
-			tmport = workport + 0x18;
+			tmport = workportu + 0x18;
 			outb(0x08, tmport);
 			outb(0x01, tmpcip);
-#ifdef ED_DBGP		
-		printk( "start DMA(to target)\n");
-#endif				
 		} else {
-			dev->last_cmd[c] |= 0x40;
+			dev->last_cmd |= 0x40;
 		}
-		dev->in_snd[c] = 0;
+		dev->in_snd = 0;
+		spin_unlock_irqrestore(host->host_lock, flags);
 		return;
 	}
-	if (inb(tmport) == 0) {		
-		tmport = workport + 0x18;
+	if (inb(tmport) == 0) {
+		tmport = workportu + 0x18;
 		outb(0x08, tmport);
 		outb(0x09, tmpcip);
-#ifdef ED_DBGP		
-		printk( "start DMA(to host)\n");
-#endif			
 	} else {
-		dev->last_cmd[c] |= 0x40;
+		dev->last_cmd |= 0x40;
 	}
-	dev->in_snd[c] = 0;
+	dev->in_snd = 0;
+	spin_unlock_irqrestore(host->host_lock, flags);
 	return;
 
 }
@@ -1001,7 +835,7 @@ static unsigned char fun_scam(struct atp_unit *dev, unsigned short int *val)
 	unsigned short int i, k;
 	unsigned char j;
 
-	tmport = dev->ioport[0] + 0x1c;
+	tmport = dev->ioport + 0x1c;
 	outw(*val, tmport);
 FUN_D7:
 	for (i = 0; i < 10; i++) {	/* stable >= bus settle delay(400 ns)  */
@@ -1044,7 +878,7 @@ static void tscam(struct Scsi_Host *host)
 	unsigned long n;
 	unsigned short int m, assignid_map, val;
 	unsigned char mbuf[33], quintet[2];
-	struct atp_unit *dev = (struct atp_unit *)&host->hostdata;
+	struct atp_unit *dev = (struct atp_unit *)host->hostdata;
 	static unsigned char g2q_tab[8] = {
 		0x38, 0x31, 0x32, 0x2b, 0x34, 0x2d, 0x2e, 0x27
 	};
@@ -1056,24 +890,24 @@ static void tscam(struct Scsi_Host *host)
 	}
  */
 
-	tmport = dev->ioport[0] + 1;
+	tmport = dev->ioport + 1;
 	outb(0x08, tmport++);
 	outb(0x7f, tmport);
-	tmport = dev->ioport[0] + 0x11;
+	tmport = dev->ioport + 0x11;
 	outb(0x20, tmport);
 
 	if ((dev->scam_on & 0x40) == 0) {
 		return;
 	}
 	m = 1;
-	m <<= dev->host_id[0];
+	m <<= dev->host_idu;
 	j = 16;
-	if (dev->chip_ver < 4) {
+	if (dev->chip_veru < 4) {
 		m |= 0xff00;
 		j = 8;
 	}
 	assignid_map = m;
-	tmport = dev->ioport[0] + 0x02;
+	tmport = dev->ioport + 0x02;
 	outb(0x02, tmport++);	/* 2*2=4ms,3EH 2/32*3E=3.9ms */
 	outb(0, tmport++);
 	outb(0, tmport++);
@@ -1088,7 +922,7 @@ static void tscam(struct Scsi_Host *host)
 		if ((m & assignid_map) != 0) {
 			continue;
 		}
-		tmport = dev->ioport[0] + 0x0f;
+		tmport = dev->ioport + 0x0f;
 		outb(0, tmport++);
 		tmport += 0x02;
 		outb(0, tmport++);
@@ -1100,41 +934,40 @@ static void tscam(struct Scsi_Host *host)
 			k = i;
 		}
 		outb(k, tmport++);
-		tmport = dev->ioport[0] + 0x1b;
-		if (dev->chip_ver == 4) {
+		tmport = dev->ioport + 0x1b;
+		if (dev->chip_veru == 4) {
 			outb(0x01, tmport);
 		} else {
 			outb(0x00, tmport);
 		}
 wait_rdyok:
-		tmport = dev->ioport[0] + 0x18;
+		tmport = dev->ioport + 0x18;
 		outb(0x09, tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		k = inb(tmport);
 		if (k != 0x16) {
 			if ((k == 0x85) || (k == 0x42)) {
 				continue;
 			}
-			tmport = dev->ioport[0] + 0x10;
+			tmport = dev->ioport + 0x10;
 			outb(0x41, tmport);
 			goto wait_rdyok;
 		}
 		assignid_map |= m;
 
 	}
-	tmport = dev->ioport[0] + 0x02;
+	tmport = dev->ioport + 0x02;
 	outb(0x7f, tmport);
-	tmport = dev->ioport[0] + 0x1b;
+	tmport = dev->ioport + 0x1b;
 	outb(0x02, tmport);
 
 	outb(0, 0x80);
 
 	val = 0x0080;		/* bsy  */
-	tmport = dev->ioport[0] + 0x1c;
+	tmport = dev->ioport + 0x1c;
 	outw(val, tmport);
 	val |= 0x0040;		/* sel  */
 	outw(val, tmport);
@@ -1178,13 +1011,12 @@ TCM_SYNC:
 	if ((inb(tmport) & 0x80) == 0x00) {	/* bsy ? */
 		outw(0, tmport--);
 		outb(0, tmport);
-		tmport = dev->ioport[0] + 0x15;
+		tmport = dev->ioport + 0x15;
 		outb(0, tmport);
 		tmport += 0x03;
 		outb(0x09, tmport);
 		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0)
-			cpu_relax();
+		while ((inb(tmport) & 0x80) == 0);
 		tmport -= 0x08;
 		inb(tmport);
 		return;
@@ -1228,7 +1060,7 @@ TCM_5:			/* isolation complete..  */
 	printk(" \n%x %x %x %s\n ",assignid_map,mbuf[0],mbuf[1],&mbuf[2]); */
 	i = 15;
 	j = mbuf[0];
-	if ((j & 0x20) != 0) {	/* bit5=1:ID up to 7      */
+	if ((j & 0x20) != 0) {	/* bit5=1:ID upto 7      */
 		i = 7;
 	}
 	if ((j & 0x06) == 0) {	/* IDvalid?             */
@@ -1280,7 +1112,7 @@ G2Q_QUIN:		/* k=binID#,       */
 
 }
 
-static void is870(struct atp_unit *dev, unsigned int wkport)
+void is870(struct Scsi_Host *host, unsigned int wkport)
 {
 	unsigned int tmport;
 	unsigned char i, j, k, rmb, n;
@@ -1292,25 +1124,27 @@ static void is870(struct atp_unit *dev, unsigned int wkport)
 	static unsigned char synu[6] = { 0x80, 1, 3, 1, 0x0c, 0x0e };
 	static unsigned char synw[6] = { 0x80, 1, 3, 1, 0x0c, 0x07 };
 	static unsigned char wide[6] = { 0x80, 1, 2, 3, 1, 0 };
-	
+	struct atp_unit *dev = (struct atp_unit *)&host->hostdata;
+
+	sync_idu = 0;
 	tmport = wkport + 0x3a;
 	outb((unsigned char) (inb(tmport) | 0x10), tmport);
 
 	for (i = 0; i < 16; i++) {
-		if ((dev->chip_ver != 4) && (i > 7)) {
+		if ((dev->chip_veru != 4) && (i > 7)) {
 			break;
 		}
 		m = 1;
 		m = m << i;
-		if ((m & dev->active_id[0]) != 0) {
+		if ((m & dev->active_idu) != 0) {
 			continue;
 		}
-		if (i == dev->host_id[0]) {
-			printk(KERN_INFO "         ID: %2d  Host Adapter\n", dev->host_id[0]);
+		if (i == dev->host_idu) {
+			printk(KERN_INFO "         ID: %2d  Host Adapter\n", dev->host_idu);
 			continue;
 		}
 		tmport = wkport + 0x1b;
-		if (dev->chip_ver == 4) {
+		if (dev->chip_veru == 4) {
 			outb(0x01, tmport);
 		} else {
 			outb(0x00, tmport);
@@ -1327,7 +1161,7 @@ static void is870(struct atp_unit *dev, unsigned int wkport)
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -1340,17 +1174,13 @@ static void is870(struct atp_unit *dev, unsigned int wkport)
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-
-		dev->active_id[0] |= m;
+		}
+		while (inb(tmport) != 0x8e);
+		dev->active_idu |= m;
 
 		tmport = wkport + 0x10;
 		outb(0x30, tmport);
@@ -1361,8 +1191,7 @@ phase_cmd:
 		tmport = wkport + 0x18;
 		outb(0x08, tmport);
 		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -1381,28 +1210,23 @@ sel_ok:
 		tmport += 0x07;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(inqd[6], tmport++);
 		outb(inqd[7], tmport++);
 		tmport += 0x03;
 		outb(inqd[8], tmport);
 		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-			
+		}
+		while (inb(tmport) != 0x8e);
 		tmport = wkport + 0x1b;
-		if (dev->chip_ver == 4)
+		if (dev->chip_veru == 4) {
 			outb(0x00, tmport);
-
+		}
 		tmport = wkport + 0x18;
 		outb(0x08, tmport);
 		tmport += 0x07;
@@ -1432,10 +1256,7 @@ rd_inq_data:
 		tmport += 0x03;
 		outb(0x08, tmport);
 		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		if (inb(tmport) != 0x16) {
 			goto sel_ok;
@@ -1443,16 +1264,16 @@ rd_inq_data:
 inq_ok:
 		mbuf[36] = 0;
 		printk(KERN_INFO "         ID: %2d  %s\n", i, &mbuf[8]);
-		dev->id[0][i].devtype = mbuf[0];
+		dev->id[i].devtypeu = mbuf[0];
 		rmb = mbuf[1];
 		n = mbuf[7];
-		if (dev->chip_ver != 4) {
+		if (dev->chip_veru != 4) {
 			goto not_wide;
 		}
 		if ((mbuf[7] & 0x60) == 0) {
 			goto not_wide;
 		}
-		if ((dev->global_map[0] & 0x20) == 0) {
+		if ((dev->global_map & 0x20) == 0) {
 			goto not_wide;
 		}
 		tmport = wkport + 0x1b;
@@ -1467,7 +1288,7 @@ inq_ok:
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -1475,16 +1296,12 @@ inq_ok:
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-			
+		}
+		while (inb(tmport) != 0x8e);
 try_wide:
 		j = 0;
 		tmport = wkport + 0x14;
@@ -1501,10 +1318,7 @@ try_wide:
 			}
 		}
 		tmport -= 0x08;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport) & 0x0f;
 		if (j == 0x0f) {
 			goto widep_in;
@@ -1577,10 +1391,7 @@ widep_cmd:
 		tmport += 0x04;
 		outb(0x08, tmport);
 		tmport += 0x07;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -1603,16 +1414,16 @@ widep_cmd:
 		}
 		m = 1;
 		m = m << i;
-		dev->wide_id[0] |= m;
+		dev->wide_idu |= m;
 not_wide:
-		if ((dev->id[0][i].devtype == 0x00) || (dev->id[0][i].devtype == 0x07) || ((dev->id[0][i].devtype == 0x05) && ((n & 0x10) != 0))) {
+		if ((dev->id[i].devtypeu == 0x00) || (dev->id[i].devtypeu == 0x07) || ((dev->id[i].devtypeu == 0x05) && ((n & 0x10) != 0))) {
 			goto set_sync;
 		}
 		continue;
 set_sync:
 		tmport = wkport + 0x1b;
 		j = 0;
-		if ((m & dev->wide_id[0]) != 0) {
+		if ((m & dev->wide_idu) != 0) {
 			j |= 0x01;
 		}
 		outb(j, tmport);
@@ -1626,7 +1437,7 @@ set_sync:
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -1634,16 +1445,12 @@ set_sync:
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-			
+		}
+		while (inb(tmport) != 0x8e);
 try_sync:
 		j = 0;
 		tmport = wkport + 0x14;
@@ -1655,10 +1462,10 @@ try_sync:
 		while ((inb(tmport) & 0x80) == 0) {
 			if ((inb(tmport) & 0x01) != 0) {
 				tmport -= 0x06;
-				if ((m & dev->wide_id[0]) != 0) {
+				if ((m & dev->wide_idu) != 0) {
 					outb(synw[j++], tmport);
 				} else {
-					if ((m & dev->ultra_map[0]) != 0) {
+					if ((m & dev->ultra_map) != 0) {
 						outb(synu[j++], tmport);
 					} else {
 						outb(synn[j++], tmport);
@@ -1668,10 +1475,7 @@ try_sync:
 			}
 		}
 		tmport -= 0x08;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport) & 0x0f;
 		if (j == 0x0f) {
 			goto phase_ins;
@@ -1729,10 +1533,7 @@ phase_ins1:
 			goto phase_ins1;
 		}
 		tmport -= 0x08;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport);
 		if (j == 0x85) {
 			goto tar_dcons;
@@ -1757,10 +1558,7 @@ tar_dcons:
 		tmport += 0x04;
 		outb(0x08, tmport);
 		tmport += 0x07;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -1781,7 +1579,7 @@ tar_dcons:
 		if (mbuf[4] > 0x0c) {
 			mbuf[4] = 0x0c;
 		}
-		dev->id[0][i].devsp = mbuf[4];
+		dev->id[i].devspu = mbuf[4];
 		if ((mbuf[3] < 0x0d) && (rmb == 0)) {
 			j = 0xa0;
 			goto set_syn_ok;
@@ -1800,13 +1598,13 @@ tar_dcons:
 		}
 		j = 0x60;
 set_syn_ok:
-		dev->id[0][i].devsp = (dev->id[0][i].devsp & 0x0f) | j;
+		dev->id[i].devspu = (dev->id[i].devspu & 0x0f) | j;
 	}
 	tmport = wkport + 0x3a;
 	outb((unsigned char) (inb(tmport) & 0xef), tmport);
 }
 
-static void is880(struct atp_unit *dev, unsigned int wkport)
+static void is880(struct Scsi_Host *host, unsigned int wkport)
 {
 	unsigned int tmport;
 	unsigned char i, j, k, rmb, n, lvdmode;
@@ -1820,17 +1618,19 @@ static void is880(struct atp_unit *dev, unsigned int wkport)
 	unsigned char synuw[6] = { 0x80, 1, 3, 1, 0x0a, 0x0e };
 	static unsigned char wide[6] = { 0x80, 1, 2, 3, 1, 0 };
 	static unsigned char u3[9] = { 0x80, 1, 6, 4, 0x09, 00, 0x0e, 0x01, 0x02 };
+	struct atp_unit *dev = (struct atp_unit *)&host->hostdata;
 
+	sync_idu = 0;
 	lvdmode = inb(wkport + 0x3f) & 0x40;
 
 	for (i = 0; i < 16; i++) {
 		m = 1;
 		m = m << i;
-		if ((m & dev->active_id[0]) != 0) {
+		if ((m & dev->active_idu) != 0) {
 			continue;
 		}
-		if (i == dev->host_id[0]) {
-			printk(KERN_INFO "         ID: %2d  Host Adapter\n", dev->host_id[0]);
+		if (i == dev->host_idu) {
+			printk(KERN_INFO "         ID: %2d  Host Adapter\n", dev->host_idu);
 			continue;
 		}
 		tmport = wkport + 0x5b;
@@ -1847,7 +1647,7 @@ static void is880(struct atp_unit *dev, unsigned int wkport)
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -1860,17 +1660,13 @@ static void is880(struct atp_unit *dev, unsigned int wkport)
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-			
-		dev->active_id[0] |= m;
+		}
+		while (inb(tmport) != 0x8e);
+		dev->active_idu |= m;
 
 		tmport = wkport + 0x50;
 		outb(0x30, tmport);
@@ -1881,10 +1677,7 @@ phase_cmd:
 		tmport = wkport + 0x58;
 		outb(0x08, tmport);
 		tmport += 0x07;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -1903,24 +1696,19 @@ sel_ok:
 		tmport += 0x07;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(inqd[6], tmport++);
 		outb(inqd[7], tmport++);
 		tmport += 0x03;
 		outb(inqd[8], tmport);
 		tmport += 0x07;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-			
+		}
+		while (inb(tmport) != 0x8e);
 		tmport = wkport + 0x5b;
 		outb(0x00, tmport);
 		tmport = wkport + 0x58;
@@ -1952,29 +1740,27 @@ rd_inq_data:
 		tmport += 0x03;
 		outb(0x08, tmport);
 		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x16)
+		if (inb(tmport) != 0x16) {
 			goto sel_ok;
-
+		}
 inq_ok:
 		mbuf[36] = 0;
 		printk(KERN_INFO "         ID: %2d  %s\n", i, &mbuf[8]);
-		dev->id[0][i].devtype = mbuf[0];
+		dev->id[i].devtypeu = mbuf[0];
 		rmb = mbuf[1];
 		n = mbuf[7];
 		if ((mbuf[7] & 0x60) == 0) {
 			goto not_wide;
 		}
-		if ((i < 8) && ((dev->global_map[0] & 0x20) == 0)) {
+		if ((i < 8) && ((dev->global_map & 0x20) == 0)) {
 			goto not_wide;
 		}
 		if (lvdmode == 0) {
 			goto chg_wide;
 		}
-		if (dev->sp[0][i] != 0x04)	// force u2
+		if (dev->sp[i] != 0x04)	// force u2
 		{
 			goto chg_wide;
 		}
@@ -1991,7 +1777,7 @@ inq_ok:
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -1999,17 +1785,12 @@ inq_ok:
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-
+		}
+		while (inb(tmport) != 0x8e);
 try_u3:
 		j = 0;
 		tmport = wkport + 0x54;
@@ -2026,10 +1807,7 @@ try_u3:
 			}
 		}
 		tmport -= 0x08;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport) & 0x0f;
 		if (j == 0x0f) {
 			goto u3p_in;
@@ -2102,10 +1880,7 @@ u3p_cmd:
 		tmport += 0x04;
 		outb(0x08, tmport);
 		tmport += 0x07;
-		
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -2126,8 +1901,8 @@ u3p_cmd:
 		if (mbuf[3] == 0x09) {
 			m = 1;
 			m = m << i;
-			dev->wide_id[0] |= m;
-			dev->id[0][i].devsp = 0xce;
+			dev->wide_idu |= m;
+			dev->id[i].devspu = 0xce;
 			continue;
 		}
 chg_wide:
@@ -2143,7 +1918,7 @@ chg_wide:
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -2151,16 +1926,12 @@ chg_wide:
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
-		if (inb(tmport) != 0x11 && inb(tmport) != 0x8e)
+		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
-
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-			
+		}
+		while (inb(tmport) != 0x8e);
 try_wide:
 		j = 0;
 		tmport = wkport + 0x54;
@@ -2177,9 +1948,7 @@ try_wide:
 			}
 		}
 		tmport -= 0x08;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-			
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport) & 0x0f;
 		if (j == 0x0f) {
 			goto widep_in;
@@ -2252,10 +2021,7 @@ widep_cmd:
 		tmport += 0x04;
 		outb(0x08, tmport);
 		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -2278,29 +2044,29 @@ widep_cmd:
 		}
 		m = 1;
 		m = m << i;
-		dev->wide_id[0] |= m;
+		dev->wide_idu |= m;
 not_wide:
-		if ((dev->id[0][i].devtype == 0x00) || (dev->id[0][i].devtype == 0x07) || ((dev->id[0][i].devtype == 0x05) && ((n & 0x10) != 0))) {
+		if ((dev->id[i].devtypeu == 0x00) || (dev->id[i].devtypeu == 0x07) || ((dev->id[i].devtypeu == 0x05) && ((n & 0x10) != 0))) {
 			m = 1;
 			m = m << i;
-			if ((dev->async[0] & m) != 0) {
+			if ((dev->async & m) != 0) {
 				goto set_sync;
 			}
 		}
 		continue;
 set_sync:
-		if (dev->sp[0][i] == 0x02) {
+		if (dev->sp[i] == 0x02) {
 			synu[4] = 0x0c;
 			synuw[4] = 0x0c;
 		} else {
-			if (dev->sp[0][i] >= 0x03) {
+			if (dev->sp[i] >= 0x03) {
 				synu[4] = 0x0a;
 				synuw[4] = 0x0a;
 			}
 		}
 		tmport = wkport + 0x5b;
 		j = 0;
-		if ((m & dev->wide_id[0]) != 0) {
+		if ((m & dev->wide_idu) != 0) {
 			j |= 0x01;
 		}
 		outb(j, tmport);
@@ -2314,7 +2080,7 @@ set_sync:
 		tmport += 0x06;
 		outb(0, tmport);
 		tmport += 0x02;
-		outb(dev->id[0][i].devsp, tmport++);
+		outb(dev->id[i].devspu, tmport++);
 		outb(0, tmport++);
 		outb(satn[6], tmport++);
 		outb(satn[7], tmport++);
@@ -2322,16 +2088,12 @@ set_sync:
 		outb(satn[8], tmport);
 		tmport += 0x07;
 
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
 			continue;
 		}
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-
+		while (inb(tmport) != 0x8e);
 try_sync:
 		j = 0;
 		tmport = wkport + 0x54;
@@ -2343,14 +2105,14 @@ try_sync:
 		while ((inb(tmport) & 0x80) == 0) {
 			if ((inb(tmport) & 0x01) != 0) {
 				tmport -= 0x06;
-				if ((m & dev->wide_id[0]) != 0) {
-					if ((m & dev->ultra_map[0]) != 0) {
+				if ((m & dev->wide_idu) != 0) {
+					if ((m & dev->ultra_map) != 0) {
 						outb(synuw[j++], tmport);
 					} else {
 						outb(synw[j++], tmport);
 					}
 				} else {
-					if ((m & dev->ultra_map[0]) != 0) {
+					if ((m & dev->ultra_map) != 0) {
 						outb(synu[j++], tmport);
 					} else {
 						outb(synn[j++], tmport);
@@ -2360,10 +2122,7 @@ try_sync:
 			}
 		}
 		tmport -= 0x08;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport) & 0x0f;
 		if (j == 0x0f) {
 			goto phase_ins;
@@ -2421,10 +2180,7 @@ phase_ins1:
 			goto phase_ins1;
 		}
 		tmport -= 0x08;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		j = inb(tmport);
 		if (j == 0x85) {
 			goto tar_dcons;
@@ -2449,10 +2205,7 @@ tar_dcons:
 		tmport += 0x04;
 		outb(0x08, tmport);
 		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-
+		while ((inb(tmport) & 0x80) == 0x00);
 		tmport -= 0x08;
 		j = inb(tmport);
 		if (j != 0x16) {
@@ -2473,7 +2226,7 @@ tar_dcons:
 		if (mbuf[4] > 0x0e) {
 			mbuf[4] = 0x0e;
 		}
-		dev->id[0][i].devsp = mbuf[4];
+		dev->id[i].devspu = mbuf[4];
 		if (mbuf[3] < 0x0c) {
 			j = 0xb0;
 			goto set_syn_ok;
@@ -2496,593 +2249,372 @@ tar_dcons:
 		}
 		j = 0x60;
 set_syn_ok:
-		dev->id[0][i].devsp = (dev->id[0][i].devsp & 0x0f) | j;
+		dev->id[i].devspu = (dev->id[i].devspu & 0x0f) | j;
 	}
 }
 
-static void atp870u_free_tables(struct Scsi_Host *host)
-{
-	struct atp_unit *atp_dev = (struct atp_unit *)&host->hostdata;
-	int j, k;
-	for (j=0; j < 2; j++) {
-		for (k = 0; k < 16; k++) {
-			if (!atp_dev->id[j][k].prd_table)
-				continue;
-			pci_free_consistent(atp_dev->pdev, 1024, atp_dev->id[j][k].prd_table, atp_dev->id[j][k].prd_bus);
-			atp_dev->id[j][k].prd_table = NULL;
-		}
-	}
-}
 
-static int atp870u_init_tables(struct Scsi_Host *host)
+static void atp870u_init_tables(struct Scsi_Host *host)
 {
-	struct atp_unit *atp_dev = (struct atp_unit *)&host->hostdata;
-	int c,k;
-	for(c=0;c < 2;c++) {
-	   	for(k=0;k<16;k++) {
-	   			atp_dev->id[c][k].prd_table = pci_alloc_consistent(atp_dev->pdev, 1024, &(atp_dev->id[c][k].prd_bus));
-	   			if (!atp_dev->id[c][k].prd_table) {
-	   				printk("atp870u_init_tables fail\n");
-				atp870u_free_tables(host);
-				return -ENOMEM;
-			}
-			atp_dev->id[c][k].prdaddr = atp_dev->id[c][k].prd_bus;
-			atp_dev->id[c][k].devsp=0x20;
-			atp_dev->id[c][k].devtype = 0x7f;
-			atp_dev->id[c][k].curr_req = NULL;			   
-	   	}
-	   			
-	   	atp_dev->active_id[c] = 0;
-	   	atp_dev->wide_id[c] = 0;
-	   	atp_dev->host_id[c] = 0x07;
-	   	atp_dev->quhd[c] = 0;
-	   	atp_dev->quend[c] = 0;
-	   	atp_dev->last_cmd[c] = 0xff;
-	   	atp_dev->in_snd[c] = 0;
-	   	atp_dev->in_int[c] = 0;
-	   	
-	   	for (k = 0; k < qcnt; k++) {
-	   		  atp_dev->quereq[c][k] = NULL;
-	   	}	   		   
-	   	for (k = 0; k < 16; k++) {
-			   atp_dev->id[c][k].curr_req = NULL;
-			   atp_dev->sp[c][k] = 0x04;
-	   	}		   
+	struct atp_unit *dev = (struct atp_unit *)&host->hostdata;
+	int k;
+
+	for (k = 0; k < 16; k++) {
+		/* FIXME */
+		dev->id[k].prd_tableu = pci_alloc_consistent(dev->pdev, 1024, &dev->id[k].prd_phys);
+		dev->id[k].devspu = 0x20;
+		dev->id[k].devtypeu = 0;
+		dev->id[k].curr_req = NULL;
 	}
-	return 0;
-}
+	dev->active_idu = 0;
+	dev->wide_idu = 0;
+	dev->host_idu = 0x07;
+	dev->quhdu = 0;
+	dev->quendu = 0;
+	dev->chip_veru = 0;
+	dev->last_cmd = 0xff;
+	dev->in_snd = 0;
+	dev->in_int = 0;
+	for (k = 0; k < qcnt; k++) {
+		dev->querequ[k] = 0;
+	}
+	for (k = 0; k < 16; k++) {
+		dev->id[k].curr_req = 0;
+		dev->sp[k] = 0x04;
+	}
+}			
 
 /* return non-zero on detection */
-static int atp870u_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int atp870u_detect(Scsi_Host_Template * tpnt)
 {
-	unsigned char k, m, c;
+	unsigned char irq, h, k, m;
 	unsigned long flags;
-	unsigned int base_io, tmport, error,n;
-	unsigned char host_id;
+	unsigned int base_io, error, tmport;
+	struct pci_dev *pdev[MAX_ATP];
+	unsigned char chip_ver[MAX_ATP], host_id;
+	unsigned short dev_id[MAX_ATP], n;
 	struct Scsi_Host *shpnt = NULL;
-	struct atp_unit *atpdev, *p;
-	unsigned char setupdata[2][16];
+	int card = 0;
 	int count = 0;
 
-	atpdev = kzalloc(sizeof(*atpdev), GFP_KERNEL);
-	if (!atpdev)
-		return -ENOMEM;
+	static unsigned short devid[9] = {
+		0x8081, 0x8002, 0x8010, 0x8020, 0x8030, 0x8040, 0x8050, 0x8060, 0
+	};
 
-	if (pci_enable_device(pdev))
-		goto err_eio;
+	printk(KERN_INFO "aec671x_detect: \n");
+	tpnt->proc_name = "atp870u";
 
-        if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
-                printk(KERN_INFO "atp870u: use 32bit DMA mask.\n");
-        } else {
-                printk(KERN_ERR "atp870u: DMA mask required but not available.\n");
-		goto err_eio;
-        }
-
-	/*
-	 * It's probably easier to weed out some revisions like
-	 * this than via the PCI device table
-	 */
-	if (ent->device == PCI_DEVICE_ID_ARTOP_AEC7610) {
-		error = pci_read_config_byte(pdev, PCI_CLASS_REVISION, &atpdev->chip_ver);
-		if (atpdev->chip_ver < 2)
-			goto err_eio;
-	}
-
-	switch (ent->device) {
-	case PCI_DEVICE_ID_ARTOP_AEC7612UW:
-	case PCI_DEVICE_ID_ARTOP_AEC7612SUW:
-	case ATP880_DEVID1:	
-	case ATP880_DEVID2:	
-	case ATP885_DEVID:	
-		atpdev->chip_ver = 0x04;
-	default:
-		break;
-	}
-	base_io = pci_resource_start(pdev, 0);
-	base_io &= 0xfffffff8;
-
-	if ((ent->device == ATP880_DEVID1)||(ent->device == ATP880_DEVID2)) {
-		error = pci_read_config_byte(pdev, PCI_CLASS_REVISION, &atpdev->chip_ver);
-		pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 0x80);//JCC082803
-
-		host_id = inb(base_io + 0x39);
-		host_id >>= 0x04;
-
-		printk(KERN_INFO "   ACARD AEC-67160 PCI Ultra3 LVD Host Adapter: %d"
-			"    IO:%x, IRQ:%d.\n", count, base_io, pdev->irq);
-		atpdev->ioport[0] = base_io + 0x40;
-		atpdev->pciport[0] = base_io + 0x28;
-		atpdev->dev_id = ent->device;
-		atpdev->host_id[0] = host_id;
-
-		tmport = base_io + 0x22;
-		atpdev->scam_on = inb(tmport);
-		tmport += 0x13;
-		atpdev->global_map[0] = inb(tmport);
-		tmport += 0x07;
-		atpdev->ultra_map[0] = inw(tmport);
-
-		n = 0x3f09;
-next_fblk_880:
-		if (n >= 0x4000)
-			goto flash_ok_880;
-
-		m = 0;
-		outw(n, base_io + 0x34);
-		n += 0x0002;
-		if (inb(base_io + 0x30) == 0xff)
-			goto flash_ok_880;
-
-		atpdev->sp[0][m++] = inb(base_io + 0x30);
-		atpdev->sp[0][m++] = inb(base_io + 0x31);
-		atpdev->sp[0][m++] = inb(base_io + 0x32);
-		atpdev->sp[0][m++] = inb(base_io + 0x33);
-		outw(n, base_io + 0x34);
-		n += 0x0002;
-		atpdev->sp[0][m++] = inb(base_io + 0x30);
-		atpdev->sp[0][m++] = inb(base_io + 0x31);
-		atpdev->sp[0][m++] = inb(base_io + 0x32);
-		atpdev->sp[0][m++] = inb(base_io + 0x33);
-		outw(n, base_io + 0x34);
-		n += 0x0002;
-		atpdev->sp[0][m++] = inb(base_io + 0x30);
-		atpdev->sp[0][m++] = inb(base_io + 0x31);
-		atpdev->sp[0][m++] = inb(base_io + 0x32);
-		atpdev->sp[0][m++] = inb(base_io + 0x33);
-		outw(n, base_io + 0x34);
-		n += 0x0002;
-		atpdev->sp[0][m++] = inb(base_io + 0x30);
-		atpdev->sp[0][m++] = inb(base_io + 0x31);
-		atpdev->sp[0][m++] = inb(base_io + 0x32);
-		atpdev->sp[0][m++] = inb(base_io + 0x33);
-		n += 0x0018;
-		goto next_fblk_880;
-flash_ok_880:
-		outw(0, base_io + 0x34);
-		atpdev->ultra_map[0] = 0;
-		atpdev->async[0] = 0;
-		for (k = 0; k < 16; k++) {
-			n = 1;
-			n = n << k;
-			if (atpdev->sp[0][k] > 1) {
-				atpdev->ultra_map[0] |= n;
-			} else {
-				if (atpdev->sp[0][k] == 0)
-					atpdev->async[0] |= n;
- 			}
-	 	}
-		atpdev->async[0] = ~(atpdev->async[0]);
-		outb(atpdev->global_map[0], base_io + 0x35);
- 
-		shpnt = scsi_host_alloc(&atp870u_template, sizeof(struct atp_unit));
-		if (!shpnt)
-			goto err_nomem;
-
-		p = (struct atp_unit *)&shpnt->hostdata;
-
-		atpdev->host = shpnt;
-		atpdev->pdev = pdev;
-		pci_set_drvdata(pdev, p);
-		memcpy(p, atpdev, sizeof(*atpdev));
-		if (atp870u_init_tables(shpnt) < 0) {
-			printk(KERN_ERR "Unable to allocate tables for Acard controller\n");
-			goto unregister;
-		}
-
-		if (request_irq(pdev->irq, atp870u_intr_handle, IRQF_SHARED, "atp880i", shpnt)) {
- 			printk(KERN_ERR "Unable to allocate IRQ%d for Acard controller.\n", pdev->irq);
-			goto free_tables;
-		}
-
-		spin_lock_irqsave(shpnt->host_lock, flags);
-		tmport = base_io + 0x38;
-		k = inb(tmport) & 0x80;
-		outb(k, tmport);
-		tmport += 0x03;
-		outb(0x20, tmport);
-		mdelay(32);
-		outb(0, tmport);
-		mdelay(32);
-		tmport = base_io + 0x5b;
-		inb(tmport);
-		tmport -= 0x04;
-		inb(tmport);
-		tmport = base_io + 0x40;
-		outb((host_id | 0x08), tmport);
-		tmport += 0x18;
-		outb(0, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0)
-			mdelay(1);
-		tmport -= 0x08;
-		inb(tmport);
-		tmport = base_io + 0x41;
-		outb(8, tmport++);
-		outb(0x7f, tmport);
-		tmport = base_io + 0x51;
-		outb(0x20, tmport);
-
-		tscam(shpnt);
-		is880(p, base_io);
-		tmport = base_io + 0x38;
-		outb(0xb0, tmport);
-		shpnt->max_id = 16;
-		shpnt->this_id = host_id;
-		shpnt->unique_id = base_io;
-		shpnt->io_port = base_io;
-		shpnt->n_io_port = 0x60;	/* Number of bytes of I/O space used */
-		shpnt->irq = pdev->irq;			
-	} else if (ent->device == ATP885_DEVID) {	
-			printk(KERN_INFO "   ACARD AEC-67162 PCI Ultra3 LVD Host Adapter:  IO:%x, IRQ:%d.\n"
-			       , base_io, pdev->irq);
-        	
-		atpdev->pdev = pdev;
-		atpdev->dev_id  = ent->device;
-		atpdev->baseport = base_io;
-		atpdev->ioport[0] = base_io + 0x80;
-		atpdev->ioport[1] = base_io + 0xc0;
-		atpdev->pciport[0] = base_io + 0x40;
-		atpdev->pciport[1] = base_io + 0x50;
-				
-		shpnt = scsi_host_alloc(&atp870u_template, sizeof(struct atp_unit));
-		if (!shpnt)
-			goto err_nomem;
-        	
-		p = (struct atp_unit *)&shpnt->hostdata;
-        	
-		atpdev->host = shpnt;
-		atpdev->pdev = pdev;
-		pci_set_drvdata(pdev, p);
-		memcpy(p, atpdev, sizeof(struct atp_unit));
-		if (atp870u_init_tables(shpnt) < 0)
-			goto unregister;
-			
-#ifdef ED_DBGP		
-	printk("request_irq() shpnt %p hostdata %p\n", shpnt, p);
-#endif	        
-		if (request_irq(pdev->irq, atp870u_intr_handle, IRQF_SHARED, "atp870u", shpnt)) {
-				printk(KERN_ERR "Unable to allocate IRQ for Acard controller.\n");
-			goto free_tables;
-		}
+	for (h = 0; devid[h]; h++) {
+		struct pci_dev *dev = NULL;
 		
-		spin_lock_irqsave(shpnt->host_lock, flags);        					
-        			
-		c=inb(base_io + 0x29);
-		outb((c | 0x04),base_io + 0x29);
-        	
-		n=0x1f80;
-next_fblk_885:
-		if (n >= 0x2000) {
-		   goto flash_ok_885;
-		}
-		outw(n,base_io + 0x3c);
-		if (inl(base_io + 0x38) == 0xffffffff) {
-		   goto flash_ok_885;
-		}
-		for (m=0; m < 2; m++) {
-		    p->global_map[m]= 0;
-		    for (k=0; k < 4; k++) {
-			outw(n++,base_io + 0x3c);
-			((unsigned long *)&setupdata[m][0])[k]=inl(base_io + 0x38);
-		    }
-		    for (k=0; k < 4; k++) {
-			outw(n++,base_io + 0x3c);
-			((unsigned long *)&p->sp[m][0])[k]=inl(base_io + 0x38);
-		    }
-		    n += 8;
-		}
-		goto next_fblk_885;
-flash_ok_885:
-#ifdef ED_DBGP
-		printk( "Flash Read OK\n");
-#endif	
-		c=inb(base_io + 0x29);
-		outb((c & 0xfb),base_io + 0x29);
-		for (c=0;c < 2;c++) {
-		    p->ultra_map[c]=0;
-		    p->async[c] = 0;
-		    for (k=0; k < 16; k++) {
-			n=1;
-			n = n << k;
-			if (p->sp[c][k] > 1) {
-			   p->ultra_map[c] |= n;
-			} else {
-			   if (p->sp[c][k] == 0) {
-			      p->async[c] |= n;
-			   }
+		while((dev = pci_find_device(0x1191, devid[h], dev))!=NULL)
+		{
+			if(pci_enable_device(dev))
+				continue;
+
+			if(pci_set_dma_mask(dev, 0xFFFFFFFFUL))
+			{
+				printk(KERN_ERR "atp870u: 32bit DMA mask required but not available.\n");
+				continue;
 			}
-		    }
-		    p->async[c] = ~(p->async[c]);
+			chip_ver[card] = 0;
+			dev_id[card] = devid[h];
 
-		    if (p->global_map[c] == 0) {
-		       k=setupdata[c][1];
-		       if ((k & 0x40) != 0)
-			  p->global_map[c] |= 0x20;
-		       k &= 0x07;
-		       p->global_map[c] |= k;
-		       if ((setupdata[c][2] & 0x04) != 0)
-			  p->global_map[c] |= 0x08;
-		       p->host_id[c] = setupdata[c][0] & 0x07;
-		    }
+			if (devid[h] == 0x8002) {
+				error = pci_read_config_byte(dev, 0x08, &chip_ver[card]);
+				if (chip_ver[card] < 2) {
+					continue;
+				}
+			}
+			if (devid[h] == 0x8010 || devid[h] == 0x8081 || devid[h] == 0x8050) {
+				chip_ver[card] = 0x04;
+			}
+			pdev[card] = dev;
+			card++;
+			if (card == MAX_ATP)
+				break;
 		}
+	}
+	for (h = 0; h < card; h++) {
+		struct atp_unit tmp, *dev;
 
-		k = inb(base_io + 0x28) & 0x8f;
-		k |= 0x10;
-		outb(k, base_io + 0x28);
-		outb(0x80, base_io + 0x41);
-		outb(0x80, base_io + 0x51);
-		mdelay(100);
-		outb(0, base_io + 0x41);
-		outb(0, base_io + 0x51);
-		mdelay(1000);
-		inb(base_io + 0x9b);
-		inb(base_io + 0x97);
-		inb(base_io + 0xdb);
-		inb(base_io + 0xd7);
-		tmport = base_io + 0x80;
-		k=p->host_id[0];
-		if (k > 7)
-		   k = (k & 0x07) | 0x40;
-		k |= 0x08;
-		outb(k, tmport);
-		tmport += 0x18;
-		outb(0, tmport);
-		tmport += 0x07;
+		/* Found an atp870u/w. */
+		base_io = pci_resource_start(pdev[h], 0);
+		irq = pdev[h]->irq;
 
-		while ((inb(tmport) & 0x80) == 0)
-			cpu_relax();
-	
-		tmport -= 0x08;
-		inb(tmport);
-		tmport = base_io + 0x81;
-		outb(8, tmport++);
-		outb(0x7f, tmport);
-		tmport = base_io + 0x91;
-		outb(0x20, tmport);
+		if (dev_id[h] != 0x8081) {
+			error = pci_read_config_byte(pdev[h], 0x49, &host_id);
 
-		tmport = base_io + 0xc0;
-		k=p->host_id[1];
-		if (k > 7)
-		   k = (k & 0x07) | 0x40;
-		k |= 0x08;
-		outb(k, tmport);
-		tmport += 0x18;
-		outb(0, tmport);
-		tmport += 0x07;
+			base_io &= 0xfffffff8;
 
-		while ((inb(tmport) & 0x80) == 0)
-			cpu_relax();
+			if (check_region(base_io, 0x40) != 0) {
+				return 0;
+			}
+			printk(KERN_INFO "   ACARD AEC-671X PCI Ultra/W SCSI-3 Host Adapter: %d    IO:%x, IRQ:%d.\n", h, base_io, irq);
+			
+			tmp.ioport = base_io;
+			tmp.pciport = base_io + 0x20;
+			tmp.deviceid = dev_id[h];
+			host_id &= 0x07;
+			tmp.host_idu = host_id;
+			tmp.chip_veru = chip_ver[h];
 
-		tmport -= 0x08;
-		inb(tmport);
-		tmport = base_io + 0xc1;
-		outb(8, tmport++);
-		outb(0x7f, tmport);
-		tmport = base_io + 0xd1;
-		outb(0x20, tmport);
+			tmport = base_io + 0x22;
+			tmp.scam_on = inb(tmport);
+			tmport += 0x0b;
+			tmp.global_map = inb(tmport++);
+			tmp.ultra_map = inw(tmport);
+			if (tmp.ultra_map == 0) {
+				tmp.scam_on = 0x00;
+				tmp.global_map = 0x20;
+				tmp.ultra_map = 0xffff;
+			}
+			shpnt = scsi_register(tpnt, sizeof(struct atp_unit));
+			if (shpnt == NULL)
+				return count;
+			tmp.host = shpnt;
+			tmp.pdev = pdev[h];
+			/* Save the atp_unit data */
+			memcpy(&shpnt->hostdata, &tmp, sizeof(tmp));
 
-		tscam_885();
-		printk(KERN_INFO "   Scanning Channel A SCSI Device ...\n");
-		is885(p, base_io + 0x80, 0);
-		printk(KERN_INFO "   Scanning Channel B SCSI Device ...\n");
-		is885(p, base_io + 0xc0, 1);
+			atp870u_init_tables(shpnt);
+			spin_lock_irqsave(shpnt->host_lock, flags);
+			if (request_irq(irq, atp870u_intr_handle, SA_SHIRQ, "atp870u", shpnt)) {
+				printk(KERN_ERR "Unable to allocate IRQ for Acard controller.\n");
+				goto unregister;
+			}
 
-		k = inb(base_io + 0x28) & 0xcf;
-		k |= 0xc0;
-		outb(k, base_io + 0x28);
-		k = inb(base_io + 0x1f) | 0x80;
-		outb(k, base_io + 0x1f);
-		k = inb(base_io + 0x29) | 0x01;
-		outb(k, base_io + 0x29);
-#ifdef ED_DBGP
-		//printk("atp885: atp_host[0] 0x%p\n", atp_host[0]);
-#endif		
-		shpnt->max_id = 16;
-		shpnt->max_lun = (p->global_map[0] & 0x07) + 1;
-		shpnt->max_channel = 1;
-		shpnt->this_id = p->host_id[0];
-		shpnt->unique_id = base_io;
-		shpnt->io_port = base_io;
-		shpnt->n_io_port = 0xff;	/* Number of bytes of I/O space used */
-		shpnt->irq = pdev->irq;
+			if (chip_ver[h] > 0x07) {	/* check if atp876 chip   *//* then enable terminator */
+				tmport = base_io + 0x3e;
+				outb(0x00, tmport);
+			}
+
+			tmport = base_io + 0x3a;
+			k = (inb(tmport) & 0xf3) | 0x10;
+			outb(k, tmport);
+			outb((k & 0xdf), tmport);
+			mdelay(32);
+			outb(k, tmport);
+			mdelay(32);
+			tmport = base_io;
+			outb((host_id | 0x08), tmport);
+			tmport += 0x18;
+			outb(0, tmport);
+			tmport += 0x07;
+			while ((inb(tmport) & 0x80) == 0);
+			tmport -= 0x08;
+			inb(tmport);
+			tmport = base_io + 1;
+			outb(8, tmport++);
+			outb(0x7f, tmport);
+			tmport = base_io + 0x11;
+			outb(0x20, tmport);
+
+			tscam(shpnt);
+			is870(shpnt, base_io);
+			tmport = base_io + 0x3a;
+			outb((inb(tmport) & 0xef), tmport);
+			tmport++;
+			outb((inb(tmport) | 0x20), tmport);
+		} else {
+			base_io &= 0xfffffff8;
+
+			if (check_region(base_io, 0x60) != 0) {
+				return 0;
+			}
+			host_id = inb(base_io + 0x39);
+			host_id >>= 0x04;
+
+			printk(KERN_INFO "   ACARD AEC-67160 PCI Ultra3 LVD Host Adapter: %d    IO:%x, IRQ:%d.\n", h, base_io, irq);
+			tmp.ioport = base_io + 0x40;
+			tmp.pciport = base_io + 0x28;
+			tmp.deviceid = dev_id[h];
+			tmp.host_idu = host_id;
+			tmp.chip_veru = chip_ver[h];
+
+			tmport = base_io + 0x22;
+			tmp.scam_on = inb(tmport);
+			tmport += 0x13;
+			tmp.global_map = inb(tmport);
+			tmport += 0x07;
+			tmp.ultra_map = inw(tmport);
+
+			n = 0x3f09;
+next_fblk:
+			if (n >= 0x4000) {
+				goto flash_ok;
+			}
+			m = 0;
+			outw(n, base_io + 0x34);
+			n += 0x0002;
+			if (inb(base_io + 0x30) == 0xff) {
+				goto flash_ok;
+			}
+			tmp.sp[m++] = inb(base_io + 0x30);
+			tmp.sp[m++] = inb(base_io + 0x31);
+			tmp.sp[m++] = inb(base_io + 0x32);
+			tmp.sp[m++] = inb(base_io + 0x33);
+			outw(n, base_io + 0x34);
+			n += 0x0002;
+			tmp.sp[m++] = inb(base_io + 0x30);
+			tmp.sp[m++] = inb(base_io + 0x31);
+			tmp.sp[m++] = inb(base_io + 0x32);
+			tmp.sp[m++] = inb(base_io + 0x33);
+			outw(n, base_io + 0x34);
+			n += 0x0002;
+			tmp.sp[m++] = inb(base_io + 0x30);
+			tmp.sp[m++] = inb(base_io + 0x31);
+			tmp.sp[m++] = inb(base_io + 0x32);
+			tmp.sp[m++] = inb(base_io + 0x33);
+			outw(n, base_io + 0x34);
+			n += 0x0002;
+			tmp.sp[m++] = inb(base_io + 0x30);
+			tmp.sp[m++] = inb(base_io + 0x31);
+			tmp.sp[m++] = inb(base_io + 0x32);
+			tmp.sp[m++] = inb(base_io + 0x33);
+			n += 0x0018;
+			goto next_fblk;
+flash_ok:
+			outw(0, base_io + 0x34);
+			tmp.ultra_map = 0;
+			tmp.async = 0;
+			for (k = 0; k < 16; k++) {
+				n = 1;
+				n = n << k;
+				if (tmp.sp[k] > 1) {
+					tmp.ultra_map |= n;
+				} else {
+					if (tmp.sp[k] == 0) {
+						tmp.async |= n;
+					}
+				}
+			}
+			tmp.async = ~(tmp.async);
+			outb(tmp.global_map, base_io + 0x35);
+
+			shpnt = scsi_register(tpnt, sizeof(struct atp_unit));
+			if (shpnt == NULL)
+				return count;
 				
-	} else {
-		error = pci_read_config_byte(pdev, 0x49, &host_id);
+			tmp.pdev = pdev[h];
+			memcpy(&shpnt->hostdata, &tmp, sizeof(tmp));
+			
+			atp870u_init_tables(shpnt);
 
-		printk(KERN_INFO "   ACARD AEC-671X PCI Ultra/W SCSI-2/3 Host Adapter: %d "
-			"IO:%x, IRQ:%d.\n", count, base_io, pdev->irq);
+			spin_lock_irqsave(shpnt->host_lock, flags);
+			if (request_irq(irq, atp870u_intr_handle, SA_SHIRQ, "atp870u", shpnt)) {
+				printk(KERN_ERR "Unable to allocate IRQ for Acard controller.\n");
+				goto unregister;
+			}
 
-		atpdev->ioport[0] = base_io;
-		atpdev->pciport[0] = base_io + 0x20;
-		atpdev->dev_id = ent->device;
-		host_id &= 0x07;
-		atpdev->host_id[0] = host_id;
-		tmport = base_io + 0x22;
-		atpdev->scam_on = inb(tmport);
-		tmport += 0x0b;
-		atpdev->global_map[0] = inb(tmport++);
-		atpdev->ultra_map[0] = inw(tmport);
+			tmport = base_io + 0x38;
+			k = inb(tmport) & 0x80;
+			outb(k, tmport);
+			tmport += 0x03;
+			outb(0x20, tmport);
+			mdelay(32);
+			outb(0, tmport);
+			mdelay(32);
+			tmport = base_io + 0x5b;
+			inb(tmport);
+			tmport -= 0x04;
+			inb(tmport);
+			tmport = base_io + 0x40;
+			outb((host_id | 0x08), tmport);
+			tmport += 0x18;
+			outb(0, tmport);
+			tmport += 0x07;
+			while ((inb(tmport) & 0x80) == 0);
+			tmport -= 0x08;
+			inb(tmport);
+			tmport = base_io + 0x41;
+			outb(8, tmport++);
+			outb(0x7f, tmport);
+			tmport = base_io + 0x51;
+			outb(0x20, tmport);
 
-		if (atpdev->ultra_map[0] == 0) {
-			atpdev->scam_on = 0x00;
-			atpdev->global_map[0] = 0x20;
-			atpdev->ultra_map[0] = 0xffff;
+			tscam(shpnt);
+			is880(shpnt, base_io);
+			tmport = base_io + 0x38;
+			outb(0xb0, tmport);
 		}
 
-		shpnt = scsi_host_alloc(&atp870u_template, sizeof(struct atp_unit));
-		if (!shpnt)
-			goto err_nomem;
-
-		p = (struct atp_unit *)&shpnt->hostdata;
+		dev = (struct atp_unit *)&shpnt->hostdata;
 		
-		atpdev->host = shpnt;
-		atpdev->pdev = pdev;
-		pci_set_drvdata(pdev, p);
-		memcpy(p, atpdev, sizeof(*atpdev));
-		if (atp870u_init_tables(shpnt) < 0)
-			goto unregister;
-
-		if (request_irq(pdev->irq, atp870u_intr_handle, IRQF_SHARED, "atp870i", shpnt)) {
-			printk(KERN_ERR "Unable to allocate IRQ%d for Acard controller.\n", pdev->irq);
-			goto free_tables;
-		}
-
-		spin_lock_irqsave(shpnt->host_lock, flags);
-		if (atpdev->chip_ver > 0x07) {	/* check if atp876 chip then enable terminator */
-			tmport = base_io + 0x3e;
-			outb(0x00, tmport);
-		}
- 
-		tmport = base_io + 0x3a;
-		k = (inb(tmport) & 0xf3) | 0x10;
-		outb(k, tmport);
-		outb((k & 0xdf), tmport);
-		mdelay(32);
-		outb(k, tmport);
-		mdelay(32);
-		tmport = base_io;
-		outb((host_id | 0x08), tmport);
-		tmport += 0x18;
-		outb(0, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0)
-			mdelay(1);
-
-		tmport -= 0x08;
-		inb(tmport);
-		tmport = base_io + 1;
-		outb(8, tmport++);
-		outb(0x7f, tmport);
-		tmport = base_io + 0x11;
-		outb(0x20, tmport);
-
-		tscam(shpnt);
-		is870(p, base_io);
-		tmport = base_io + 0x3a;
-		outb((inb(tmport) & 0xef), tmport);
-		tmport++;
-		outb((inb(tmport) | 0x20), tmport);
-		if (atpdev->chip_ver == 4)
+		atp_host[h] = shpnt;
+		if (dev->chip_veru == 4) {
 			shpnt->max_id = 16;
-		else		
-			shpnt->max_id = 8;
+		}
 		shpnt->this_id = host_id;
 		shpnt->unique_id = base_io;
 		shpnt->io_port = base_io;
-		shpnt->n_io_port = 0x40;	/* Number of bytes of I/O space used */
-		shpnt->irq = pdev->irq;		
-	} 
-		spin_unlock_irqrestore(shpnt->host_lock, flags);
-		if(ent->device==ATP885_DEVID) {
-			if(!request_region(base_io, 0xff, "atp870u")) /* Register the IO ports that we use */
-				goto request_io_fail;
-		} else if((ent->device==ATP880_DEVID1)||(ent->device==ATP880_DEVID2)) {
-			if(!request_region(base_io, 0x60, "atp870u")) /* Register the IO ports that we use */
-				goto request_io_fail;
+		if (dev_id[h] == 0x8081) {
+			shpnt->n_io_port = 0x60;	/* Number of bytes of I/O space used */
 		} else {
-			if(!request_region(base_io, 0x40, "atp870u")) /* Register the IO ports that we use */
-				goto request_io_fail;
-		}				
+			shpnt->n_io_port = 0x40;	/* Number of bytes of I/O space used */
+		}
+		shpnt->irq = irq;
+		spin_unlock_irqrestore(shpnt->host_lock, flags);
+		if (dev_id[h] == 0x8081) {
+			request_region(base_io, 0x60, "atp870u");	/* Register the IO ports that we use */
+		} else {
+			request_region(base_io, 0x40, "atp870u");	/* Register the IO ports that we use */
+		}
 		count++;
-		if (scsi_add_host(shpnt, &pdev->dev))
-			goto scsi_add_fail;
-		scsi_scan_host(shpnt);
-#ifdef ED_DBGP			
-		printk("atp870u_prob : exit\n");
-#endif		
-		return 0;
-
-scsi_add_fail:
-	printk("atp870u_prob:scsi_add_fail\n");
-	if(ent->device==ATP885_DEVID) {
-		release_region(base_io, 0xff);
-	} else if((ent->device==ATP880_DEVID1)||(ent->device==ATP880_DEVID2)) {
-		release_region(base_io, 0x60);
-	} else {
-		release_region(base_io, 0x40);
-	}
-request_io_fail:
-	printk("atp870u_prob:request_io_fail\n");
-	free_irq(pdev->irq, shpnt);
-free_tables:
-	printk("atp870u_prob:free_table\n");
-	atp870u_free_tables(shpnt);
+		continue;
 unregister:
-	printk("atp870u_prob:unregister\n");
-	scsi_host_put(shpnt);
-	return -1;		
-err_eio:
-	kfree(atpdev);
-	return -EIO;
-err_nomem:
-	kfree(atpdev);
-	return -ENOMEM;
+		scsi_unregister(shpnt);
+		spin_unlock_irqrestore(shpnt->host_lock, flags);
+		continue;
+	}
+
+	return count;
 }
 
 /* The abort command does not leave the device in a clean state where
    it is available to be used again.  Until this gets worked out, we will
    leave it commented out.  */
 
-static int atp870u_abort(struct scsi_cmnd * SCpnt)
+int atp870u_abort(Scsi_Cmnd * SCpnt)
 {
-	unsigned char  j, k, c;
-	struct scsi_cmnd *workrequ;
+	unsigned char j, k;
+	Scsi_Cmnd *workrequ;
 	unsigned int tmport;
-	struct atp_unit *dev;	
-	struct Scsi_Host *host;
-	host = SCpnt->device->host;
+	struct atp_unit *dev = (struct atp_unit *)&SCpnt->device->host->hostdata;
 
-	dev = (struct atp_unit *)&host->hostdata;
-	c = scmd_channel(SCpnt);
-	printk(" atp870u: abort Channel = %x \n", c);
-	printk("working=%x last_cmd=%x ", dev->working[c], dev->last_cmd[c]);
-	printk(" quhdu=%x quendu=%x ", dev->quhd[c], dev->quend[c]);
-	tmport = dev->ioport[c];
-	for (j = 0; j < 0x18; j++) {
+	printk(KERN_DEBUG "working=%x last_cmd=%x ", dev->working, dev->last_cmd);
+	printk(" quhdu=%x quendu=%x ", dev->quhdu, dev->quendu);
+	tmport = dev->ioport;
+	for (j = 0; j < 0x17; j++) {
 		printk(" r%2x=%2x", j, inb(tmport++));
 	}
-	tmport += 0x04;
+	tmport += 0x05;
 	printk(" r1c=%2x", inb(tmport));
 	tmport += 0x03;
-	printk(" r1f=%2x in_snd=%2x ", inb(tmport), dev->in_snd[c]);
-	tmport= dev->pciport[c];
-	printk(" d00=%2x", inb(tmport));
+	printk(" r1f=%2x in_snd=%2x ", inb(tmport), dev->in_snd);
+	tmport = dev->pciport;
+	printk(" r20=%2x", inb(tmport));
 	tmport += 0x02;
-	printk(" d02=%2x", inb(tmport));
-	for(j=0;j<16;j++) {
-	   if (dev->id[c][j].curr_req != NULL) {
-		workrequ = dev->id[c][j].curr_req;
-		printk("\n que cdb= ");
-		for (k=0; k < workrequ->cmd_len; k++) {
-		    printk(" %2x ",workrequ->cmnd[k]);
+	printk(" r22=%2x", inb(tmport));
+	tmport = dev->ioport + 0x3a;
+	printk(" r3a=%2x \n", inb(tmport));
+	tmport = dev->ioport + 0x3b;
+	printk(" r3b=%2x \n", inb(tmport));
+	for (j = 0; j < 16; j++) {
+		if (dev->id[j].curr_req != NULL) {
+			workrequ = dev->id[j].curr_req;
+			printk("\n que cdb= ");
+			for (k = 0; k < workrequ->cmd_len; k++) {
+				printk(" %2x ", workrequ->cmnd[k]);
+			}
+			printk(" last_lenu= %lx ", dev->id[j].last_lenu);
 		}
-		printk(" last_lenu= %x ",(unsigned int)dev->id[c][j].last_len);
-	   }
 	}
+	/* Sort of - the thing handles itself */
 	return SUCCESS;
 }
 
-static const char *atp870u_info(struct Scsi_Host *notused)
+const char *atp870u_info(struct Scsi_Host *notused)
 {
 	static char buffer[128];
 
@@ -3091,20 +2623,26 @@ static const char *atp870u_info(struct Scsi_Host *notused)
 	return buffer;
 }
 
+int atp870u_set_info(char *buffer, int length, struct Scsi_Host *HBAptr)
+{
+	return -ENOSYS;		/* Currently this is a no-op */
+}
+
 #define BLS buffer + len + size
-static int atp870u_proc_info(struct Scsi_Host *HBAptr, char *buffer, 
-			     char **start, off_t offset, int length, int inout)
+int atp870u_proc_info(struct Scsi_Host *HBAptr, char *buffer, char **start, off_t offset, int length, int inout)
 {
 	static u8 buff[512];
 	int size = 0;
 	int len = 0;
 	off_t begin = 0;
 	off_t pos = 0;
-	
-	if (inout) 	
-		return -EINVAL;
-	if (offset == 0)
+
+	if (inout == TRUE) {	/* Has data been written to the file? */
+		return (atp870u_set_info(buffer, length, HBAptr));
+	}
+	if (offset == 0) {
 		memset(buff, 0, sizeof(buff));
+	}
 	size += sprintf(BLS, "ACARD AEC-671X Driver Version: 2.6+ac\n");
 	len += size;
 	pos = begin + len;
@@ -3116,7 +2654,7 @@ static int atp870u_proc_info(struct Scsi_Host *HBAptr, char *buffer,
 	size += sprintf(BLS, "                   IRQ: %d\n", HBAptr->irq);
 	len += size;
 	pos = begin + len;
-	
+
 	*start = buffer + (offset - begin);	/* Start of wanted data */
 	len -= (offset - begin);	/* Start slop */
 	if (len > length) {
@@ -3125,15 +2663,15 @@ static int atp870u_proc_info(struct Scsi_Host *HBAptr, char *buffer,
 	return (len);
 }
 
-
-static int atp870u_biosparam(struct scsi_device *disk, struct block_device *dev,
-			sector_t capacity, int *ip)
+static int atp870u_biosparam(struct scsi_device *sdev,
+		struct block_device *dev, sector_t capacity, int *ip)
 {
 	int heads, sectors, cylinders;
 
 	heads = 64;
 	sectors = 32;
 	cylinders = (unsigned long)capacity / (heads * sectors);
+
 	if (cylinders > 1024) {
 		heads = 255;
 		sectors = 63;
@@ -3146,771 +2684,33 @@ static int atp870u_biosparam(struct scsi_device *disk, struct block_device *dev,
 	return 0;
 }
 
-static void atp870u_remove (struct pci_dev *pdev)
-{	
-	struct atp_unit *devext = pci_get_drvdata(pdev);
-	struct Scsi_Host *pshost = devext->host;
-	
-	
-	scsi_remove_host(pshost);
-	printk(KERN_INFO "free_irq : %d\n",pshost->irq);
+
+static int atp870u_release(struct Scsi_Host *pshost)
+{
+	struct atp_unit *dev = (struct atp_unit *)&pshost->hostdata;
+	int k;
 	free_irq(pshost->irq, pshost);
 	release_region(pshost->io_port, pshost->n_io_port);
-	printk(KERN_INFO "atp870u_free_tables : %p\n",pshost);
-	atp870u_free_tables(pshost);
-	printk(KERN_INFO "scsi_host_put : %p\n",pshost);
-	scsi_host_put(pshost);
-	printk(KERN_INFO "pci_set_drvdata : %p\n",pdev);
-	pci_set_drvdata(pdev, NULL);	
+	scsi_unregister(pshost);
+	for (k = 0; k < 16; k++)
+		pci_free_consistent(dev->pdev, 1024, dev->id[k].prd_tableu, dev->id[k].prd_phys);
+	return 0;
 }
+
 MODULE_LICENSE("GPL");
 
-static struct scsi_host_template atp870u_template = {
-     .module			= THIS_MODULE,
-     .name              	= "atp870u"		/* name */,
-     .proc_name			= "atp870u",
-     .proc_info			= atp870u_proc_info,
-     .info              	= atp870u_info		/* info */,
-     .queuecommand      	= atp870u_queuecommand	/* queuecommand */,
-     .eh_abort_handler  	= atp870u_abort		/* abort */,
-     .bios_param        	= atp870u_biosparam	/* biosparm */,
-     .can_queue         	= qcnt			/* can_queue */,
-     .this_id           	= 7			/* SCSI ID */,
-     .sg_tablesize      	= ATP870U_SCATTER	/*SG_ALL*/ /*SG_NONE*/,
-     .cmd_per_lun       	= ATP870U_CMDLUN		/* commands per lun */,
-     .use_clustering    	= ENABLE_CLUSTERING,
-     .max_sectors		= ATP870U_MAX_SECTORS,
+static Scsi_Host_Template driver_template = {
+	.proc_info		= atp870u_proc_info,
+	.detect			= atp870u_detect,
+	.release		= atp870u_release,
+	.info			= atp870u_info,
+	.queuecommand		= atp870u_queuecommand,
+	.eh_abort_handler	= atp870u_abort,
+	.bios_param		= atp870u_biosparam,
+	.can_queue		= qcnt,
+	.this_id		= 7,
+	.sg_tablesize		= ATP870U_SCATTER,
+	.cmd_per_lun		= ATP870U_CMDLUN,
+	.use_clustering		= ENABLE_CLUSTERING,
 };
-
-static struct pci_device_id atp870u_id_table[] = {
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, ATP885_DEVID)			  },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, ATP880_DEVID1)			  },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, ATP880_DEVID2)			  },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_AEC7610)    },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_AEC7612UW)  },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_AEC7612U)   },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_AEC7612S)   },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_AEC7612D)	  },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_AEC7612SUW) },
-	{ PCI_DEVICE(PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_8060)	  },
-	{ 0, },
-};
-
-MODULE_DEVICE_TABLE(pci, atp870u_id_table);
-
-static struct pci_driver atp870u_driver = {
-	.id_table	= atp870u_id_table,
-	.name		= "atp870u",
-	.probe		= atp870u_probe,
-	.remove		= __devexit_p(atp870u_remove),
-};
-
-static int __init atp870u_init(void)
-{
-#ifdef ED_DBGP	
-	printk("atp870u_init: Entry\n");
-#endif	
-	return pci_register_driver(&atp870u_driver);
-}
-
-static void __exit atp870u_exit(void)
-{
-#ifdef ED_DBGP	
-	printk("atp870u_exit: Entry\n");
-#endif
-	pci_unregister_driver(&atp870u_driver);
-}
-
-static void tscam_885(void)
-{
-	unsigned char i;
-
-	for (i = 0; i < 0x2; i++) {
-		mdelay(300);
-	}
-	return;
-}
-
-
-
-static void is885(struct atp_unit *dev, unsigned int wkport,unsigned char c)
-{
-	unsigned int tmport;
-	unsigned char i, j, k, rmb, n, lvdmode;
-	unsigned short int m;
-	static unsigned char mbuf[512];
-	static unsigned char satn[9] =	{0, 0, 0, 0, 0, 0, 0, 6, 6};
-	static unsigned char inqd[9] =	{0x12, 0, 0, 0, 0x24, 0, 0, 0x24, 6};
-	static unsigned char synn[6] =	{0x80, 1, 3, 1, 0x19, 0x0e};
-	unsigned char synu[6] =  {0x80, 1, 3, 1, 0x0a, 0x0e};
-	static unsigned char synw[6] =	{0x80, 1, 3, 1, 0x19, 0x0e};
-	unsigned char synuw[6] =  {0x80, 1, 3, 1, 0x0a, 0x0e};
-	static unsigned char wide[6] =	{0x80, 1, 2, 3, 1, 0};
-	static unsigned char u3[9] = { 0x80,1,6,4,0x09,00,0x0e,0x01,0x02 };
-
-	lvdmode=inb(wkport + 0x1b) >> 7;
-
-	for (i = 0; i < 16; i++) {
-		m = 1;
-		m = m << i;
-		if ((m & dev->active_id[c]) != 0) {
-			continue;
-		}
-		if (i == dev->host_id[c]) {
-			printk(KERN_INFO "         ID: %2d  Host Adapter\n", dev->host_id[c]);
-			continue;
-		}
-		tmport = wkport + 0x1b;
-		outb(0x01, tmport);
-		tmport = wkport + 0x01;
-		outb(0x08, tmport++);
-		outb(0x7f, tmport++);
-		outb(satn[0], tmport++);
-		outb(satn[1], tmport++);
-		outb(satn[2], tmport++);
-		outb(satn[3], tmport++);
-		outb(satn[4], tmport++);
-		outb(satn[5], tmport++);
-		tmport += 0x06;
-		outb(0, tmport);
-		tmport += 0x02;
-		outb(dev->id[c][i].devsp, tmport++);
-		
-		outb(0, tmport++);
-		outb(satn[6], tmport++);
-		outb(satn[7], tmport++);
-		j = i;
-		if ((j & 0x08) != 0) {
-			j = (j & 0x07) | 0x40;
-		}
-		outb(j, tmport);
-		tmport += 0x03;
-		outb(satn[8], tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
-			continue;
-		}
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-		dev->active_id[c] |= m;
-
-		tmport = wkport + 0x10;
-		outb(0x30, tmport);
-		tmport = wkport + 0x14;
-		outb(0x00, tmport);
-
-phase_cmd:
-		tmport = wkport + 0x18;
-		outb(0x08, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		j = inb(tmport);
-		if (j != 0x16) {
-			tmport = wkport + 0x10;
-			outb(0x41, tmport);
-			goto phase_cmd;
-		}
-sel_ok:
-		tmport = wkport + 0x03;
-		outb(inqd[0], tmport++);
-		outb(inqd[1], tmport++);
-		outb(inqd[2], tmport++);
-		outb(inqd[3], tmport++);
-		outb(inqd[4], tmport++);
-		outb(inqd[5], tmport);
-		tmport += 0x07;
-		outb(0, tmport);
-		tmport += 0x02;
-		outb(dev->id[c][i].devsp, tmport++);
-		outb(0, tmport++);
-		outb(inqd[6], tmport++);
-		outb(inqd[7], tmport++);
-		tmport += 0x03;
-		outb(inqd[8], tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
-			continue;
-		}
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-		tmport = wkport + 0x1b;
-		outb(0x00, tmport);
-		tmport = wkport + 0x18;
-		outb(0x08, tmport);
-		tmport += 0x07;
-		j = 0;
-rd_inq_data:
-		k = inb(tmport);
-		if ((k & 0x01) != 0) {
-			tmport -= 0x06;
-			mbuf[j++] = inb(tmport);
-			tmport += 0x06;
-			goto rd_inq_data;
-		}
-		if ((k & 0x80) == 0) {
-			goto rd_inq_data;
-		}
-		tmport -= 0x08;
-		j = inb(tmport);
-		if (j == 0x16) {
-			goto inq_ok;
-		}
-		tmport = wkport + 0x10;
-		outb(0x46, tmport);
-		tmport += 0x02;
-		outb(0, tmport++);
-		outb(0, tmport++);
-		outb(0, tmport++);
-		tmport += 0x03;
-		outb(0x08, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		if (inb(tmport) != 0x16) {
-			goto sel_ok;
-		}
-inq_ok:
-		mbuf[36] = 0;
-		printk( KERN_INFO"         ID: %2d  %s\n", i, &mbuf[8]);
-		dev->id[c][i].devtype = mbuf[0];
-		rmb = mbuf[1];
-		n = mbuf[7];
-		if ((mbuf[7] & 0x60) == 0) {
-			goto not_wide;
-		}
-		if ((i < 8) && ((dev->global_map[c] & 0x20) == 0)) {
-			goto not_wide;
-		}
-		if (lvdmode == 0) {
-		   goto chg_wide;
-		}
-		if (dev->sp[c][i] != 0x04) {	// force u2
-		   goto chg_wide;
-		}
-
-		tmport = wkport + 0x1b;
-		outb(0x01, tmport);
-		tmport = wkport + 0x03;
-		outb(satn[0], tmport++);
-		outb(satn[1], tmport++);
-		outb(satn[2], tmport++);
-		outb(satn[3], tmport++);
-		outb(satn[4], tmport++);
-		outb(satn[5], tmport++);
-		tmport += 0x06;
-		outb(0, tmport);
-		tmport += 0x02;
-		outb(dev->id[c][i].devsp, tmport++);
-		outb(0, tmport++);
-		outb(satn[6], tmport++);
-		outb(satn[7], tmport++);
-		tmport += 0x03;
-		outb(satn[8], tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
-			continue;
-		}
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-try_u3:
-		j = 0;
-		tmport = wkport + 0x14;
-		outb(0x09, tmport);
-		tmport += 0x04;
-		outb(0x20, tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0) {
-			if ((inb(tmport) & 0x01) != 0) {
-				tmport -= 0x06;
-				outb(u3[j++], tmport);
-				tmport += 0x06;
-			}
-			cpu_relax();
-		}
-		tmport -= 0x08;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto u3p_in;
-		}
-		if (j == 0x0a) {
-			goto u3p_cmd;
-		}
-		if (j == 0x0e) {
-			goto try_u3;
-		}
-		continue;
-u3p_out:
-		tmport = wkport + 0x18;
-		outb(0x20, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0) {
-			if ((inb(tmport) & 0x01) != 0) {
-				tmport -= 0x06;
-				outb(0, tmport);
-				tmport += 0x06;
-			}
-			cpu_relax();
-		}
-		tmport -= 0x08;
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto u3p_in;
-		}
-		if (j == 0x0a) {
-			goto u3p_cmd;
-		}
-		if (j == 0x0e) {
-			goto u3p_out;
-		}
-		continue;
-u3p_in:
-		tmport = wkport + 0x14;
-		outb(0x09, tmport);
-		tmport += 0x04;
-		outb(0x20, tmport);
-		tmport += 0x07;
-		k = 0;
-u3p_in1:
-		j = inb(tmport);
-		if ((j & 0x01) != 0) {
-			tmport -= 0x06;
-			mbuf[k++] = inb(tmport);
-			tmport += 0x06;
-			goto u3p_in1;
-		}
-		if ((j & 0x80) == 0x00) {
-			goto u3p_in1;
-		}
-		tmport -= 0x08;
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto u3p_in;
-		}
-		if (j == 0x0a) {
-			goto u3p_cmd;
-		}
-		if (j == 0x0e) {
-			goto u3p_out;
-		}
-		continue;
-u3p_cmd:
-		tmport = wkport + 0x10;
-		outb(0x30, tmport);
-		tmport = wkport + 0x14;
-		outb(0x00, tmport);
-		tmport += 0x04;
-		outb(0x08, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00);
-		tmport -= 0x08;
-		j = inb(tmport);
-		if (j != 0x16) {
-			if (j == 0x4e) {
-				goto u3p_out;
-			}
-			continue;
-		}
-		if (mbuf[0] != 0x01) {
-			goto chg_wide;
-		}
-		if (mbuf[1] != 0x06) {
-			goto chg_wide;
-		}
-		if (mbuf[2] != 0x04) {
-			goto chg_wide;
-		}
-		if (mbuf[3] == 0x09) {
-			m = 1;
-			m = m << i;
-			dev->wide_id[c] |= m;
-			dev->id[c][i].devsp = 0xce;
-#ifdef ED_DBGP		   
-			printk("dev->id[%2d][%2d].devsp = %2x\n",c,i,dev->id[c][i].devsp);
-#endif
-			continue;
-		}
-chg_wide:
-		tmport = wkport + 0x1b;
-		outb(0x01, tmport);
-		tmport = wkport + 0x03;
-		outb(satn[0], tmport++);
-		outb(satn[1], tmport++);
-		outb(satn[2], tmport++);
-		outb(satn[3], tmport++);
-		outb(satn[4], tmport++);
-		outb(satn[5], tmport++);
-		tmport += 0x06;
-		outb(0, tmport);
-		tmport += 0x02;
-		outb(dev->id[c][i].devsp, tmport++);
-		outb(0, tmport++);
-		outb(satn[6], tmport++);
-		outb(satn[7], tmport++);
-		tmport += 0x03;
-		outb(satn[8], tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
-			continue;
-		}
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-try_wide:
-		j = 0;
-		tmport = wkport + 0x14;
-		outb(0x05, tmport);
-		tmport += 0x04;
-		outb(0x20, tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0) {
-			if ((inb(tmport) & 0x01) != 0) {
-				tmport -= 0x06;
-				outb(wide[j++], tmport);
-				tmport += 0x06;
-			}
-			cpu_relax();
-		}
-		tmport -= 0x08;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto widep_in;
-		}
-		if (j == 0x0a) {
-			goto widep_cmd;
-		}
-		if (j == 0x0e) {
-			goto try_wide;
-		}
-		continue;
-widep_out:
-		tmport = wkport + 0x18;
-		outb(0x20, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0) {
-			if ((inb(tmport) & 0x01) != 0) {
-				tmport -= 0x06;
-				outb(0, tmport);
-				tmport += 0x06;
-			}
-			cpu_relax();
-		}
-		tmport -= 0x08;
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto widep_in;
-		}
-		if (j == 0x0a) {
-			goto widep_cmd;
-		}
-		if (j == 0x0e) {
-			goto widep_out;
-		}
-		continue;
-widep_in:
-		tmport = wkport + 0x14;
-		outb(0xff, tmport);
-		tmport += 0x04;
-		outb(0x20, tmport);
-		tmport += 0x07;
-		k = 0;
-widep_in1:
-		j = inb(tmport);
-		if ((j & 0x01) != 0) {
-			tmport -= 0x06;
-			mbuf[k++] = inb(tmport);
-			tmport += 0x06;
-			goto widep_in1;
-		}
-		if ((j & 0x80) == 0x00) {
-			goto widep_in1;
-		}
-		tmport -= 0x08;
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto widep_in;
-		}
-		if (j == 0x0a) {
-			goto widep_cmd;
-		}
-		if (j == 0x0e) {
-			goto widep_out;
-		}
-		continue;
-widep_cmd:
-		tmport = wkport + 0x10;
-		outb(0x30, tmport);
-		tmport = wkport + 0x14;
-		outb(0x00, tmport);
-		tmport += 0x04;
-		outb(0x08, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		j = inb(tmport);
-		if (j != 0x16) {
-			if (j == 0x4e) {
-				goto widep_out;
-			}
-			continue;
-		}
-		if (mbuf[0] != 0x01) {
-			goto not_wide;
-		}
-		if (mbuf[1] != 0x02) {
-			goto not_wide;
-		}
-		if (mbuf[2] != 0x03) {
-			goto not_wide;
-		}
-		if (mbuf[3] != 0x01) {
-			goto not_wide;
-		}
-		m = 1;
-		m = m << i;
-		dev->wide_id[c] |= m;
-not_wide:
-		if ((dev->id[c][i].devtype == 0x00) || (dev->id[c][i].devtype == 0x07) ||
-		    ((dev->id[c][i].devtype == 0x05) && ((n & 0x10) != 0))) {
-			m = 1;
-			m = m << i;
-			if ((dev->async[c] & m) != 0) {
-			   goto set_sync;
-			}
-		}
-		continue;
-set_sync:
-		if (dev->sp[c][i] == 0x02) {
-		   synu[4]=0x0c;
-		   synuw[4]=0x0c;
-		} else {
-		   if (dev->sp[c][i] >= 0x03) {
-		      synu[4]=0x0a;
-		      synuw[4]=0x0a;
-		   }
-		}
-		tmport = wkport + 0x1b;
-		j = 0;
-		if ((m & dev->wide_id[c]) != 0) {
-			j |= 0x01;
-		}
-		outb(j, tmport);
-		tmport = wkport + 0x03;
-		outb(satn[0], tmport++);
-		outb(satn[1], tmport++);
-		outb(satn[2], tmport++);
-		outb(satn[3], tmport++);
-		outb(satn[4], tmport++);
-		outb(satn[5], tmport++);
-		tmport += 0x06;
-		outb(0, tmport);
-		tmport += 0x02;
-		outb(dev->id[c][i].devsp, tmport++);
-		outb(0, tmport++);
-		outb(satn[6], tmport++);
-		outb(satn[7], tmport++);
-		tmport += 0x03;
-		outb(satn[8], tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		if ((inb(tmport) != 0x11) && (inb(tmport) != 0x8e)) {
-			continue;
-		}
-		while (inb(tmport) != 0x8e)
-			cpu_relax();
-try_sync:
-		j = 0;
-		tmport = wkport + 0x14;
-		outb(0x06, tmport);
-		tmport += 0x04;
-		outb(0x20, tmport);
-		tmport += 0x07;
-
-		while ((inb(tmport) & 0x80) == 0) {
-			if ((inb(tmport) & 0x01) != 0) {
-				tmport -= 0x06;
-				if ((m & dev->wide_id[c]) != 0) {
-					if ((m & dev->ultra_map[c]) != 0) {
-						outb(synuw[j++], tmport);
-					} else {
-						outb(synw[j++], tmport);
-					}
-				} else {
-					if ((m & dev->ultra_map[c]) != 0) {
-						outb(synu[j++], tmport);
-					} else {
-						outb(synn[j++], tmport);
-					}
-				}
-				tmport += 0x06;
-			}
-		}
-		tmport -= 0x08;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		j = inb(tmport) & 0x0f;
-		if (j == 0x0f) {
-			goto phase_ins;
-		}
-		if (j == 0x0a) {
-			goto phase_cmds;
-		}
-		if (j == 0x0e) {
-			goto try_sync;
-		}
-		continue;
-phase_outs:
-		tmport = wkport + 0x18;
-		outb(0x20, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00) {
-			if ((inb(tmport) & 0x01) != 0x00) {
-				tmport -= 0x06;
-				outb(0x00, tmport);
-				tmport += 0x06;
-			}
-			cpu_relax();
-		}
-		tmport -= 0x08;
-		j = inb(tmport);
-		if (j == 0x85) {
-			goto tar_dcons;
-		}
-		j &= 0x0f;
-		if (j == 0x0f) {
-			goto phase_ins;
-		}
-		if (j == 0x0a) {
-			goto phase_cmds;
-		}
-		if (j == 0x0e) {
-			goto phase_outs;
-		}
-		continue;
-phase_ins:
-		tmport = wkport + 0x14;
-		outb(0x06, tmport);
-		tmport += 0x04;
-		outb(0x20, tmport);
-		tmport += 0x07;
-		k = 0;
-phase_ins1:
-		j = inb(tmport);
-		if ((j & 0x01) != 0x00) {
-			tmport -= 0x06;
-			mbuf[k++] = inb(tmport);
-			tmport += 0x06;
-			goto phase_ins1;
-		}
-		if ((j & 0x80) == 0x00) {
-			goto phase_ins1;
-		}
-		tmport -= 0x08;
-		while ((inb(tmport) & 0x80) == 0x00);
-		j = inb(tmport);
-		if (j == 0x85) {
-			goto tar_dcons;
-		}
-		j &= 0x0f;
-		if (j == 0x0f) {
-			goto phase_ins;
-		}
-		if (j == 0x0a) {
-			goto phase_cmds;
-		}
-		if (j == 0x0e) {
-			goto phase_outs;
-		}
-		continue;
-phase_cmds:
-		tmport = wkport + 0x10;
-		outb(0x30, tmport);
-tar_dcons:
-		tmport = wkport + 0x14;
-		outb(0x00, tmport);
-		tmport += 0x04;
-		outb(0x08, tmport);
-		tmport += 0x07;
-		while ((inb(tmport) & 0x80) == 0x00)
-			cpu_relax();
-		tmport -= 0x08;
-		j = inb(tmport);
-		if (j != 0x16) {
-			continue;
-		}
-		if (mbuf[0] != 0x01) {
-			continue;
-		}
-		if (mbuf[1] != 0x03) {
-			continue;
-		}
-		if (mbuf[4] == 0x00) {
-			continue;
-		}
-		if (mbuf[3] > 0x64) {
-			continue;
-		}
-		if (mbuf[4] > 0x0e) {
-			mbuf[4] = 0x0e;
-		}
-		dev->id[c][i].devsp = mbuf[4];
-		if (mbuf[3] < 0x0c){
-			j = 0xb0;
-			goto set_syn_ok;
-		}
-		if ((mbuf[3] < 0x0d) && (rmb == 0)) {
-			j = 0xa0;
-			goto set_syn_ok;
-		}
-		if (mbuf[3] < 0x1a) {
-			j = 0x20;
-			goto set_syn_ok;
-		}
-		if (mbuf[3] < 0x33) {
-			j = 0x40;
-			goto set_syn_ok;
-		}
-		if (mbuf[3] < 0x4c) {
-			j = 0x50;
-			goto set_syn_ok;
-		}
-		j = 0x60;
-	      set_syn_ok:
-		dev->id[c][i].devsp = (dev->id[c][i].devsp & 0x0f) | j;
-#ifdef ED_DBGP		
-		printk("dev->id[%2d][%2d].devsp = %2x\n",c,i,dev->id[c][i].devsp);
-#endif
-	}
-	tmport = wkport + 0x16;
-	outb(0x80, tmport);
-}
-
-module_init(atp870u_init);
-module_exit(atp870u_exit);
-
+#include "scsi_module.c"

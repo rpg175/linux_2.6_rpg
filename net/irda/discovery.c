@@ -1,5 +1,5 @@
 /*********************************************************************
- *
+ *                
  * Filename:      discovery.c
  * Version:       0.1
  * Description:   Routines for handling discoveries at the IrLMP layer
@@ -10,38 +10,34 @@
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * Modified at:   Fri May 28  3:11 CST 1999
  * Modified by:   Horst von Brand <vonbrand@sleipnir.valparaiso.cl>
- *
+ * 
  *     Copyright (c) 1999 Dag Brattli, All Rights Reserved.
- *
- *     This program is free software; you can redistribute it and/or
- *     modify it under the terms of the GNU General Public License as
- *     published by the Free Software Foundation; either version 2 of
+ *     
+ *     This program is free software; you can redistribute it and/or 
+ *     modify it under the terms of the GNU General Public License as 
+ *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
- *
+ * 
  *     This program is distributed in the hope that it will be useful,
  *     but WITHOUT ANY WARRANTY; without even the implied warranty of
  *     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
  *     GNU General Public License for more details.
- *
- *     You should have received a copy of the GNU General Public License
- *     along with this program; if not, write to the Free Software
- *     Foundation, Inc., 59 Temple Place, Suite 330, Boston,
+ * 
+ *     You should have received a copy of the GNU General Public License 
+ *     along with this program; if not, write to the Free Software 
+ *     Foundation, Inc., 59 Temple Place, Suite 330, Boston, 
  *     MA 02111-1307 USA
- *
+ *     
  ********************************************************************/
 
 #include <linux/string.h>
 #include <linux/socket.h>
-#include <linux/fs.h>
 #include <linux/seq_file.h>
-#include <linux/slab.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irlmp.h>
 
 #include <net/irda/discovery.h>
-
-#include <asm/unaligned.h>
 
 /*
  * Function irlmp_add_discovery (cachelog, discovery)
@@ -68,9 +64,9 @@ void irlmp_add_discovery(hashbin_t *cachelog, discovery_t *new)
 
 	spin_lock_irqsave(&cachelog->hb_spinlock, flags);
 
-	/*
-	 * Remove all discoveries of devices that has previously been
-	 * discovered on the same link with the same name (info), or the
+	/* 
+	 * Remove all discoveries of devices that has previously been 
+	 * discovered on the same link with the same name (info), or the 
 	 * same daddr. We do this since some devices (mostly PDAs) change
 	 * their device address between every discovery.
 	 */
@@ -82,15 +78,15 @@ void irlmp_add_discovery(hashbin_t *cachelog, discovery_t *new)
 		discovery = (discovery_t *) hashbin_get_next(cachelog);
 
 		if ((node->data.saddr == new->data.saddr) &&
-		    ((node->data.daddr == new->data.daddr) ||
+		    ((node->data.daddr == new->data.daddr) || 
 		     (strcmp(node->data.info, new->data.info) == 0)))
 		{
-			/* This discovery is a previous discovery
+			/* This discovery is a previous discovery 
 			 * from the same device, so just remove it
 			 */
 			hashbin_remove_this(cachelog, (irda_queue_t *) node);
 			/* Check if hints bits are unchanged */
-			if (get_unaligned((__u16 *)node->data.hints) == get_unaligned((__u16 *)new->data.hints))
+			if(u16ho(node->data.hints) == u16ho(new->data.hints))
 				/* Set time of first discovery for this node */
 				new->firststamp = node->firststamp;
 			kfree(node);
@@ -113,7 +109,7 @@ void irlmp_add_discovery_log(hashbin_t *cachelog, hashbin_t *log)
 {
 	discovery_t *discovery;
 
-	IRDA_DEBUG(4, "%s()\n", __func__);
+	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
 
 	/*
 	 *  If log is missing this means that IrLAP was unable to perform the
@@ -137,7 +133,7 @@ void irlmp_add_discovery_log(hashbin_t *cachelog, hashbin_t *log)
 
 		discovery = (discovery_t *) hashbin_remove_first(log);
 	}
-
+	
 	/* Delete the now empty log */
 	hashbin_delete(log, (FREE_FUNC) kfree);
 }
@@ -159,8 +155,8 @@ void irlmp_expire_discoveries(hashbin_t *log, __u32 saddr, int force)
 	int			n;		/* Size of the full log */
 	int			i = 0;		/* How many we expired */
 
-	IRDA_ASSERT(log != NULL, return;);
-	IRDA_DEBUG(4, "%s()\n", __func__);
+	ASSERT(log != NULL, return;);
+	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
 
 	spin_lock_irqsave(&log->hb_spinlock, flags);
 
@@ -198,14 +194,15 @@ void irlmp_expire_discoveries(hashbin_t *log, __u32 saddr, int force)
 
 			/* Remove it from the log */
 			curr = hashbin_remove_this(log, (irda_queue_t *) curr);
-			kfree(curr);
+			if (curr)
+				kfree(curr);
 		}
 	}
 
 	/* Drop the spinlock before calling the higher layers, as
 	 * we can't guarantee they won't call us back and create a
 	 * deadlock. We will work on our own private data, so we
-	 * don't care to be interrupted. - Jean II */
+	 * don't care to be interupted. - Jean II */
 	spin_unlock_irqrestore(&log->hb_spinlock, flags);
 
 	if(buffer == NULL)
@@ -229,13 +226,13 @@ void irlmp_dump_discoveries(hashbin_t *log)
 {
 	discovery_t *discovery;
 
-	IRDA_ASSERT(log != NULL, return;);
+	ASSERT(log != NULL, return;);
 
 	discovery = (discovery_t *) hashbin_get_first(log);
 	while (discovery != NULL) {
 		IRDA_DEBUG(0, "Discovery:\n");
 		IRDA_DEBUG(0, "  daddr=%08x\n", discovery->data.daddr);
-		IRDA_DEBUG(0, "  saddr=%08x\n", discovery->data.saddr);
+		IRDA_DEBUG(0, "  saddr=%08x\n", discovery->data.saddr); 
 		IRDA_DEBUG(0, "  nickname=%s\n", discovery->data.info);
 
 		discovery = (discovery_t *) hashbin_get_next(log);
@@ -273,8 +270,8 @@ struct irda_device_info *irlmp_copy_discoveries(hashbin_t *log, int *pn,
 	int			n;		/* Size of the full log */
 	int			i = 0;		/* How many we picked */
 
-	IRDA_ASSERT(pn != NULL, return NULL;);
-	IRDA_ASSERT(log != NULL, return NULL;);
+	ASSERT(pn != NULL, return NULL;);
+	ASSERT(log != NULL, return NULL;);
 
 	/* Save spin lock */
 	spin_lock_irqsave(&log->hb_spinlock, flags);
@@ -284,9 +281,9 @@ struct irda_device_info *irlmp_copy_discoveries(hashbin_t *log, int *pn,
 		/* Mask out the ones we don't want :
 		 * We want to match the discovery mask, and to get only
 		 * the most recent one (unless we want old ones) */
-		if ((get_unaligned((__u16 *)discovery->data.hints) & mask) &&
+		if ((u16ho(discovery->data.hints) & mask) &&
 		    ((old_entries) ||
-		     ((jiffies - discovery->firststamp) < j_timeout))) {
+		     ((jiffies - discovery->firststamp) < j_timeout)) ) {
 			/* Create buffer as needed.
 			 * As this function get called a lot and most time
 			 * we don't have anything to put in the log (we are
@@ -315,7 +312,42 @@ struct irda_device_info *irlmp_copy_discoveries(hashbin_t *log, int *pn,
 
 	/* Get the actual number of device in the buffer and return */
 	*pn = i;
-	return buffer;
+	return(buffer);
+}
+
+/*
+ * Function irlmp_find_device (name, saddr)
+ *
+ *    Look through the discovery log at each of the links and try to find 
+ *    the device with the given name. Return daddr and saddr. If saddr is
+ *    specified, that look at that particular link only (not impl).
+ */
+__u32 irlmp_find_device(hashbin_t *cachelog, char *name, __u32 *saddr)
+{
+	unsigned long flags;
+	discovery_t *d;
+
+	spin_lock_irqsave(&cachelog->hb_spinlock, flags);
+
+	/* Look at all discoveries for that link */
+	d = (discovery_t *) hashbin_get_first(cachelog);
+	while (d != NULL) {
+		IRDA_DEBUG(1, "Discovery:\n");
+		IRDA_DEBUG(1, "  daddr=%08x\n", d->data.daddr);
+		IRDA_DEBUG(1, "  nickname=%s\n", d->data.info);
+
+		if (strcmp(name, d->data.info) == 0) {
+			*saddr = d->data.saddr;
+			
+			spin_unlock_irqrestore(&cachelog->hb_spinlock, flags);
+			return d->data.daddr;
+		}
+		d = (discovery_t *) hashbin_get_next(cachelog);
+	}
+
+	spin_unlock_irqrestore(&cachelog->hb_spinlock, flags);
+
+	return 0;
 }
 
 #ifdef CONFIG_PROC_FS
@@ -324,26 +356,26 @@ static inline discovery_t *discovery_seq_idx(loff_t pos)
 {
 	discovery_t *discovery;
 
-	for (discovery = (discovery_t *) hashbin_get_first(irlmp->cachelog);
+	for (discovery = (discovery_t *) hashbin_get_first(irlmp->cachelog); 
 	     discovery != NULL;
 	     discovery = (discovery_t *) hashbin_get_next(irlmp->cachelog)) {
 		if (pos-- == 0)
 			break;
 	}
-
+		
 	return discovery;
 }
 
 static void *discovery_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	spin_lock_irq(&irlmp->cachelog->hb_spinlock);
-	return *pos ? discovery_seq_idx(*pos - 1) : SEQ_START_TOKEN;
+        return *pos ? discovery_seq_idx(*pos - 1) : SEQ_START_TOKEN;
 }
 
 static void *discovery_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	++*pos;
-	return (v == SEQ_START_TOKEN)
+	return (v == SEQ_START_TOKEN) 
 		? (void *) hashbin_get_first(irlmp->cachelog)
 		: (void *) hashbin_get_next(irlmp->cachelog);
 }
@@ -360,9 +392,9 @@ static int discovery_seq_show(struct seq_file *seq, void *v)
 	else {
 		const discovery_t *discovery = v;
 
-		seq_printf(seq, "nickname: %s, hint: 0x%02x%02x",
+		seq_printf(seq, "nickname: %s, hint: 0x%02x%02x", 
 			   discovery->data.info,
-			   discovery->data.hints[0],
+			   discovery->data.hints[0], 
 			   discovery->data.hints[1]);
 #if 0
 		if ( discovery->data.hints[0] & HINT_PNP)
@@ -379,26 +411,26 @@ static int discovery_seq_show(struct seq_file *seq, void *v)
 			seq_puts(seq, "Fax ");
 		if ( discovery->data.hints[0] & HINT_LAN)
 			seq_puts(seq, "LAN Access ");
-
+		
 		if ( discovery->data.hints[1] & HINT_TELEPHONY)
 			seq_puts(seq, "Telephony ");
 		if ( discovery->data.hints[1] & HINT_FILE_SERVER)
-			seq_puts(seq, "File Server ");
+			seq_puts(seq, "File Server ");       
 		if ( discovery->data.hints[1] & HINT_COMM)
 			seq_puts(seq, "IrCOMM ");
 		if ( discovery->data.hints[1] & HINT_OBEX)
 			seq_puts(seq, "IrOBEX ");
-#endif
+#endif		
 		seq_printf(seq,", saddr: 0x%08x, daddr: 0x%08x\n\n",
 			       discovery->data.saddr,
 			       discovery->data.daddr);
-
+		
 		seq_putc(seq, '\n');
 	}
 	return 0;
 }
 
-static const struct seq_operations discovery_seq_ops = {
+static struct seq_operations discovery_seq_ops = {
 	.start  = discovery_seq_start,
 	.next   = discovery_seq_next,
 	.stop   = discovery_seq_stop,
@@ -407,16 +439,16 @@ static const struct seq_operations discovery_seq_ops = {
 
 static int discovery_seq_open(struct inode *inode, struct file *file)
 {
-	IRDA_ASSERT(irlmp != NULL, return -EINVAL;);
+	ASSERT(irlmp != NULL, return -EINVAL;);
 
 	return seq_open(file, &discovery_seq_ops);
 }
 
-const struct file_operations discovery_seq_fops = {
+struct file_operations discovery_seq_fops = {
 	.owner		= THIS_MODULE,
 	.open           = discovery_seq_open,
 	.read           = seq_read,
 	.llseek         = seq_lseek,
-	.release	= seq_release,
+	.release	= seq_release_private,
 };
 #endif

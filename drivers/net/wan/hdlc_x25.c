@@ -2,67 +2,70 @@
  * Generic HDLC support routines for Linux
  * X.25 support
  *
- * Copyright (C) 1999 - 2006 Krzysztof Halasa <khc@pm.waw.pl>
+ * Copyright (C) 1999 - 2003 Krzysztof Halasa <khc@pm.waw.pl>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License
  * as published by the Free Software Foundation.
  */
 
-#include <linux/errno.h>
-#include <linux/gfp.h>
-#include <linux/hdlc.h>
-#include <linux/if_arp.h>
-#include <linux/inetdevice.h>
-#include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/lapb.h>
 #include <linux/module.h>
-#include <linux/pkt_sched.h>
+#include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/poll.h>
-#include <linux/rtnetlink.h>
+#include <linux/errno.h>
+#include <linux/if_arp.h>
+#include <linux/init.h>
 #include <linux/skbuff.h>
-#include <net/x25device.h>
-
-static int x25_ioctl(struct net_device *dev, struct ifreq *ifr);
+#include <linux/pkt_sched.h>
+#include <linux/inetdevice.h>
+#include <linux/lapb.h>
+#include <linux/rtnetlink.h>
+#include <linux/hdlc.h>
 
 /* These functions are callbacks called by LAPB layer */
 
-static void x25_connect_disconnect(struct net_device *dev, int reason, int code)
+static void x25_connect_disconnect(void *token, int reason, int code)
 {
+	hdlc_device *hdlc = token;
 	struct sk_buff *skb;
 	unsigned char *ptr;
 
 	if ((skb = dev_alloc_skb(1)) == NULL) {
-		printk(KERN_ERR "%s: out of memory\n", dev->name);
+		printk(KERN_ERR "%s: out of memory\n", hdlc_to_name(hdlc));
 		return;
 	}
 
 	ptr = skb_put(skb, 1);
 	*ptr = code;
 
-	skb->protocol = x25_type_trans(skb, dev);
+	skb->dev = hdlc_to_dev(hdlc);
+	skb->protocol = htons(ETH_P_X25);
+	skb->mac.raw = skb->data;
+	skb->pkt_type = PACKET_HOST;
+
 	netif_rx(skb);
 }
 
 
 
-static void x25_connected(struct net_device *dev, int reason)
+static void x25_connected(void *token, int reason)
 {
-	x25_connect_disconnect(dev, reason, X25_IFACE_CONNECT);
+	x25_connect_disconnect(token, reason, 1);
 }
 
 
 
-static void x25_disconnected(struct net_device *dev, int reason)
+static void x25_disconnected(void *token, int reason)
 {
-	x25_connect_disconnect(dev, reason, X25_IFACE_DISCONNECT);
+	x25_connect_disconnect(token, reason, 2);
 }
 
 
 
-static int x25_data_indication(struct net_device *dev, struct sk_buff *skb)
+static int x25_data_indication(void *token, struct sk_buff *skb)
 {
+	hdlc_device *hdlc = token;
 	unsigned char *ptr;
 
 	skb_push(skb, 1);
@@ -71,56 +74,61 @@ static int x25_data_indication(struct net_device *dev, struct sk_buff *skb)
 		return NET_RX_DROP;
 
 	ptr  = skb->data;
-	*ptr = X25_IFACE_DATA;
+	*ptr = 0;
 
-	skb->protocol = x25_type_trans(skb, dev);
+	skb->dev = hdlc_to_dev(hdlc);
+	skb->protocol = htons(ETH_P_X25);
+	skb->mac.raw = skb->data;
+	skb->pkt_type = PACKET_HOST;
+
 	return netif_rx(skb);
 }
 
 
 
-static void x25_data_transmit(struct net_device *dev, struct sk_buff *skb)
+static void x25_data_transmit(void *token, struct sk_buff *skb)
 {
-	hdlc_device *hdlc = dev_to_hdlc(dev);
-	hdlc->xmit(skb, dev); /* Ignore return value :-( */
+	hdlc_device *hdlc = token;
+	hdlc->xmit(skb, hdlc_to_dev(hdlc)); /* Ignore return value :-( */
 }
 
 
 
-static netdev_tx_t x25_xmit(struct sk_buff *skb, struct net_device *dev)
+static int x25_xmit(struct sk_buff *skb, struct net_device *dev)
 {
+	hdlc_device *hdlc = dev_to_hdlc(dev);
 	int result;
 
 
 	/* X.25 to LAPB */
 	switch (skb->data[0]) {
-	case X25_IFACE_DATA:	/* Data to be transmitted */
+	case 0:		/* Data to be transmitted */
 		skb_pull(skb, 1);
-		if ((result = lapb_data_request(dev, skb)) != LAPB_OK)
+		if ((result = lapb_data_request(hdlc, skb)) != LAPB_OK)
 			dev_kfree_skb(skb);
-		return NETDEV_TX_OK;
+		return 0;
 
-	case X25_IFACE_CONNECT:
-		if ((result = lapb_connect_request(dev))!= LAPB_OK) {
+	case 1:
+		if ((result = lapb_connect_request(hdlc))!= LAPB_OK) {
 			if (result == LAPB_CONNECTED)
 				/* Send connect confirm. msg to level 3 */
-				x25_connected(dev, 0);
+				x25_connected(hdlc, 0);
 			else
 				printk(KERN_ERR "%s: LAPB connect request "
 				       "failed, error code = %i\n",
-				       dev->name, result);
+				       hdlc_to_name(hdlc), result);
 		}
 		break;
 
-	case X25_IFACE_DISCONNECT:
-		if ((result = lapb_disconnect_request(dev)) != LAPB_OK) {
+	case 2:
+		if ((result = lapb_disconnect_request(hdlc)) != LAPB_OK) {
 			if (result == LAPB_NOTCONNECTED)
 				/* Send disconnect confirm. msg to level 3 */
-				x25_disconnected(dev, 0);
+				x25_disconnected(hdlc, 0);
 			else
 				printk(KERN_ERR "%s: LAPB disconnect request "
 				       "failed, error code = %i\n",
-				       dev->name, result);
+				       hdlc_to_name(hdlc), result);
 		}
 		break;
 
@@ -129,12 +137,12 @@ static netdev_tx_t x25_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	dev_kfree_skb(skb);
-	return NETDEV_TX_OK;
+	return 0;
 }
 
 
 
-static int x25_open(struct net_device *dev)
+static int x25_open(hdlc_device *hdlc)
 {
 	struct lapb_register_struct cb;
 	int result;
@@ -146,7 +154,7 @@ static int x25_open(struct net_device *dev)
 	cb.data_indication = x25_data_indication;
 	cb.data_transmit = x25_data_transmit;
 
-	result = lapb_register(dev, &cb);
+	result = lapb_register(hdlc, &cb);
 	if (result != LAPB_OK)
 		return result;
 	return 0;
@@ -154,92 +162,67 @@ static int x25_open(struct net_device *dev)
 
 
 
-static void x25_close(struct net_device *dev)
+static void x25_close(hdlc_device *hdlc)
 {
-	lapb_unregister(dev);
+	lapb_unregister(hdlc);
 }
 
 
 
 static int x25_rx(struct sk_buff *skb)
 {
-	struct net_device *dev = skb->dev;
+	hdlc_device *hdlc = dev_to_hdlc(skb->dev);
 
 	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL) {
-		dev->stats.rx_dropped++;
+		hdlc->stats.rx_dropped++;
 		return NET_RX_DROP;
 	}
 
-	if (lapb_data_received(dev, skb) == LAPB_OK)
+	if (lapb_data_received(hdlc, skb) == LAPB_OK)
 		return NET_RX_SUCCESS;
 
-	dev->stats.rx_errors++;
+	hdlc->stats.rx_errors++;
 	dev_kfree_skb_any(skb);
 	return NET_RX_DROP;
 }
 
 
-static struct hdlc_proto proto = {
-	.open		= x25_open,
-	.close		= x25_close,
-	.ioctl		= x25_ioctl,
-	.netif_rx	= x25_rx,
-	.xmit		= x25_xmit,
-	.module		= THIS_MODULE,
-};
 
-
-static int x25_ioctl(struct net_device *dev, struct ifreq *ifr)
+int hdlc_x25_ioctl(hdlc_device *hdlc, struct ifreq *ifr)
 {
-	hdlc_device *hdlc = dev_to_hdlc(dev);
+	struct net_device *dev = hdlc_to_dev(hdlc);
 	int result;
 
 	switch (ifr->ifr_settings.type) {
 	case IF_GET_PROTO:
-		if (dev_to_hdlc(dev)->proto != &proto)
-			return -EINVAL;
 		ifr->ifr_settings.type = IF_PROTO_X25;
 		return 0; /* return protocol only, no settable parameters */
 
 	case IF_PROTO_X25:
-		if (!capable(CAP_NET_ADMIN))
+		if(!capable(CAP_NET_ADMIN))
 			return -EPERM;
 
-		if (dev->flags & IFF_UP)
+		if(dev->flags & IFF_UP)
 			return -EBUSY;
 
-		result=hdlc->attach(dev, ENCODING_NRZ,PARITY_CRC16_PR1_CCITT);
+		result=hdlc->attach(hdlc, ENCODING_NRZ,PARITY_CRC16_PR1_CCITT);
 		if (result)
 			return result;
 
-		if ((result = attach_hdlc_protocol(dev, &proto, 0)))
-			return result;
+		hdlc_proto_detach(hdlc);
+		memset(&hdlc->proto, 0, sizeof(hdlc->proto));
+
+		hdlc->proto.open = x25_open;
+		hdlc->proto.close = x25_close;
+		hdlc->proto.netif_rx = x25_rx;
+		hdlc->proto.type_trans = NULL;
+		hdlc->proto.id = IF_PROTO_X25;
+		dev->hard_start_xmit = x25_xmit;
+		dev->hard_header = NULL;
 		dev->type = ARPHRD_X25;
-		netif_dormant_off(dev);
+		dev->addr_len = 0;
 		return 0;
 	}
 
 	return -EINVAL;
 }
-
-
-static int __init mod_init(void)
-{
-	register_hdlc_protocol(&proto);
-	return 0;
-}
-
-
-
-static void __exit mod_exit(void)
-{
-	unregister_hdlc_protocol(&proto);
-}
-
-
-module_init(mod_init);
-module_exit(mod_exit);
-
-MODULE_AUTHOR("Krzysztof Halasa <khc@pm.waw.pl>");
-MODULE_DESCRIPTION("X.25 protocol support for generic HDLC");
-MODULE_LICENSE("GPL v2");

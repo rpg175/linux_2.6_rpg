@@ -16,7 +16,7 @@
 #include <asm/errno.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
-#include <asm/asm-offsets.h>
+#include <asm/offset.h>
 #include <asm/regdef.h>
 
 	.macro	EX insn, reg, src
@@ -31,11 +31,11 @@
 
 	.set	noreorder
 	.set	mips3
-
+	/* Save floating point context */
 LEAF(_save_fp_context)
 	cfc1	t1, fcr31
 
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_MIPS64
 	/* Store the 16 odd double precision registers */
 	EX	sdc1 $f1, SC_FPREGS+8(a0)
 	EX	sdc1 $f3, SC_FPREGS+24(a0)
@@ -73,11 +73,14 @@ LEAF(_save_fp_context)
 	EX	sdc1 $f28, SC_FPREGS+224(a0)
 	EX	sdc1 $f30, SC_FPREGS+240(a0)
 	EX	sw t1, SC_FPC_CSR(a0)
+	cfc1	t0, $0				# implementation/version
+	EX	sw t0, SC_FPC_EIR(a0)
+
 	jr	ra
 	 li	v0, 0					# success
 	END(_save_fp_context)
 
-#ifdef CONFIG_MIPS32_COMPAT
+#ifdef CONFIG_MIPS64
 	/* Save 32-bit process floating point context */
 LEAF(_save_fp_context32)
 	cfc1	t1, fcr31
@@ -114,7 +117,7 @@ LEAF(_save_fp_context32)
  */
 LEAF(_restore_fp_context)
 	EX	lw t0, SC_FPC_CSR(a0)
-#ifdef CONFIG_64BIT
+#ifdef CONFIG_MIPS64
 	EX	ldc1 $f1, SC_FPREGS+8(a0)
 	EX	ldc1 $f3, SC_FPREGS+24(a0)
 	EX	ldc1 $f5, SC_FPREGS+40(a0)
@@ -153,7 +156,7 @@ LEAF(_restore_fp_context)
 	 li	v0, 0					# success
 	END(_restore_fp_context)
 
-#ifdef CONFIG_MIPS32_COMPAT
+#ifdef CONFIG_MIPS64
 LEAF(_restore_fp_context32)
 	/* Restore an o32 sigcontext.  */
 	EX	lw t0, SC32_FPC_CSR(a0)
@@ -177,9 +180,8 @@ LEAF(_restore_fp_context32)
 	jr	ra
 	 li	v0, 0					# success
 	END(_restore_fp_context32)
-#endif
-
 	.set	reorder
+#endif
 
 	.type	fault@function
 	.ent	fault

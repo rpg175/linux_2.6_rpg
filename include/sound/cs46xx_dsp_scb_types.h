@@ -1,6 +1,6 @@
 /*
  *  The driver for the Cirrus Logic's Sound Fusion CS46XX based soundcards
- *  Copyright (c) by Jaroslav Kysela <perex@perex.cz>
+ *  Copyright (c) by Jaroslav Kysela <perex@suse.cz>
  *
  *
  *   This program is free software; you can redistribute it and/or modify
@@ -41,7 +41,7 @@
 
 /* This structs are used internally by the SP */
 
-struct dsp_basic_dma_req {
+typedef struct _basic_dma_req_t {
 	/* DMA Requestor Word 0 (DCW)  fields:
 
 	   31 [30-28]27  [26:24] 23 22 21 20 [19:18] [17:16] 15 14 13  12  11 10 9 8 7 6  [5:0]
@@ -53,9 +53,9 @@ struct dsp_basic_dma_req {
 	u32 dmw;                 /* DMA Mode Word */
 	u32 saw;                 /* Source Address Word */
 	u32 daw;                 /* Destination Address Word  */
-};
+} basic_dma_req_t;
 
-struct dsp_scatter_gather_ext {
+typedef struct _scatter_gather_ext_t {
 	u32 npaw;                /* Next-Page Address Word */
 
 	/* DMA Requestor Word 5 (NPCW)  fields:
@@ -69,9 +69,9 @@ struct dsp_scatter_gather_ext {
 	u32 lbaw;                /* Loop-Begin Address Word */
 	u32 nplbaw;              /* Next-Page after Loop-Begin Address Word */
 	u32 sgaw;                /* Scatter/Gather Address Word */
-};
+} scatter_gather_ext_t;
 
-struct dsp_volume_control {
+typedef struct _volume_control_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	   rightTarg,  /* Target volume for left & right channels */
 	   leftTarg
@@ -80,10 +80,10 @@ struct dsp_volume_control {
 	   rightVol,   /* Current left & right channel volumes */
 	   leftVol
 	)
-};
+} volume_control_t;
 
 /* Generic stream control block (SCB) structure definition */
-struct dsp_generic_scb {
+typedef struct _generic_scb_t {
 	/* For streaming I/O, the DSP should never alter any words in the DMA
 	   requestor or the scatter/gather extension.  Only ad hoc DMA request
 	   streams are free to alter the requestor (currently only occur in the
@@ -99,13 +99,13 @@ struct dsp_generic_scb {
   
 	/* Initialized by the host, only modified by DMA 
 	   R/O for the DSP task */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
 
 	/* Scatter/gather DMA requestor extension   (5 ints) 
 	   Initialized by the host, only modified by DMA
 	   DSP task never needs to even read these.
 	*/
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 
 	/* Sublist pointer & next stream control block (SCB) link.
 	   Initialized & modified by the host R/O for the DSP task
@@ -179,11 +179,11 @@ struct dsp_generic_scb {
      
 	   These two 32-bit words are redefined for wavetable & 3-D voices.    
 	*/
-	struct dsp_volume_control vol_ctrl_t;   /* Optional */
-};
+	volume_control_t vol_ctrl_t;   /* Optional */
+} generic_scb_t;
 
 
-struct dsp_spos_control_block {
+typedef struct _spos_control_block_t {
 	/* WARNING: Certain items in this structure are modified by the host
 	            Any dword that can be modified by the host, must not be
 		    modified by the SP as the host can only do atomic dword
@@ -273,10 +273,10 @@ struct dsp_spos_control_block {
 	u32 r32_save_for_spurious_int;
 	u32 r32_save_for_trap;
 	u32 r32_save_for_HFG;
-};
+} spos_control_block_t;
 
 /* SPB for MIX_TO_OSTREAM algorithm family */
-struct dsp_mix2_ostream_spb
+typedef struct _mix2_ostream_spb_t
 {
 	/* 16b.16b integer.frac approximation to the
 	   number of 3 sample triplets to output each
@@ -290,13 +290,13 @@ struct dsp_mix2_ostream_spb
 	   output triplets since the start of group 
 	*/
 	u32 accumOutTriplets;  
-};
+} mix2_ostream_spb_t;
 
 /* SCB for Timing master algorithm */
-struct dsp_timing_master_scb {
+typedef struct _timing_master_scb_t {
 	/* First 12 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,     /* REQUIRED */
 	    sub_list_ptr  /* REQUIRED */
@@ -358,13 +358,13 @@ struct dsp_timing_master_scb {
 	   number of samples to output each frame.
 	   (approximation must be floor, to insure */
 	u32 nsamp_per_frm_q15;
-};
+} timing_master_scb_t;
 
 /* SCB for CODEC output algorithm */
-struct dsp_codec_output_scb {
+typedef struct _codec_output_scb_t {
 	/* First 13 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,       /* REQUIRED */
 	    sub_list_ptr    /* REQUIRED */
@@ -422,13 +422,13 @@ struct dsp_codec_output_scb {
 	    reserved,
 	    last_sub_ptr
 	)
-};
+} codec_output_scb_t;
 
 /* SCB for CODEC input algorithm */
-struct dsp_codec_input_scb {
+typedef struct _codec_input_scb_t {
 	/* First 13 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,       /* REQUIRED */
 	    sub_list_ptr    /* REQUIRED */
@@ -479,13 +479,13 @@ struct dsp_codec_input_scb {
 	)
 
 	u32  reserved2;
-};
+} codec_input_scb_t;
 
 
-struct dsp_pcm_serial_input_scb {
+typedef struct _pcm_serial_input_scb_t {
 	/* First 13 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,       /* REQUIRED */
 	    sub_list_ptr    /* REQUIRED */
@@ -512,11 +512,11 @@ struct dsp_pcm_serial_input_scb {
 	)
 
 	/* Initialized by the host (host updates target volumes) */
-	struct dsp_volume_control psi_vol_ctrl;   
+	volume_control_t psi_vol_ctrl;   
   
-};
+} pcm_serial_input_scb_t;
 
-struct dsp_src_task_scb {
+typedef struct _src_task_scb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	    frames_left_in_gof,
 	    gofs_left_in_sec
@@ -571,10 +571,10 @@ struct dsp_src_task_scb {
   
 	u32   phiIncr6int_26frac;
   
-	struct dsp_volume_control src_vol_ctrl;
-};
+	volume_control_t src_vol_ctrl;
+} src_task_scb_t;
 
-struct dsp_decimate_by_pow2_scb {
+typedef struct _decimate_by_pow2_scb_t {
 	/* decimationFactor = 2, 4, or 8 (larger factors waste too much memory
 	                                  when compared to cascading decimators)
 	*/
@@ -648,10 +648,10 @@ struct dsp_decimate_by_pow2_scb {
 
 	u32  dec2_reserved4;
 
-	struct dsp_volume_control dec2_vol_ctrl; /* Not used! */
-};
+	volume_control_t dec2_vol_ctrl; /* Not used! */
+} decimate_by_pow2_scb_t;
 
-struct dsp_vari_decimate_scb {
+typedef struct _vari_decimate_scb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	    vdec_frames_left_in_gof,
 	    vdec_gofs_left_in_sec
@@ -711,15 +711,15 @@ struct dsp_vari_decimate_scb {
 
 	u32 vdec_phi_incr_6int_26frac;
 
-	struct dsp_volume_control vdec_vol_ctrl;
-};
+	volume_control_t vdec_vol_ctrl;
+} vari_decimate_scb_t;
 
 
 /* SCB for MIX_TO_OSTREAM algorithm family */
-struct dsp_mix2_ostream_scb {
+typedef struct _mix2_ostream_scb_t {
 	/* First 13 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,       /* REQUIRED */
 	    sub_list_ptr    /* REQUIRED */
@@ -758,14 +758,14 @@ struct dsp_mix2_ostream_scb {
 	    const_FFFF,
 	    const_zero
 	)
-};
+} mix2_ostream_scb_t;
 
 
 /* SCB for S16_MIX algorithm */
-struct dsp_mix_only_scb {
+typedef struct _mix_only_scb_t {
 	/* First 13 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,       /* REQUIRED */
 	    sub_list_ptr    /* REQUIRED */
@@ -780,11 +780,11 @@ struct dsp_mix_only_scb {
 	u32 strm_buf_ptr;   /* REQUIRED */
 
 	u32 reserved;
-	struct dsp_volume_control vol_ctrl;
-};
+	volume_control_t vol_ctrl;
+} mix_only_scb_t;
 
 /* SCB for the async. CODEC input algorithm */
-struct dsp_async_codec_input_scb {
+typedef struct _async_codec_input_scb_t {		 
 	u32 io_free2;     
   
 	u32 io_current_total;
@@ -837,11 +837,11 @@ struct dsp_async_codec_input_scb {
 	)
 
 	u32 i_free;
-};
+} async_codec_input_scb_t;
 
 
 /* SCB for the SP/DIF CODEC input and output */
-struct dsp_spdifiscb {
+typedef struct _spdifiscb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	    status_ptr,     
 	    status_start_ptr
@@ -895,11 +895,12 @@ struct dsp_spdifiscb {
 	)
 
 	u32  free1;
-};
+} spdifiscb_t;
 
 
 /* SCB for the SP/DIF CODEC input and output  */
-struct dsp_spdifoscb {		 
+typedef struct _spdifoscb_t {		 
+
 
 	u32 free2;     
 
@@ -940,10 +941,11 @@ struct dsp_spdifoscb {
 	)
 
 	u32  free1;                                         
-};
+} spdifoscb_t;
 
 
-struct dsp_asynch_fg_rx_scb {
+
+typedef struct _asynch_fg_rx_scb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	    bot_buf_mask,
 	    buf_Mask
@@ -991,10 +993,11 @@ struct dsp_asynch_fg_rx_scb {
 	    right_vol,
 	    left_vol
 	)
-};
+} asynch_fg_rx_scb_t;
 
 
-struct dsp_asynch_fg_tx_scb {
+
+typedef struct _asynch_fg_tx_scb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	    not_buf_mask,
 	    buf_mask
@@ -1049,13 +1052,13 @@ struct dsp_asynch_fg_tx_scb {
 	    unused_right_vol,
 	    unused_left_vol
 	)
-};
+} asynch_fg_tx_scb_t;
 
 
-struct dsp_output_snoop_scb {
+typedef struct _output_snoop_scb_t {
 	/* First 13 dwords from generic_scb_t */
-	struct dsp_basic_dma_req  basic_req;  /* Optional */
-	struct dsp_scatter_gather_ext sg_ext;  /* Optional */
+	basic_dma_req_t  basic_req;  /* Optional */
+	scatter_gather_ext_t sg_ext;  /* Optional */
 	___DSP_DUAL_16BIT_ALLOC(
 	    next_scb,       /* REQUIRED */
 	    sub_list_ptr    /* REQUIRED */
@@ -1080,9 +1083,9 @@ struct dsp_output_snoop_scb {
 	    reserved,
 	    input_scb
 	)
-};
+} output_snoop_scb_t;
 
-struct dsp_spio_write_scb {
+typedef struct _spio_write_scb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	    address1,
 	    address2
@@ -1119,9 +1122,9 @@ struct dsp_spio_write_scb {
 	)
 
 	u32 unused3[5];
-};
+} spio_write_scb_t;
 
-struct dsp_magic_snoop_task {
+typedef struct _magic_snoop_task_t {
 	u32 i0;
 	u32 i1;
 
@@ -1152,11 +1155,11 @@ struct dsp_magic_snoop_task {
 
 	u32 i8;
 
-	struct dsp_volume_control vdec_vol_ctrl;
-};
+	volume_control_t vdec_vol_ctrl;
+} magic_snoop_task_t;
 
 
-struct dsp_filter_scb {
+typedef struct _filter_scb_t {
 	___DSP_DUAL_16BIT_ALLOC(
 	      a0_right,          /* 0x00 */
 	      a0_left
@@ -1209,5 +1212,5 @@ struct dsp_filter_scb {
               b2_right,          /* 0x0F */
 	      b2_left
 	)
-};
+} filter_scb_t;
 #endif /* __DSP_SCB_TYPES_H__ */

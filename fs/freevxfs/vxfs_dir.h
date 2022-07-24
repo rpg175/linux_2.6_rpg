@@ -30,6 +30,8 @@
 #ifndef _VXFS_DIR_H_
 #define _VXFS_DIR_H_
 
+#ident "$Id: vxfs_dir.h,v 1.7 2001/05/21 15:48:26 hch Exp hch $"
+
 /*
  * Veritas filesystem driver - directory structure.
  *
@@ -41,7 +43,7 @@
  * VxFS directory block header.
  *
  * This entry is the head of every filesystem block in a directory.
- * It is used for free space management and additionally includes
+ * It is used for free space managment and additionally includes
  * a hash for speeding up directory search (lookup).
  *
  * The hash may be empty and in fact we do not use it all in the
@@ -80,7 +82,7 @@ struct vxfs_direct {
  *	a d_name with size len.
  */
 #define VXFS_DIRPAD		4
-#define VXFS_NAMEMIN		offsetof(struct vxfs_direct, d_name)
+#define VXFS_NAMEMIN		((int)((struct vxfs_direct *)0)->d_name)
 #define VXFS_DIRROUND(len)	((VXFS_DIRPAD + (len) - 1) & ~(VXFS_DIRPAD -1))
 #define VXFS_DIRLEN(len)	(VXFS_DIRROUND(VXFS_NAMEMIN + (len)))
 

@@ -17,7 +17,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 
@@ -46,8 +46,6 @@
 #include <asm/assembly.h>
 #include <asm/pdc.h>
 
-#include <linux/linkage.h>
-
 	/*
 	 * stack for os_hpmc, the HPMC handler.
 	 * buffer for IODC procedures (for the HPMC handler).
@@ -55,13 +53,13 @@
 	 * IODC requires 7K byte stack.  That leaves 1K byte for os_hpmc.
 	 */
 
-	.align	PAGE_SIZE
+	.align 4096
 hpmc_stack:
 	.block 16384
 
 #define HPMC_IODC_BUF_SIZE 0x8000
 
-	.align	PAGE_SIZE
+	.align 4096
 hpmc_iodc_buf:
 	.block HPMC_IODC_BUF_SIZE
 
@@ -71,16 +69,17 @@ hpmc_raddr:
 
 #define HPMC_PIM_DATA_SIZE 896 /* Enough to hold all architected 2.0 state */
 
+	.export hpmc_pim_data, data
 	.align 8
-ENTRY(hpmc_pim_data)
+hpmc_pim_data:
 	.block HPMC_PIM_DATA_SIZE
-END(hpmc_pim_data)
 
 	.text
 
+	.export os_hpmc, code
 	.import intr_save, code
-ENTRY(os_hpmc)
-.os_hpmc:
+
+os_hpmc:
 
 	/*
 	 * registers modified:
@@ -122,7 +121,8 @@ ENTRY(os_hpmc)
 
 	/* Setup stack pointer. */
 
-	load32	PA(hpmc_stack),sp
+	ldil    L%PA(hpmc_stack),sp
+	ldo     R%PA(hpmc_stack)(sp),sp
 	
 	ldo     128(sp),sp /* leave room for arguments */
 
@@ -135,7 +135,8 @@ ENTRY(os_hpmc)
 	mtctl   %r4,ipsw
 	mtctl   %r0,pcsq
 	mtctl   %r0,pcsq
-	load32	PA(os_hpmc_1),%r4
+	ldil    L%PA(os_hpmc_1),%r4
+	ldo     R%PA(os_hpmc_1)(%r4),%r4
 	mtctl   %r4,pcoq
 	ldo     4(%r4),%r4
 	mtctl   %r4,pcoq
@@ -154,9 +155,12 @@ os_hpmc_1:
 
 	ldo     PDC_PIM(%r0), arg0
 	ldo     PDC_PIM_HPMC(%r0),arg1          /* Transfer HPMC data */
-	load32	PA(hpmc_raddr),arg2
-	load32	PA(hpmc_pim_data),arg3
-	load32	HPMC_PIM_DATA_SIZE,%r4
+	ldil    L%PA(hpmc_raddr),arg2
+	ldo     R%PA(hpmc_raddr)(arg2),arg2
+	ldil    L%PA(hpmc_pim_data),arg3
+	ldo     R%PA(hpmc_pim_data)(arg3),arg3
+	ldil    L%HPMC_PIM_DATA_SIZE,%r4
+	ldo     R%HPMC_PIM_DATA_SIZE(%r4),%r4
 	stw     %r4,-52(sp)
 
 	ldil    L%PA(os_hpmc_2), rp
@@ -195,13 +199,16 @@ os_hpmc_3:
 
 	ldo     PDC_IODC(%r0),arg0
 	ldo     PDC_IODC_READ(%r0),arg1
-	load32	PA(hpmc_raddr),arg2
+	ldil    L%PA(hpmc_raddr),arg2
+	ldo     R%PA(hpmc_raddr)(arg2),arg2
 	ldw     BOOT_CONSOLE_HPA_OFFSET(%r0),arg3 /* console hpa */
 	ldo     PDC_IODC_RI_INIT(%r0),%r4
 	stw     %r4,-52(sp)
-	load32	PA(hpmc_iodc_buf),%r4
+	ldil    L%PA(hpmc_iodc_buf),%r4
+	ldo     R%PA(hpmc_iodc_buf)(%r4),%r4
 	stw     %r4,-56(sp)
-	load32	HPMC_IODC_BUF_SIZE,%r4
+	ldil    L%HPMC_IODC_BUF_SIZE,%r4
+	ldo     R%HPMC_IODC_BUF_SIZE(%r4),%r4
 	stw     %r4,-60(sp)
 
 	ldil    L%PA(os_hpmc_4),rp
@@ -218,14 +225,16 @@ os_hpmc_4:
 	ldw     BOOT_CONSOLE_SPA_OFFSET(%r0),arg2  /* console spa */
 	depi    0,31,11,arg2                       /* clear bits 21-31    */
 	ldo     BOOT_CONSOLE_PATH_OFFSET(%r0),arg3 /* console path */
-	load32	PA(hpmc_raddr),%r4
+	ldil    L%PA(hpmc_raddr),%r4
+	ldo     R%PA(hpmc_raddr)(%r4),%r4
 	stw     %r4, -52(sp)
 	stw     %r0, -56(sp)                    /* HV                  */
 	stw     %r0, -60(sp)                    /* HV                  */
 	stw     %r0, -64(sp)                    /* HV                  */
 	stw     %r0, -68(sp)                    /* lang, must be zero  */
 
-	load32	PA(hpmc_iodc_buf),%r5
+	ldil    L%PA(hpmc_iodc_buf),%r5
+	ldo     R%PA(hpmc_iodc_buf)(%r5),%r5
 	ldil    L%PA(os_hpmc_5),rp
 	bv      (%r5)
 	ldo     R%PA(os_hpmc_5)(rp),rp
@@ -240,7 +249,8 @@ os_hpmc_5:
 	 * we don't intend to ever return to user land anyway)
 	 */
 
-	load32		PA(swapper_pg_dir),%r4
+	ldil		L%PA(swapper_pg_dir),%r4
+	ldo		R%PA(swapper_pg_dir)(%r4),%r4
 	mtctl		%r4,%cr24	/* Initialize kernel root pointer */
 	mtctl		%r4,%cr25	/* Initialize user root pointer */
 
@@ -255,7 +265,8 @@ os_hpmc_5:
 
 	rsm 8,%r0           /* Clear Q bit */
 	ldi     1,%r8       /* Set trap code to "1" for HPMC */
-	load32	PA(intr_save),%r1
+	ldil    L%PA(intr_save), %r1
+	ldo     R%PA(intr_save)(%r1), %r1
 	be      0(%sr7,%r1)
 	nop
 
@@ -295,11 +306,11 @@ os_hpmc_6:
 
 	b .
 	nop
-ENDPROC(os_hpmc)
-.os_hpmc_end:
+
+	/* this label used to compute os_hpmc checksum */
+
+	.export os_hpmc_end, code
+
+os_hpmc_end:
+
 	nop
-.data
-.align 4
-	.export os_hpmc_size
-os_hpmc_size:
-	.word .os_hpmc_end-.os_hpmc

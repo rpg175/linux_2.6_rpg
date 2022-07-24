@@ -50,20 +50,20 @@ static int block_to_path(struct inode *inode, long block, int offsets[DEPTH])
 	return n;
 }
 
-static inline int block_to_cpu(struct sysv_sb_info *sbi, sysv_zone_t nr)
+static inline int block_to_cpu(struct sysv_sb_info *sbi, u32 nr)
 {
 	return sbi->s_block_base + fs32_to_cpu(sbi, nr);
 }
 
 typedef struct {
-	sysv_zone_t     *p;
-	sysv_zone_t     key;
+	u32     *p;
+	u32     key;
 	struct buffer_head *bh;
 } Indirect;
 
-static DEFINE_RWLOCK(pointers_lock);
+static rwlock_t pointers_lock = RW_LOCK_UNLOCKED;
 
-static inline void add_chain(Indirect *p, struct buffer_head *bh, sysv_zone_t *v)
+static inline void add_chain(Indirect *p, struct buffer_head *bh, u32 *v)
 {
 	p->key = *(p->p = v);
 	p->bh = bh;
@@ -76,14 +76,11 @@ static inline int verify_chain(Indirect *from, Indirect *to)
 	return (from > to);
 }
 
-static inline sysv_zone_t *block_end(struct buffer_head *bh)
+static inline u32 *block_end(struct buffer_head *bh)
 {
-	return (sysv_zone_t*)((char*)bh->b_data + bh->b_size);
+	return (u32*)((char*)bh->b_data + bh->b_size);
 }
 
-/*
- * Requires read_lock(&pointers_lock) or write_lock(&pointers_lock)
- */
 static Indirect *get_branch(struct inode *inode,
 			    int depth,
 			    int offsets[],
@@ -103,15 +100,18 @@ static Indirect *get_branch(struct inode *inode,
 		bh = sb_bread(sb, block);
 		if (!bh)
 			goto failure;
+		read_lock(&pointers_lock);
 		if (!verify_chain(chain, p))
 			goto changed;
-		add_chain(++p, bh, (sysv_zone_t*)bh->b_data + *++offsets);
+		add_chain(++p, bh, (u32*)bh->b_data + *++offsets);
+		read_unlock(&pointers_lock);
 		if (!p->key)
 			goto no_block;
 	}
 	return NULL;
 
 changed:
+	read_unlock(&pointers_lock);
 	brelse(bh);
 	*err = -EAGAIN;
 	goto no_block;
@@ -147,7 +147,7 @@ static int alloc_branch(struct inode *inode,
 		lock_buffer(bh);
 		memset(bh->b_data, 0, blocksize);
 		branch[n].bh = bh;
-		branch[n].p = (sysv_zone_t*) bh->b_data + offsets[n];
+		branch[n].p = (u32*) bh->b_data + offsets[n];
 		*branch[n].p = branch[n].key;
 		set_buffer_uptodate(bh);
 		unlock_buffer(bh);
@@ -178,7 +178,7 @@ static inline int splice_branch(struct inode *inode,
 	*where->p = where->key;
 	write_unlock(&pointers_lock);
 
-	inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_ctime = CURRENT_TIME;
 
 	/* had we spliced it onto indirect block? */
 	if (where->bh)
@@ -213,9 +213,7 @@ static int get_block(struct inode *inode, sector_t iblock, struct buffer_head *b
 		goto out;
 
 reread:
-	read_lock(&pointers_lock);
 	partial = get_branch(inode, depth, offsets, chain, &err);
-	read_unlock(&pointers_lock);
 
 	/* Simplest case - block found, no allocation needed */
 	if (!partial) {
@@ -265,7 +263,7 @@ changed:
 	goto reread;
 }
 
-static inline int all_zeroes(sysv_zone_t *p, sysv_zone_t *q)
+static inline int all_zeroes(u32 *p, u32 *q)
 {
 	while (p < q)
 		if (*p++)
@@ -277,7 +275,7 @@ static Indirect *find_shared(struct inode *inode,
 				int depth,
 				int offsets[],
 				Indirect chain[],
-				sysv_zone_t *top)
+				u32 *top)
 {
 	Indirect *partial, *p;
 	int k, err;
@@ -298,7 +296,7 @@ static Indirect *find_shared(struct inode *inode,
 		write_unlock(&pointers_lock);
 		goto no_top;
 	}
-	for (p=partial; p>chain && all_zeroes((sysv_zone_t*)p->bh->b_data,p->p); p--)
+	for (p=partial; p>chain && all_zeroes((u32*)p->bh->b_data,p->p); p--)
 		;
 	/*
 	 * OK, we've found the last block that must survive. The rest of our
@@ -322,10 +320,10 @@ no_top:
 	return partial;
 }
 
-static inline void free_data(struct inode *inode, sysv_zone_t *p, sysv_zone_t *q)
+static inline void free_data(struct inode *inode, u32 *p, u32 *q)
 {
 	for ( ; p < q ; p++) {
-		sysv_zone_t nr = *p;
+		u32 nr = *p;
 		if (nr) {
 			*p = 0;
 			sysv_free_block(inode->i_sb, nr);
@@ -334,7 +332,7 @@ static inline void free_data(struct inode *inode, sysv_zone_t *p, sysv_zone_t *q
 	}
 }
 
-static void free_branches(struct inode *inode, sysv_zone_t *p, sysv_zone_t *q, int depth)
+static void free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 {
 	struct buffer_head * bh;
 	struct super_block *sb = inode->i_sb;
@@ -342,7 +340,7 @@ static void free_branches(struct inode *inode, sysv_zone_t *p, sysv_zone_t *q, i
 	if (depth--) {
 		for ( ; p < q ; p++) {
 			int block;
-			sysv_zone_t nr = *p;
+			u32 nr = *p;
 			if (!nr)
 				continue;
 			*p = 0;
@@ -350,7 +348,7 @@ static void free_branches(struct inode *inode, sysv_zone_t *p, sysv_zone_t *q, i
 			bh = sb_bread(sb, block);
 			if (!bh)
 				continue;
-			free_branches(inode, (sysv_zone_t*)bh->b_data,
+			free_branches(inode, (u32*)bh->b_data,
 					block_end(bh), depth);
 			bforget(bh);
 			sysv_free_block(sb, nr);
@@ -362,11 +360,11 @@ static void free_branches(struct inode *inode, sysv_zone_t *p, sysv_zone_t *q, i
 
 void sysv_truncate (struct inode * inode)
 {
-	sysv_zone_t *i_data = SYSV_I(inode)->i_data;
+	u32 *i_data = SYSV_I(inode)->i_data;
 	int offsets[DEPTH];
 	Indirect chain[DEPTH];
 	Indirect *partial;
-	sysv_zone_t nr = 0;
+	int nr = 0;
 	int n;
 	long iblock;
 	unsigned blocksize;
@@ -418,7 +416,7 @@ do_indirects:
 		}
 		n++;
 	}
-	inode->i_mtime = inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	if (IS_SYNC(inode))
 		sysv_sync_inode (inode);
 	else
@@ -453,42 +451,23 @@ static int sysv_writepage(struct page *page, struct writeback_control *wbc)
 {
 	return block_write_full_page(page,get_block,wbc);
 }
-
 static int sysv_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,get_block);
 }
-
-int sysv_prepare_chunk(struct page *page, loff_t pos, unsigned len)
+static int sysv_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
-	return __block_write_begin(page, pos, len, get_block);
+	return block_prepare_write(page,from,to,get_block);
 }
-
-static int sysv_write_begin(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned flags,
-			struct page **pagep, void **fsdata)
-{
-	int ret;
-
-	ret = block_write_begin(mapping, pos, len, flags, pagep, get_block);
-	if (unlikely(ret)) {
-		loff_t isize = mapping->host->i_size;
-		if (pos + len > isize)
-			vmtruncate(mapping->host, isize);
-	}
-
-	return ret;
-}
-
 static sector_t sysv_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,get_block);
 }
-
-const struct address_space_operations sysv_aops = {
+struct address_space_operations sysv_aops = {
 	.readpage = sysv_readpage,
 	.writepage = sysv_writepage,
-	.write_begin = sysv_write_begin,
-	.write_end = generic_write_end,
+	.sync_page = block_sync_page,
+	.prepare_write = sysv_prepare_write,
+	.commit_write = generic_commit_write,
 	.bmap = sysv_bmap
 };
