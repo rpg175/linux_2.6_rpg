@@ -14,8 +14,8 @@ typedef struct kmem_cache_s kmem_cache_t;
 #include	<linux/config.h>	/* kmalloc_sizes.h needs CONFIG_ options */
 #include	<linux/gfp.h>
 #include	<linux/types.h>
-#include	<asm/page.h>		/* kmalloc_sizes.h needs PAGE_SIZE */
-#include	<asm/cache.h>		/* kmalloc_sizes.h needs L1_CACHE_BYTES */
+#include	<asm-x86_64/page.h>		/* kmalloc_sizes.h needs PAGE_SIZE */
+#include	<asm-x86_64/cache.h>		/* kmalloc_sizes.h needs L1_CACHE_BYTES */
 
 /* flags for kmem_cache_alloc() */
 #define	SLAB_NOFS		GFP_NOFS

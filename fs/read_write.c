@@ -15,6 +15,7 @@
 #include <linux/module.h>
 
 #include <asm/uaccess.h>
+#include <asm-generic/errno.h>
 
 struct file_operations generic_ro_fops = {
 	.llseek		= generic_file_llseek,
